@@ -1,0 +1,6 @@
+CamusDB.Client/bin
+CamusDB.Client/obj
+CamusDB.Client/.vs
+CamusDB.Client.Tests/bin
+CamusDB.Client.Tests/obj
+CamusDB.Client.Tests/.vs
