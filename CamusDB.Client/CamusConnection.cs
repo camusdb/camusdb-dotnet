@@ -81,8 +81,13 @@ public sealed class CamusConnection : DbConnection
         return new CamusInsertCommand(source, builder);
     }
 
+    public CamusCommand CreateSelectCommand(string sql)
+    {
+        return new CamusCommand(sql, builder);
+    }
+
     public CamusPingCommand CreatePingCommand()
     {
         return new CamusPingCommand("", builder);
-    }    
+    }
 }

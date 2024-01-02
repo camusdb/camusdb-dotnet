@@ -1,9 +1,23 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
-    <PropertyGroup>
-        <TargetFramework>net7.0</TargetFramework>
+    <PropertyGroup>        
         <ImplicitUsings>enable</ImplicitUsings>
         <Nullable>enable</Nullable>
+        <TargetFrameworks>net6.0;net7.0;net8.0</TargetFrameworks>    
+        <ImplicitUsings>enable</ImplicitUsings>
+        <Nullable>enable</Nullable>
+        <PackageId>CamusDB.Client</PackageId>
+        <Version>0.0.2-alpha</Version>
+        <Description>CamusDB.Client is the ADO.NET provider for CamusDB. It is the recommended package for regular CamusDB database access from .NET.</Description>
+        <Authors>CamusDB</Authors>
+        <Company>CamusDB</Company>    
+        <InvariantGlobalization>true</InvariantGlobalization>
+        <PackageLicenseExpression>MIT</PackageLicenseExpression>
+        <PackageDescription>CamusDB.Client is the ADO.NET provider for CamusDB</PackageDescription>
+        <PackageProjectUrl>https://github.com/camusdb/camusdb-dotnet</PackageProjectUrl>
+        <RepositoryUrl>https://github.com/camusdb/camusdb-dotnet</RepositoryUrl>
+        <PackageReadmeFile>README.md</PackageReadmeFile>
+        <PackageTags>dotnet;camusdb;ADO;database</PackageTags>
     </PropertyGroup>
 
     <ItemGroup>
@@ -11,6 +25,13 @@
         <PackageReference Include="Flurl.Http" Version="3.2.4" />
         <PackageReference Include="Polly" Version="7.2.4" />
         <PackageReference Include="Polly.Contrib.WaitAndRetry" Version="1.1.1" />
+    </ItemGroup>
+
+    <ItemGroup>
+        <None Include="../README.md">
+        <Pack>True</Pack>
+        <PackagePath>\</PackagePath>
+        </None>
     </ItemGroup>
 
 </Project>

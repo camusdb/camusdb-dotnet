@@ -7,8 +7,18 @@
  */
 
 using Flurl.Http;
+using Newtonsoft.Json;
 
 namespace CamusDB.Client;
+
+internal sealed class ExecuteSqlNonQueryResponse
+{
+    [JsonProperty("status")]
+    public string? Status { get; set; }
+
+    [JsonProperty("rows")]
+    public int Rows { get; set; }
+}
 
 public class CamusInsertCommand : CamusCommand
 {
@@ -20,30 +30,26 @@ public class CamusInsertCommand : CamusCommand
     /// <inheritdoc />
     public override async Task<int> ExecuteNonQueryAsync(CancellationToken cancellationToken)
     {
-        string endpoint = builder.Config["Endpoint"];
-        string database = builder.Config["Database"];
-
-        Dictionary<string, ColumnValue> commandParameters = new(Parameters.Count);
-
-        foreach (CamusParameter parameter in Parameters)
+        try
         {
-            if (parameter.ColumnType == ColumnType.Id || parameter.ColumnType == ColumnType.String)
-                commandParameters.Add(parameter.ParameterName ?? "", new() { Type = parameter.ColumnType, StrValue = parameter.Value!.ToString() });
-            else if (parameter.ColumnType == ColumnType.Integer64)
-                commandParameters.Add(parameter.ParameterName ?? "", new() { Type = parameter.ColumnType, LongValue = (long)parameter.Value! });
-            else if (parameter.ColumnType == ColumnType.Bool)
-                commandParameters.Add(parameter.ParameterName ?? "", new() { Type = parameter.ColumnType, BoolValue = (bool)parameter.Value! });
+            string endpoint = builder.Config["Endpoint"];
+            string database = builder.Config["Database"];
 
+            Dictionary<string, ColumnValue> commandParameters = GetCommandParameters();
+
+            ExecuteSqlNonQueryResponse response = await endpoint
+                                                    .WithTimeout(CommandTimeout)
+                                                    .AppendPathSegments("insert")
+                                                    .PostJsonAsync(new { databaseName = database, tableName = source, values = commandParameters })
+                                                    .ReceiveJson<ExecuteSqlNonQueryResponse>();            
+
+            return response.Rows;
         }
+        catch (FlurlHttpException ex)
+        {
+            var response = await ex.GetResponseStringAsync();
 
-        var response = await endpoint
-                                .WithTimeout(CommandTimeout)
-                                .AppendPathSegments("insert")
-                                .PostJsonAsync(new { databaseName = database, tableName = source, values = commandParameters })
-                                .ReceiveString();
-
-        Console.WriteLine(response);
-
-        return 1;
+            throw new CamusException(response);
+        }
     }
 }

@@ -7,7 +7,6 @@
  */
 
 using System.Security;
-using System.Threading;
 using System.Runtime.CompilerServices;
 
 namespace CamusDB.Core.Util.ObjectIds;
@@ -23,7 +22,7 @@ namespace CamusDB.Core.Util.ObjectIds;
  * 
  * https://docs.mongodb.com/manual/reference/method/ObjectId/
  */
-public sealed class ObjectIdGenerator
+public sealed class CamusObjectIdGenerator
 {
     private static readonly int __staticMachine = (GetMachineHash() + GetAppDomainId()) & 0x00ffffff;
 
@@ -88,7 +87,7 @@ public sealed class ObjectIdGenerator
         return (int)((dateTime.ToUniversalTime() - epoch).TotalSeconds);
     }    
 
-    public static ObjectIdValue Generate()
+    public static CamusObjectIdValue Generate()
     {
         int pid = __staticPid;
         int machine = __staticMachine;
@@ -105,7 +104,6 @@ public sealed class ObjectIdGenerator
         int _b = (machine << 8) | (((int)pid >> 8) & 0xff);
         int _c = ((int)pid << 24) | increment;        
 
-        return new ObjectIdValue(a: _a, b: _b, c: _c);
+        return new CamusObjectIdValue(a: _a, b: _b, c: _c);
     }    
 }
-

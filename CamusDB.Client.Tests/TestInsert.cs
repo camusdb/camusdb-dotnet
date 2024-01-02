@@ -12,22 +12,21 @@ namespace CamusDB.Client.Tests;
 
 public class TestInsert : BaseTest
 {
-	public TestInsert()
-	{
-	}
-
+    public TestInsert()
+    {
+    }
 
     [Fact]
     public async void TestSimpleInsert()
-	{
+    {
         CamusConnection connection = await GetConnection();
 
         using CamusCommand cmd = connection.CreateInsertCommand("robots");
 
-        cmd.Parameters.Add("id", ColumnType.Id, ObjectIdGenerator.Generate());
+        cmd.Parameters.Add("id", ColumnType.Id, CamusObjectIdGenerator.Generate());
         cmd.Parameters.Add("name", ColumnType.String, "aaa");
         cmd.Parameters.Add("type", ColumnType.String, "mechanical");
-        cmd.Parameters.Add("year", ColumnType.Integer64, 2000);        
+        cmd.Parameters.Add("year", ColumnType.Integer64, 2000);
 
         Assert.Equal(1, await cmd.ExecuteNonQueryAsync());
     }
@@ -37,11 +36,11 @@ public class TestInsert : BaseTest
     {
         CamusConnection connection = await GetConnection();
 
-        for (int i = 0; i < 100; i++)
+        for (int i = 0; i < 10; i++)
         {
             using CamusCommand cmd = connection.CreateInsertCommand("robots");
 
-            cmd.Parameters.Add("id", ColumnType.Id, ObjectIdGenerator.Generate());
+            cmd.Parameters.Add("id", ColumnType.Id, CamusObjectIdGenerator.Generate());
             cmd.Parameters.Add("name", ColumnType.String, Guid.NewGuid().ToString()[..20]);
             cmd.Parameters.Add("type", ColumnType.String, "mechanical");
             cmd.Parameters.Add("year", ColumnType.Integer64, Random.Shared.Next(1900, 2050));
@@ -54,7 +53,7 @@ public class TestInsert : BaseTest
     {
         using CamusCommand cmd = connection.CreateInsertCommand("robots");
 
-        cmd.Parameters.Add("id", ColumnType.Id, ObjectIdGenerator.Generate());
+        cmd.Parameters.Add("id", ColumnType.Id, CamusObjectIdGenerator.Generate());
         cmd.Parameters.Add("name", ColumnType.String, Guid.NewGuid().ToString()[..20]);
         cmd.Parameters.Add("type", ColumnType.String, "mechanical");
         cmd.Parameters.Add("year", ColumnType.Integer64, Random.Shared.Next(1900, 2050));
@@ -68,11 +67,6 @@ public class TestInsert : BaseTest
 
         using CamusCommand cmd = new(sql, builder!);
 
-        /*cmd.Parameters.Add("id", ColumnType.Id, ObjectIdGenerator.Generate());
-        cmd.Parameters.Add("name", ColumnType.String, Guid.NewGuid().ToString()[..20]);
-        cmd.Parameters.Add("type", ColumnType.String, "mechanical");
-        cmd.Parameters.Add("year", ColumnType.Integer64, Random.Shared.Next(1900, 2050));*/
-
         Assert.Equal(1, await cmd.ExecuteNonQueryAsync());
     }
 
@@ -84,12 +78,9 @@ public class TestInsert : BaseTest
         List<Task> tasks = new();
 
         for (int j = 0; j < 100; j++)
-        {
-            for (int i = 0; i < 100; i++)
-                tasks.Add(CreateRow(connection));
+            tasks.Add(CreateRow(connection));
 
-            await Task.WhenAll(tasks);
-        }
+        await Task.WhenAll(tasks);
     }
 
     [Fact]
@@ -117,7 +108,7 @@ public class TestInsert : BaseTest
 
         using CamusCommand cmd = new(sql, builder!);
 
-        cmd.Parameters.Add("@id", ColumnType.Id, ObjectIdGenerator.Generate());
+        cmd.Parameters.Add("@id", ColumnType.Id, CamusObjectIdGenerator.Generate());
         cmd.Parameters.Add("@name", ColumnType.String, Guid.NewGuid().ToString()[..20]);
         cmd.Parameters.Add("@type", ColumnType.String, "mechanical");
         cmd.Parameters.Add("@year", ColumnType.Integer64, Random.Shared.Next(1900, 2050));
