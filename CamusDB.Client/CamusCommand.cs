@@ -36,7 +36,7 @@ public class CamusCommand : DbCommand, ICloneable
     /// </summary>
     public new CamusParameterCollection Parameters { get; } = new CamusParameterCollection();
 
-    public override string CommandText { get => throw new NotImplementedException(); set => throw new NotImplementedException(); }
+    public override string CommandText { get; set; } = "";
 
     public override int CommandTimeout { get; set; } = 10;
 
@@ -71,17 +71,17 @@ public class CamusCommand : DbCommand, ICloneable
     public override async Task<int> ExecuteNonQueryAsync(CancellationToken cancellationToken)
     {
         string endpoint = builder.Config["Endpoint"];
-        string database = builder.Config["Database"];        
+        string database = builder.Config["Database"];
 
-        Dictionary<string, ColumnValue> columnValues = new(Parameters.Count);
+        /*Dictionary<string, ColumnValue> columnValues = new(Parameters.Count);
 
         foreach (CamusParameter x in Parameters)
-            columnValues.Add(x.ParameterName ?? "", new() { Type = x.ColumnType, Value = x.Value!.ToString() });
+            columnValues.Add(x.ParameterName ?? "", new() { Type = x.ColumnType, Value = x.Value!.ToString() });*/
 
         var response = await endpoint
                                 .WithTimeout(10)
-                                .AppendPathSegments("insert")
-                                .PostJsonAsync(new { databaseName = database, tableName = source, values = columnValues })
+                                .AppendPathSegments("execute-non-sql-query")
+                                .PostJsonAsync(new { databaseName = database, sql = source })
                                 .ReceiveString();
 
         Console.WriteLine(response);

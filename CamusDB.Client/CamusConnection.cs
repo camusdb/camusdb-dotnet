@@ -59,7 +59,7 @@ public sealed class CamusConnection : DbConnection
     //    await Task.Delay(1);
     //}
 
-    protected override DbTransaction BeginDbTransaction(System.Data.IsolationLevel isolationLevel)
+    protected override DbTransaction BeginDbTransaction(IsolationLevel isolationLevel)
     {
         throw new NotImplementedException();
     }
@@ -77,5 +77,5 @@ public sealed class CamusConnection : DbConnection
     public CamusPingCommand CreatePingCommand()
     {
         return new CamusPingCommand("", builder);
-    }
+    }    
 }
