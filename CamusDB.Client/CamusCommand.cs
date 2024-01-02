@@ -73,15 +73,25 @@ public class CamusCommand : DbCommand, ICloneable
         string endpoint = builder.Config["Endpoint"];
         string database = builder.Config["Database"];
 
-        /*Dictionary<string, ColumnValue> columnValues = new(Parameters.Count);
+        Dictionary<string, ColumnValue> commandParameters = new(Parameters.Count);
 
-        foreach (CamusParameter x in Parameters)
-            columnValues.Add(x.ParameterName ?? "", new() { Type = x.ColumnType, Value = x.Value!.ToString() });*/
+        foreach (CamusParameter parameter in Parameters)
+        {
+            if (parameter.ColumnType == ColumnType.Id || parameter.ColumnType == ColumnType.String)
+                commandParameters.Add(parameter.ParameterName ?? "", new() { Type = parameter.ColumnType, StrValue = parameter.Value!.ToString() });
+            else if (parameter.ColumnType == ColumnType.Integer64 && parameter.Value is int)
+                commandParameters.Add(parameter.ParameterName ?? "", new() { Type = parameter.ColumnType, LongValue = (int)parameter.Value! });
+            else if (parameter.ColumnType == ColumnType.Integer64 && parameter.Value is long)
+                commandParameters.Add(parameter.ParameterName ?? "", new() { Type = parameter.ColumnType, LongValue = (long)parameter.Value! });
+            else if (parameter.ColumnType == ColumnType.Bool)
+                commandParameters.Add(parameter.ParameterName ?? "", new() { Type = parameter.ColumnType, BoolValue = (bool)parameter.Value! });
+
+        }
 
         var response = await endpoint
-                                .WithTimeout(10)
-                                .AppendPathSegments("execute-non-sql-query")
-                                .PostJsonAsync(new { databaseName = database, sql = source })
+                                .WithTimeout(CommandTimeout)
+                                .AppendPathSegments("execute-sql-non-query")
+                                .PostJsonAsync(new { databaseName = database, sql = source, parameters = commandParameters })
                                 .ReceiveString();
 
         Console.WriteLine(response);

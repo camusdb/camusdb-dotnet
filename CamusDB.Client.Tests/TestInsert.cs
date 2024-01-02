@@ -59,7 +59,7 @@ public class TestInsert : BaseTest
     {
         string sql = "INSERT INTO robots (id, name, year, type) VALUES (GEN_ID(), \"optimus prime\", 2017, \"transformer\")";
 
-        using CamusCommand cmd = new CamusCommand(sql, builder!);
+        using CamusCommand cmd = new(sql, builder!);
 
         /*cmd.Parameters.Add("id", ColumnType.Id, ObjectIdGenerator.Generate());
         cmd.Parameters.Add("name", ColumnType.String, Guid.NewGuid().ToString()[..20]);
@@ -99,5 +99,22 @@ public class TestInsert : BaseTest
 
             await Task.WhenAll(tasks);
         }
+    }
+
+    [Fact]
+    public async void TestBasicInsert()
+    {
+        CamusConnection connection = await GetConnection();
+
+        string sql = "INSERT INTO robots (id, name, year, type) VALUES (GEN_ID(), @name, @year, @type)";
+
+        using CamusCommand cmd = new(sql, builder!);
+
+        cmd.Parameters.Add("@id", ColumnType.Id, ObjectIdGenerator.Generate());
+        cmd.Parameters.Add("@name", ColumnType.String, Guid.NewGuid().ToString()[..20]);
+        cmd.Parameters.Add("@type", ColumnType.String, "mechanical");
+        cmd.Parameters.Add("@year", ColumnType.Integer64, Random.Shared.Next(1900, 2050));
+
+        Assert.Equal(1, await cmd.ExecuteNonQueryAsync());
     }
 }

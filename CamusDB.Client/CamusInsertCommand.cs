@@ -14,20 +14,25 @@ public class CamusInsertCommand : CamusCommand
     public override async Task<int> ExecuteNonQueryAsync(CancellationToken cancellationToken)
     {
         string endpoint = builder.Config["Endpoint"];
-        string database = builder.Config["Database"];        
+        string database = builder.Config["Database"];
 
-        Dictionary<string, ColumnValue> columnValues = new(Parameters.Count);
+        Dictionary<string, ColumnValue> commandParameters = new(Parameters.Count);
 
         foreach (CamusParameter parameter in Parameters)
-            columnValues.Add(
-                parameter.ParameterName ?? "",
-                new() { Type = parameter.ColumnType, Value = parameter.Value!.ToString() }
-            );
+        {
+            if (parameter.ColumnType == ColumnType.Id || parameter.ColumnType == ColumnType.String)
+                commandParameters.Add(parameter.ParameterName ?? "", new() { Type = parameter.ColumnType, StrValue = parameter.Value!.ToString() });
+            else if (parameter.ColumnType == ColumnType.Integer64)
+                commandParameters.Add(parameter.ParameterName ?? "", new() { Type = parameter.ColumnType, LongValue = (long)parameter.Value! });
+            else if (parameter.ColumnType == ColumnType.Bool)
+                commandParameters.Add(parameter.ParameterName ?? "", new() { Type = parameter.ColumnType, BoolValue = (bool)parameter.Value! });
+
+        }
 
         var response = await endpoint
                                 .WithTimeout(CommandTimeout)
                                 .AppendPathSegments("insert")
-                                .PostJsonAsync(new { databaseName = database, tableName = source, values = columnValues })
+                                .PostJsonAsync(new { databaseName = database, tableName = source, values = commandParameters })
                                 .ReceiveString();
 
         Console.WriteLine(response);

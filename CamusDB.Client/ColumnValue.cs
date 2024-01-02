@@ -11,6 +11,12 @@ public sealed class ColumnValue
     [JsonProperty("type")]
     public ColumnType Type { get; set; }
 
-    [JsonProperty("value")]
-    public string? Value { get; set; }
+    [JsonProperty("strValue")]
+    public string? StrValue { get; set; }
+
+    [JsonProperty("longValue")]
+    public long LongValue { get; set; }
+
+    [JsonProperty("boolValue")]
+    public bool BoolValue { get; set; }
 }
