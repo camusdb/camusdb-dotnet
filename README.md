@@ -11,7 +11,7 @@ Install the CamusDB.Client package from NuGet. Add it to your project in the nor
 #### Using .NET CLI
 
 ```shell
-dotnet add package CamusDB.Client --version 0.0.2-alpha
+dotnet add package CamusDB.Client --version 0.0.3-alpha
 ```
 
 ### Using NuGet Package Manager
@@ -19,7 +19,7 @@ dotnet add package CamusDB.Client --version 0.0.2-alpha
 Search for CamusDB.Client and install it from the NuGet package manager UI, or use the Package Manager Console:
 
 ```shell
-Install-Package CamusDB.Client -Version 0.0.2-alpha
+Install-Package CamusDB.Client -Version 0.0.3-alpha
 ```
 
 ## Contribution

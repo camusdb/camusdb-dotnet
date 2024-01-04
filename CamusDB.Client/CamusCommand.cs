@@ -96,34 +96,34 @@ public class CamusCommand : DbCommand, ICloneable
     }
 
     /// <summary>
-    /// Sends the command to Cloud Spanner and builds a <see cref="SpannerDataReader"/>.
+    /// Sends the command to CamusDB and builds a <see cref="CamusDBDataReader"/>.
     /// </summary>
-    /// <returns>An asynchronous <see cref="Task"/> that produces a <see cref="SpannerDataReader"/>.</returns>
+    /// <returns>An asynchronous <see cref="Task"/> that produces a <see cref="CamusDBDataReader"/>.</returns>
     public new Task<CamusDataReader> ExecuteReaderAsync() =>
         ExecuteReaderAsync(CommandBehavior.Default, CancellationToken.None);
 
     /// <summary>
-    /// Sends the command to Cloud Spanner and builds a <see cref="SpannerDataReader"/>.
+    /// Sends the command to CamusDB and builds a <see cref="CamusDBDataReader"/>.
     /// </summary>
     /// <param name="cancellationToken">An optional token for canceling the call.</param>
-    /// <returns>An asynchronous <see cref="Task"/> that produces a <see cref="SpannerDataReader"/>.</returns>
+    /// <returns>An asynchronous <see cref="Task"/> that produces a <see cref="CamusDBDataReader"/>.</returns>
     public new Task<CamusDataReader> ExecuteReaderAsync(CancellationToken cancellationToken) =>
         ExecuteReaderAsync(CommandBehavior.Default, cancellationToken);
 
     /// <summary>
-    /// Sends the command to Cloud Spanner and builds a <see cref="SpannerDataReader"/>.
+    /// Sends the command to CamusDB and builds a <see cref="CamusDBDataReader"/>.
     /// </summary>
     /// <param name="behavior">Options for statement execution and data retrieval.</param>
-    /// <returns>An asynchronous <see cref="Task"/> that produces a <see cref="SpannerDataReader"/>.</returns>
+    /// <returns>An asynchronous <see cref="Task"/> that produces a <see cref="CamusDBDataReader"/>.</returns>
     public new Task<CamusDataReader> ExecuteReaderAsync(CommandBehavior behavior) =>
         ExecuteReaderAsync(behavior, CancellationToken.None);
 
     /// <summary>
-    /// Sends the command to Cloud Spanner and builds a <see cref="SpannerDataReader"/>.
+    /// Sends the command to CamusDB and builds a <see cref="CamusDBDataReader"/>.
     /// </summary>
     /// <param name="behavior">Options for statement execution and data retrieval.</param>
     /// <param name="cancellationToken">An optional token for canceling the call.</param>
-    /// <returns>An asynchronous <see cref="Task"/> that produces a <see cref="SpannerDataReader"/>.</returns>
+    /// <returns>An asynchronous <see cref="Task"/> that produces a <see cref="CamusDBDataReader"/>.</returns>
     public new async Task<CamusDataReader> ExecuteReaderAsync(CommandBehavior behavior, CancellationToken cancellationToken) =>
         (CamusDataReader)await ExecuteDbDataReaderAsync(behavior, cancellationToken).ConfigureAwait(false);
 
@@ -152,6 +152,8 @@ public class CamusCommand : DbCommand, ICloneable
         catch (FlurlHttpException ex)
         {
             var response = await ex.GetResponseStringAsync();
+            if (string.IsNullOrEmpty(response))
+                throw new CamusException(ex.Message);
 
             throw new CamusException(response);
         }
@@ -178,8 +180,10 @@ public class CamusCommand : DbCommand, ICloneable
         catch (FlurlHttpException ex)
         {
             var response = await ex.GetResponseStringAsync();
+            if (string.IsNullOrEmpty(response))
+                throw new CamusException(ex.Message);
 
-            throw new CamusException("ex=" + response);
+            throw new CamusException(response);
         }
     }
 

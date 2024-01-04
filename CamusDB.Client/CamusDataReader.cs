@@ -34,15 +34,15 @@ public class CamusDataReader : DbDataReader
 
     public CamusDataReader(List<Dictionary<string, ColumnValue>> rows)
 	{
-		this.position = 0;
+		this.position = -1;
 		this.rows = rows;
 	}
 
     /// <summary>
-    /// Reads the next row of values from Cloud Spanner.
-    /// Important: Cloud Spanner supports limited cancellation of this task.
+    /// Reads the next row of values from CamusDB.
+    /// Important: CamusDB supports limited cancellation of this task.
     /// </summary>
-    /// <param name="cancellationToken">A cancellation token to cancel the read. Cloud Spanner currently
+    /// <param name="cancellationToken">A cancellation token to cancel the read. CamusDB currently
     /// supports limited cancellation while advancing the read to the next row.</param>
     /// <returns>True if another row was read.</returns>
     public override Task<bool> ReadAsync(CancellationToken cancellationToken)
@@ -55,7 +55,7 @@ public class CamusDataReader : DbDataReader
 		return Task.FromResult(true);
 	}
 
-	private Dictionary<string, ColumnValue> GetCurrent()
+	public Dictionary<string, ColumnValue> GetCurrent()
 	{
 		return rows[position];
 	}

@@ -48,6 +48,8 @@ public class CamusInsertCommand : CamusCommand
         catch (FlurlHttpException ex)
         {
             var response = await ex.GetResponseStringAsync();
+            if (string.IsNullOrEmpty(response))
+                throw new CamusException(ex.Message);
 
             throw new CamusException(response);
         }

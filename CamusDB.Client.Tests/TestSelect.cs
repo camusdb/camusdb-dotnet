@@ -6,8 +6,6 @@
  * file that was distributed with this source code.
  */
 
-using CamusDB.Core.Util.ObjectIds;
-
 namespace CamusDB.Client.Tests;
 
 public class TestSelect : BaseTest
@@ -21,16 +19,41 @@ public class TestSelect : BaseTest
     {
         CamusConnection connection = await GetConnection();
 
-        string sql = "SELECT * FROM robots";
+        string sql = "SELECT * FROM robots WHERE year = 1974";
 
         using CamusCommand cmd = connection.CreateSelectCommand(sql);
 
-        cmd.Parameters.Add("@id", ColumnType.Id, CamusObjectIdGenerator.Generate());
-        cmd.Parameters.Add("@name", ColumnType.String, Guid.NewGuid().ToString()[..20]);
-        cmd.Parameters.Add("@type", ColumnType.String, "mechanical");
-        cmd.Parameters.Add("@year", ColumnType.Integer64, Random.Shared.Next(1900, 2050));
+        CamusDataReader reader = await cmd.ExecuteReaderAsync();
 
-        //Assert.Equal(1, await cmd.ExecuteNonQueryAsync());        
+        int i = 0;
+
+        while (await reader.ReadAsync())
+        {
+            Console.WriteLine(reader.GetString(0));
+            Console.WriteLine(reader.GetString(1));
+            Console.WriteLine(reader.GetString(2));
+            Console.WriteLine(reader.GetInt64(3));
+
+            i++;
+        }
+
+        Assert.Equal(1, i);
+    }
+
+    [Fact]
+    public async void TestBasicSelectBoundParameters()
+    {
+        CamusConnection connection = await GetConnection();
+
+        string sql = "SELECT * FROM robots WHERE year = @year";
+
+        using CamusCommand cmd = connection.CreateSelectCommand(sql);
+
+        cmd.Parameters.Add("@year", ColumnType.Integer64, 1974);
+
+        //Assert.Equal(1, await cmd.ExecuteNonQueryAsync());
+
+        int i = 0;
 
         CamusDataReader reader = await cmd.ExecuteReaderAsync();
 
@@ -40,7 +63,11 @@ public class TestSelect : BaseTest
             Console.WriteLine(reader.GetString(1));
             Console.WriteLine(reader.GetString(2));
             Console.WriteLine(reader.GetInt64(3));
+
+            i++;
         }
+
+        Assert.Equal(1, i);
     }
 
     private static async Task ExecuteSelect(CamusConnection connection)
