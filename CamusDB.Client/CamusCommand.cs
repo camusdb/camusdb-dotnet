@@ -9,6 +9,7 @@
 using System.Data;
 using System.Data.Common;
 using System.Text.Json;
+using CamusDB.Core.Util.ObjectIds;
 using Flurl.Http;
 
 namespace CamusDB.Client;
@@ -76,16 +77,21 @@ public class CamusCommand : DbCommand, ICloneable
 
         foreach (CamusParameter parameter in Parameters)
         {
-            if (parameter.ColumnType == ColumnType.Id || parameter.ColumnType == ColumnType.String)
-                commandParameters.Add(parameter.ParameterName ?? "", new() { Type = parameter.ColumnType, StrValue = parameter.Value!.ToString() });
+            if (string.IsNullOrEmpty(parameter.ParameterName))
+                throw new CamusException("CADB0400", "Parameter name cannot be null or empty");
+
+            if (parameter.Value is null || parameter.ColumnType == ColumnType.Null)
+                commandParameters.Add(parameter.ParameterName, new() { Type = ColumnType.Null });
+            else if ((parameter.ColumnType == ColumnType.Id || parameter.ColumnType == ColumnType.String) && parameter.Value is string)
+                commandParameters.Add(parameter.ParameterName, new() { Type = parameter.ColumnType, StrValue = (string)parameter.Value! });
+            else if ((parameter.ColumnType == ColumnType.Id) && parameter.Value is CamusObjectIdValue)
+                commandParameters.Add(parameter.ParameterName, new() { Type = parameter.ColumnType, StrValue = parameter.Value!.ToString() });
             else if (parameter.ColumnType == ColumnType.Integer64 && parameter.Value is int)
-                commandParameters.Add(parameter.ParameterName ?? "", new() { Type = parameter.ColumnType, LongValue = (int)parameter.Value! });
+                commandParameters.Add(parameter.ParameterName, new() { Type = parameter.ColumnType, LongValue = (int)parameter.Value! });
             else if (parameter.ColumnType == ColumnType.Integer64 && parameter.Value is long)
-                commandParameters.Add(parameter.ParameterName ?? "", new() { Type = parameter.ColumnType, LongValue = (long)parameter.Value! });
+                commandParameters.Add(parameter.ParameterName, new() { Type = parameter.ColumnType, LongValue = (long)parameter.Value! });
             else if (parameter.ColumnType == ColumnType.Bool)
-                commandParameters.Add(parameter.ParameterName ?? "", new() { Type = parameter.ColumnType, BoolValue = (bool)parameter.Value! });
-            else if (parameter.ColumnType == ColumnType.Null)
-                commandParameters.Add(parameter.ParameterName ?? "", new() { Type = parameter.ColumnType });
+                commandParameters.Add(parameter.ParameterName, new() { Type = parameter.ColumnType, BoolValue = (bool)parameter.Value! });
             else
                 throw new CamusException("CADB0400", "Unknown parameter column type: " + parameter.ColumnType);
         }
@@ -93,9 +99,14 @@ public class CamusCommand : DbCommand, ICloneable
         return commandParameters;
     }
 
+    /// <summary>
+    /// Executes the command and returns the number of rows affected.
+    /// This method runs syncrhonously
+    /// </summary>
+    /// <returns></returns>
     public override int ExecuteNonQuery()
     {
-        throw new NotImplementedException();
+        return Task.Run(() => ExecuteNonQueryAsync(default)).Result;
     }
 
     /// <summary>
@@ -145,6 +156,7 @@ public class CamusCommand : DbCommand, ICloneable
         try
         {
             CamusExecuteSqlQueryResponse response = await endpoint
+                                                        .WithHeader("Accept", "application/json")
                                                         .WithTimeout(CommandTimeout)
                                                         .AppendPathSegments("execute-sql-query")
                                                         .PostJsonAsync(new { databaseName = database, sql = source, parameters = commandParameters })
@@ -191,6 +203,7 @@ public class CamusCommand : DbCommand, ICloneable
             Dictionary<string, ColumnValue> commandParameters = GetCommandParameters();
 
             CamusExecuteSqlNonQueryResponse response = await endpoint
+                                    .WithHeader("Accept", "application/json")
                                     .WithTimeout(CommandTimeout)
                                     .AppendPathSegments("execute-sql-non-query")
                                     .PostJsonAsync(new { databaseName = database, sql = source, parameters = commandParameters })

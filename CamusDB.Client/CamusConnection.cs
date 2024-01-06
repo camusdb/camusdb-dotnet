@@ -76,7 +76,7 @@ public sealed class CamusConnection : DbConnection
         throw new NotImplementedException();
     }
 
-    public CamusCommand CreateCommand(string sql)
+    public CamusCommand CreateCamusCommand(string sql)
     {
         return new CamusCommand(sql, builder);
     }

@@ -38,7 +38,7 @@ public class TestInsert : BaseTest
 
         using CamusCommand cmd = connection.CreateInsertCommand("robots");
 
-        cmd.Parameters.Add("id", ColumnType.Id, CamusObjectIdGenerator.Generate());
+        cmd.Parameters.Add("id", ColumnType.Id, CamusObjectIdGenerator.GenerateAsString());
         cmd.Parameters.Add("name", ColumnType.String, "aaa");
         cmd.Parameters.Add("type", ColumnType.Null, null);
         cmd.Parameters.Add("year", ColumnType.Null, null);

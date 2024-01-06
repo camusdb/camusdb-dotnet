@@ -85,7 +85,7 @@ public sealed class CamusObjectIdGenerator
     public static int GetTimestampFromDateTime(DateTime dateTime)
     {
         return (int)((dateTime.ToUniversalTime() - epoch).TotalSeconds);
-    }    
+    }
 
     public static CamusObjectIdValue Generate()
     {
@@ -102,8 +102,13 @@ public sealed class CamusObjectIdGenerator
 
         int _a = timestamp;
         int _b = (machine << 8) | (((int)pid >> 8) & 0xff);
-        int _c = ((int)pid << 24) | increment;        
+        int _c = ((int)pid << 24) | increment;
 
         return new CamusObjectIdValue(a: _a, b: _b, c: _c);
-    }    
+    }
+
+    public static string GenerateAsString()
+    {
+        return Generate().ToString();
+    }
 }

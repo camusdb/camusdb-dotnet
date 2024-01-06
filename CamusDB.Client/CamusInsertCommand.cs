@@ -29,6 +29,7 @@ public class CamusInsertCommand : CamusCommand
             Dictionary<string, ColumnValue> commandParameters = GetCommandParameters();
 
             CamusExecuteSqlNonQueryResponse response = await endpoint
+                                                    .WithHeader("Accept", "application/json")
                                                     .WithTimeout(CommandTimeout)
                                                     .AppendPathSegments("insert")
                                                     .PostJsonAsync(new { databaseName = database, tableName = source, values = commandParameters })
