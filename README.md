@@ -11,7 +11,7 @@ Install the CamusDB.Client package from NuGet. Add it to your project in the nor
 #### Using .NET CLI
 
 ```shell
-dotnet add package CamusDB.Client --version 0.0.3-alpha
+dotnet add package CamusDB.Client --version 0.0.4-alpha
 ```
 
 ### Using NuGet Package Manager
@@ -19,7 +19,16 @@ dotnet add package CamusDB.Client --version 0.0.3-alpha
 Search for CamusDB.Client and install it from the NuGet package manager UI, or use the Package Manager Console:
 
 ```shell
-Install-Package CamusDB.Client -Version 0.0.3-alpha
+Install-Package CamusDB.Client -Version 0.0.4-alpha
+```
+
+### Run Tests
+
+To run the unit tests, it is necessary to have an instance of CamusDB running on the local machine on the standard port 7141. 
+After this, the tests can be run with the following command:
+
+```shell
+dotnet test -l "console;verbosity=normal" --filter  "FullyQualifiedName~CamusDB.Client.Tests"
 ```
 
 ## Contribution

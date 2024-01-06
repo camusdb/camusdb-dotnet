@@ -7,18 +7,9 @@
  */
 
 using Flurl.Http;
-using Newtonsoft.Json;
+using System.Text.Json;
 
 namespace CamusDB.Client;
-
-internal sealed class ExecuteSqlNonQueryResponse
-{
-    [JsonProperty("status")]
-    public string? Status { get; set; }
-
-    [JsonProperty("rows")]
-    public int Rows { get; set; }
-}
 
 public class CamusInsertCommand : CamusCommand
 {
@@ -37,21 +28,36 @@ public class CamusInsertCommand : CamusCommand
 
             Dictionary<string, ColumnValue> commandParameters = GetCommandParameters();
 
-            ExecuteSqlNonQueryResponse response = await endpoint
+            CamusExecuteSqlNonQueryResponse response = await endpoint
                                                     .WithTimeout(CommandTimeout)
                                                     .AppendPathSegments("insert")
                                                     .PostJsonAsync(new { databaseName = database, tableName = source, values = commandParameters })
-                                                    .ReceiveJson<ExecuteSqlNonQueryResponse>();            
+                                                    .ReceiveJson<CamusExecuteSqlNonQueryResponse>();            
 
             return response.Rows;
         }
         catch (FlurlHttpException ex)
         {
-            var response = await ex.GetResponseStringAsync();
-            if (string.IsNullOrEmpty(response))
-                throw new CamusException(ex.Message);
+            string response = await ex.GetResponseStringAsync();          
 
-            throw new CamusException(response);
+            if (!string.IsNullOrEmpty(response))
+            {              
+                try
+                {
+                    CamusErrorResponse? errorResponse = JsonSerializer.Deserialize<CamusErrorResponse>(response);
+
+                    if (errorResponse is not null)
+                        throw new CamusException(errorResponse.Code ?? "CADB0000", errorResponse.Message ?? "");
+                }
+                catch (JsonException)
+                {                
+
+                }
+
+                throw new CamusException("CADB0000", response);
+            }
+
+            throw new CamusException("CADB0000", ex.Message);
         }
     }
 }

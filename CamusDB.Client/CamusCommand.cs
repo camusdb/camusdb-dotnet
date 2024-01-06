@@ -8,13 +8,14 @@
 
 using System.Data;
 using System.Data.Common;
+using System.Text.Json;
 using Flurl.Http;
 
 namespace CamusDB.Client;
 
 /// <summary>
-/// Represents a SQL query or command to execute against
-/// a Camus database.
+/// Represents a SQL query or command to execute against a Camus database.
+/// 
 /// If the command is a SQL query, then <see cref="CamusCommand.CommandText"/>
 /// contains the entire SQL statement. Use <see cref="CamusCommand.ExecuteReaderAsync()"/>  to obtain results.
 ///
@@ -83,8 +84,10 @@ public class CamusCommand : DbCommand, ICloneable
                 commandParameters.Add(parameter.ParameterName ?? "", new() { Type = parameter.ColumnType, LongValue = (long)parameter.Value! });
             else if (parameter.ColumnType == ColumnType.Bool)
                 commandParameters.Add(parameter.ParameterName ?? "", new() { Type = parameter.ColumnType, BoolValue = (bool)parameter.Value! });
+            else if (parameter.ColumnType == ColumnType.Null)
+                commandParameters.Add(parameter.ParameterName ?? "", new() { Type = parameter.ColumnType });
             else
-                throw new CamusException("Unknown parameter column type");
+                throw new CamusException("CADB0400", "Unknown parameter column type: " + parameter.ColumnType);
         }
 
         return commandParameters;
@@ -129,7 +132,7 @@ public class CamusCommand : DbCommand, ICloneable
 
     /// <inheritdoc />
     protected override DbDataReader ExecuteDbDataReader(CommandBehavior behavior) =>
-        Task.Run(() => ExecuteDbDataReaderAsync(behavior, default)).Result;        
+        Task.Run(() => ExecuteDbDataReaderAsync(behavior, default)).Result;
 
     /// <inheritdoc />
     protected override async Task<DbDataReader> ExecuteDbDataReaderAsync(CommandBehavior behavior, CancellationToken cancellationToken)
@@ -141,21 +144,39 @@ public class CamusCommand : DbCommand, ICloneable
 
         try
         {
-            ExecuteSqlQueryResponse response = await endpoint
+            CamusExecuteSqlQueryResponse response = await endpoint
                                                         .WithTimeout(CommandTimeout)
                                                         .AppendPathSegments("execute-sql-query")
                                                         .PostJsonAsync(new { databaseName = database, sql = source, parameters = commandParameters })
-                                                        .ReceiveJson<ExecuteSqlQueryResponse>();
+                                                        .ReceiveJson<CamusExecuteSqlQueryResponse>();
 
-            return new CamusDataReader(response.Rows!);
+            if (response.Rows == null)
+                throw new CamusException("CADB0000", "Empty result returned");
+
+            return new CamusDataReader(response.Rows);
         }
         catch (FlurlHttpException ex)
         {
-            var response = await ex.GetResponseStringAsync();
-            if (string.IsNullOrEmpty(response))
-                throw new CamusException(ex.Message);
+            string response = await ex.GetResponseStringAsync();
 
-            throw new CamusException(response);
+            if (!string.IsNullOrEmpty(response))
+            {
+                try
+                {
+                    CamusErrorResponse? errorResponse = JsonSerializer.Deserialize<CamusErrorResponse>(response);
+
+                    if (errorResponse is not null)
+                        throw new CamusException(errorResponse.Code ?? "CADB0000", errorResponse.Message ?? "");
+                }
+                catch (JsonException)
+                {
+
+                }
+
+                throw new CamusException("CADB0000", response);
+            }
+
+            throw new CamusException("CADB0000", ex.Message);
         }
     }
 
@@ -169,21 +190,36 @@ public class CamusCommand : DbCommand, ICloneable
 
             Dictionary<string, ColumnValue> commandParameters = GetCommandParameters();
 
-            ExecuteSqlNonQueryResponse response = await endpoint
+            CamusExecuteSqlNonQueryResponse response = await endpoint
                                     .WithTimeout(CommandTimeout)
                                     .AppendPathSegments("execute-sql-non-query")
                                     .PostJsonAsync(new { databaseName = database, sql = source, parameters = commandParameters })
-                                    .ReceiveJson<ExecuteSqlNonQueryResponse>();
-            
+                                    .ReceiveJson<CamusExecuteSqlNonQueryResponse>();
+
             return response.Rows;
         }
         catch (FlurlHttpException ex)
         {
-            var response = await ex.GetResponseStringAsync();
-            if (string.IsNullOrEmpty(response))
-                throw new CamusException(ex.Message);
+            string response = await ex.GetResponseStringAsync();
 
-            throw new CamusException(response);
+            if (!string.IsNullOrEmpty(response))
+            {
+                try
+                {
+                    CamusErrorResponse? errorResponse = JsonSerializer.Deserialize<CamusErrorResponse>(response);
+
+                    if (errorResponse is not null)
+                        throw new CamusException(errorResponse.Code ?? "CADB0000", errorResponse.Message ?? "");
+                }
+                catch (JsonException)
+                {
+
+                }
+
+                throw new CamusException("CADB0000", response);
+            }
+
+            throw new CamusException("CADB0000", ex.Message);
         }
     }
 
@@ -200,5 +236,5 @@ public class CamusCommand : DbCommand, ICloneable
     protected override DbParameter CreateDbParameter()
     {
         throw new NotImplementedException();
-    }    
+    }
 }

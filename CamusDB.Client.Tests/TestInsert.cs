@@ -32,6 +32,21 @@ public class TestInsert : BaseTest
     }
 
     [Fact]
+    public async void TestInsertNulls()
+    {
+        CamusConnection connection = await GetConnection();
+
+        using CamusCommand cmd = connection.CreateInsertCommand("robots");
+
+        cmd.Parameters.Add("id", ColumnType.Id, CamusObjectIdGenerator.Generate());
+        cmd.Parameters.Add("name", ColumnType.String, "aaa");
+        cmd.Parameters.Add("type", ColumnType.Null, null);
+        cmd.Parameters.Add("year", ColumnType.Null, null);
+
+        Assert.Equal(1, await cmd.ExecuteNonQueryAsync());
+    }
+
+    [Fact]
     public async void TestMultiInsert()
     {
         CamusConnection connection = await GetConnection();

@@ -10,11 +10,11 @@ using Newtonsoft.Json;
 
 namespace CamusDB.Client;
 
-internal sealed class CamusExecuteSqlQueryResponse
+internal sealed class CamusExecuteSqlNonQueryResponse
 {
     [JsonProperty("status")]
     public string? Status { get; set; }
 
     [JsonProperty("rows")]
-    public List<Dictionary<string, ColumnValue>>? Rows { get; set; }
+    public int Rows { get; set; }
 }

@@ -76,6 +76,11 @@ public sealed class CamusConnection : DbConnection
         throw new NotImplementedException();
     }
 
+    public CamusCommand CreateCommand(string sql)
+    {
+        return new CamusCommand(sql, builder);
+    }
+
     public CamusInsertCommand CreateInsertCommand(string source)
     {
         return new CamusInsertCommand(source, builder);

@@ -34,10 +34,8 @@ public sealed class CamusParameterCollection : DbParameterCollection, IEnumerabl
     /// <inheritdoc />
     public override int Add(object value)
     {
-        if (value == null)
-        {
-            throw new ArgumentNullException(nameof(value));
-        }
+        if (value == null)        
+            throw new ArgumentNullException(nameof(value));        
 
         _innerList.Add((CamusParameter)value);
         return _innerList.Count - 1;
@@ -45,14 +43,14 @@ public sealed class CamusParameterCollection : DbParameterCollection, IEnumerabl
 
     public CamusParameter Add(string parameterName, ColumnType dbType)
     {
-        var parameter = new CamusParameter(parameterName, dbType);
+        CamusParameter parameter = new CamusParameter(parameterName, dbType);
         _innerList.Add(parameter);
         return parameter;
     }
 
-    public CamusParameter Add(string parameterName, ColumnType dbType, object value)
+    public CamusParameter Add(string parameterName, ColumnType dbType, object? value)
     {
-        var parameter = Add(parameterName, dbType);
+        CamusParameter parameter = Add(parameterName, dbType);
         parameter.Value = value;
         return parameter;
     }
