@@ -97,17 +97,7 @@ public class CamusCommand : DbCommand, ICloneable
         }
 
         return commandParameters;
-    }
-
-    /// <summary>
-    /// Executes the command and returns the number of rows affected.
-    /// This method runs syncrhonously
-    /// </summary>
-    /// <returns></returns>
-    public override int ExecuteNonQuery()
-    {
-        return Task.Run(() => ExecuteNonQueryAsync(default)).Result;
-    }
+    }    
 
     /// <summary>
     /// Sends the command to CamusDB and builds a <see cref="CamusDBDataReader"/>.
@@ -159,7 +149,7 @@ public class CamusCommand : DbCommand, ICloneable
                                                         .WithHeader("Accept", "application/json")
                                                         .WithTimeout(CommandTimeout)
                                                         .AppendPathSegments("execute-sql-query")
-                                                        .PostJsonAsync(new { databaseName = database, sql = source, parameters = commandParameters })
+                                                        .PostJsonAsync(new { databaseName = database, sql = source, parameters = commandParameters }, cancellationToken)
                                                         .ReceiveJson<CamusExecuteSqlQueryResponse>();
 
             if (response.Rows == null)
@@ -192,6 +182,16 @@ public class CamusCommand : DbCommand, ICloneable
         }
     }
 
+    /// <summary>
+    /// Executes the command and returns the number of rows affected.
+    /// This method runs syncrhonously
+    /// </summary>
+    /// <returns></returns>
+    public override int ExecuteNonQuery()
+    {
+        return Task.Run(() => ExecuteNonQueryAsync(default)).Result;
+    }
+
     /// <inheritdoc />
     public override async Task<int> ExecuteNonQueryAsync(CancellationToken cancellationToken)
     {
@@ -206,10 +206,68 @@ public class CamusCommand : DbCommand, ICloneable
                                     .WithHeader("Accept", "application/json")
                                     .WithTimeout(CommandTimeout)
                                     .AppendPathSegments("execute-sql-non-query")
-                                    .PostJsonAsync(new { databaseName = database, sql = source, parameters = commandParameters })
+                                    .PostJsonAsync(new { databaseName = database, sql = source, parameters = commandParameters }, cancellationToken)
                                     .ReceiveJson<CamusExecuteSqlNonQueryResponse>();
 
             return response.Rows;
+        }
+        catch (FlurlHttpException ex)
+        {
+            string response = await ex.GetResponseStringAsync();
+
+            if (!string.IsNullOrEmpty(response))
+            {
+                try
+                {
+                    CamusErrorResponse? errorResponse = JsonSerializer.Deserialize<CamusErrorResponse>(response);
+
+                    if (errorResponse is not null)
+                        throw new CamusException(errorResponse.Code ?? "CADB0000", errorResponse.Message ?? "");
+                }
+                catch (JsonException)
+                {
+
+                }
+
+                throw new CamusException("CADB0000", response);
+            }
+
+            throw new CamusException("CADB0000", ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// Executes a DDL command and returns the success status
+    /// This method runs syncrhonously
+    /// </summary>
+    /// <returns></returns>
+    public bool ExecuteDDL()
+    {
+        return Task.Run(() => ExecuteDDLAsync(default)).Result;
+    }
+
+    /// <inheritdoc />
+    public Task<bool> ExecuteDDLAsync()
+    {
+        return ExecuteDDLAsync(default);
+    }
+
+    /// <inheritdoc />
+    public async Task<bool> ExecuteDDLAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            string endpoint = builder.Config["Endpoint"];
+            string database = builder.Config["Database"];            
+
+            CamusExecuteDDLResponse response = await endpoint
+                                    .WithHeader("Accept", "application/json")
+                                    .WithTimeout(CommandTimeout)
+                                    .AppendPathSegments("execute-sql-ddl")
+                                    .PostJsonAsync(new { databaseName = database, sql = source }, cancellationToken)
+                                    .ReceiveJson<CamusExecuteDDLResponse>();
+
+            return response.Status == "ok";
         }
         catch (FlurlHttpException ex)
         {

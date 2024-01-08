@@ -80,7 +80,7 @@ public class TestInsert : BaseTest
     {
         string sql = "INSERT INTO robots (id, name, year, type) VALUES (GEN_ID(), \"optimus prime\", 2017, \"transformer\")";
 
-        using CamusCommand cmd = new(sql, builder!);
+        using CamusCommand cmd = connection.CreateCamusCommand(sql);
 
         Assert.Equal(1, await cmd.ExecuteNonQueryAsync());
     }
@@ -121,7 +121,7 @@ public class TestInsert : BaseTest
 
         string sql = "INSERT INTO robots (id, name, year, type) VALUES (GEN_ID(), @name, @year, @type)";
 
-        using CamusCommand cmd = new(sql, builder!);
+        using CamusCommand cmd = connection.CreateCamusCommand(sql);
 
         cmd.Parameters.Add("@id", ColumnType.Id, CamusObjectIdGenerator.Generate());
         cmd.Parameters.Add("@name", ColumnType.String, Guid.NewGuid().ToString()[..20]);

@@ -19,11 +19,16 @@ public class CamusConnectionStringBuilder
 
     public CamusConnectionStringBuilder(string connectionString)
     {
-        string[] settings = connectionString.Split(";");
+        if (string.IsNullOrWhiteSpace(connectionString))
+            return;
+
+        string[] settings = connectionString.Split(";");        
 
         foreach (string setting in settings)
         {
-            string[] varParts = setting.Split("=");
+            string[] varParts = setting.Split("=");            
+            if (varParts.Length != 2)
+                continue;
 
             Config.TryAdd(varParts[0], varParts[1]);
         }

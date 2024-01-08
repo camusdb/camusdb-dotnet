@@ -6,6 +6,7 @@
  * file that was distributed with this source code.
  */
 
+using System.Text.Json;
 using Flurl.Http;
 
 namespace CamusDB.Client;
@@ -20,15 +21,39 @@ public class CamusPingCommand : CamusCommand
     /// <inheritdoc />
     public override async Task<int> ExecuteNonQueryAsync(CancellationToken cancellationToken)
     {
-        string endpoint = builder.Config["Endpoint"];
+        try
+        {
+            string endpoint = builder.Config["Endpoint"];
 
-        var response = await endpoint
-                                .WithTimeout(10)
-                                .AppendPathSegments("ping")
-                                .GetJsonAsync();
+            CamusExecuteSqlNonQueryResponse response = await endpoint
+                                                        .WithTimeout(CommandTimeout)
+                                                        .AppendPathSegments("ping")
+                                                        .GetJsonAsync<CamusExecuteSqlNonQueryResponse>();
 
-        Console.WriteLine(response);
+            return response.Status == "ok" ? 1 : 0;
+        }
+        catch (FlurlHttpException ex)
+        {
+            string response = await ex.GetResponseStringAsync();
 
-        return 1;
+            if (!string.IsNullOrEmpty(response))
+            {
+                try
+                {
+                    CamusErrorResponse? errorResponse = JsonSerializer.Deserialize<CamusErrorResponse>(response);
+
+                    if (errorResponse is not null)
+                        throw new CamusException(errorResponse.Code ?? "CADB0000", errorResponse.Message ?? "");
+                }
+                catch (JsonException)
+                {
+
+                }
+
+                throw new CamusException("CADB0000", response);
+            }
+
+            throw new CamusException("CADB0000", ex.Message);
+        }
     }
 }
