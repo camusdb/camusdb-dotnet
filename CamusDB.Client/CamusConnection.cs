@@ -8,6 +8,9 @@
 
 using System.Data;
 using System.Data.Common;
+using Flurl.Http;
+using System.Net;
+using System.Text.Json;
 
 namespace CamusDB.Client;
 
@@ -85,7 +88,51 @@ public sealed class CamusConnection : DbConnection
     }
 
     public new Task<CamusTransaction> BeginTransactionAsync(CancellationToken cancellationToken = default) =>    
-        BeginTransactionImplAsync(ReadWriteTransactionOptions, TransactionMode.ReadWrite, cancellationToken);    
+        BeginTransactionImplAsync(cancellationToken);
+
+    private async Task<CamusTransaction> BeginTransactionImplAsync(CancellationToken cancellationToken)
+    {
+        string endpoint = builder.Config["Endpoint"];
+        string database = builder.Config["Database"];
+
+        try
+        {
+            CamusStartTransactionResponse response = await endpoint
+                                                        .WithHeader("Accept", "application/json")
+                                                        .WithTimeout(10)
+                                                        .AppendPathSegments("start-transaction")
+                                                        .PostJsonAsync(new { databaseName = database }, cancellationToken)
+                                                        .ReceiveJson<CamusStartTransactionResponse>();
+
+            if (response.Status != "ok")
+                throw new CamusException("CADB0000", "Empty result returned");
+
+            return new CamusTransaction(response.TxnIdPT, response.TxnIdCounter, builder);
+        }
+        catch (FlurlHttpException ex)
+        {
+            string response = await ex.GetResponseStringAsync();
+
+            if (!string.IsNullOrEmpty(response))
+            {
+                try
+                {
+                    CamusErrorResponse? errorResponse = JsonSerializer.Deserialize<CamusErrorResponse>(response);
+
+                    if (errorResponse is not null)
+                        throw new CamusException(errorResponse.Code ?? "CADB0000", errorResponse.Message ?? "");
+                }
+                catch (JsonException)
+                {
+
+                }
+
+                throw new CamusException("CADB0000", response);
+            }
+
+            throw new CamusException("CADB0000", ex.Message);
+        }
+    }
 
     protected override DbCommand CreateDbCommand()
     {

@@ -7,7 +7,7 @@
         <ImplicitUsings>enable</ImplicitUsings>
         <Nullable>enable</Nullable>
         <PackageId>CamusDB.Client</PackageId>
-        <Version>0.0.6-alpha</Version>
+        <Version>0.0.7-alpha</Version>
         <Description>CamusDB.Client is the ADO.NET provider for CamusDB. It is the recommended package for regular CamusDB database access from .NET.</Description>
         <Authors>CamusDB</Authors>
         <Company>CamusDB</Company>    

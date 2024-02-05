@@ -32,6 +32,8 @@ public class CamusCommand : DbCommand, ICloneable
 {
     protected readonly string source;
 
+    protected CamusTransaction? transaction;
+
     protected readonly CamusConnectionStringBuilder builder;
 
     public CamusCommand(string source, CamusConnectionStringBuilder builder)
@@ -59,7 +61,7 @@ public class CamusCommand : DbCommand, ICloneable
 
     protected override DbParameterCollection DbParameterCollection => throw new NotImplementedException();
 
-    protected override DbTransaction? DbTransaction { get => throw new NotImplementedException(); set => throw new NotImplementedException(); }
+    protected override DbTransaction? DbTransaction { get => transaction; set => transaction = (CamusTransaction?) value; }
 
     public override void Cancel()
     {

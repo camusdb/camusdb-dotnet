@@ -7,7 +7,7 @@
  */
 
 using Flurl.Http;
-using System.Text.Json;
+using Newtonsoft.Json;
 
 namespace CamusDB.Client;
 
@@ -26,14 +26,27 @@ public class CamusInsertCommand : CamusCommand
             string endpoint = builder.Config["Endpoint"];
             string database = builder.Config["Database"];
 
-            Dictionary<string, ColumnValue> commandParameters = GetCommandParameters();
+            CamusExecuteSqlNonQueryRequest request = new()
+            {
+                DatabaseName = database,
+                TableName = source,
+                Values = GetCommandParameters()
+            };
+
+            if (transaction is not null)
+            {
+                request.TxnIdPT = transaction.TxnIdPT;
+                request.TxnIdCounter = transaction.TxnIdCounter;
+            }
+
+            string jsonRequest = JsonConvert.SerializeObject(request);            
 
             CamusExecuteSqlNonQueryResponse response = await endpoint
-                                                    .WithHeader("Accept", "application/json")
-                                                    .WithTimeout(CommandTimeout)
-                                                    .AppendPathSegments("insert")
-                                                    .PostJsonAsync(new { databaseName = database, tableName = source, values = commandParameters })
-                                                    .ReceiveJson<CamusExecuteSqlNonQueryResponse>();            
+                                                        .WithHeader("Accept", "application/json")
+                                                        .WithTimeout(CommandTimeout)
+                                                        .AppendPathSegments("insert")
+                                                        .PostStringAsync(jsonRequest)
+                                                        .ReceiveJson<CamusExecuteSqlNonQueryResponse>();            
 
             return response.Rows;
         }
@@ -45,7 +58,7 @@ public class CamusInsertCommand : CamusCommand
             {              
                 try
                 {
-                    CamusErrorResponse? errorResponse = JsonSerializer.Deserialize<CamusErrorResponse>(response);
+                    CamusErrorResponse? errorResponse = System.Text.Json.JsonSerializer.Deserialize<CamusErrorResponse>(response);
 
                     if (errorResponse is not null)
                         throw new CamusException(errorResponse.Code ?? "CADB0000", errorResponse.Message ?? "");
