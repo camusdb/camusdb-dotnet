@@ -1,14 +1,13 @@
 ﻿
-
-
-using System.Collections;
-using System.Data.Common;
 /**
  * This file is part of CamusDB  
  *
  * For the full copyright and license information, please view the LICENSE.txt
  * file that was distributed with this source code.
  */
+
+using System.Collections;
+using System.Data.Common;
 
 namespace CamusDB.Client;
 
@@ -22,7 +21,7 @@ public class CamusDataReader : DbDataReader
 
     public override int FieldCount => throw new NotImplementedException();
 
-    public override bool HasRows => throw new NotImplementedException();
+    public override bool HasRows => position >= rows.Count;
 
     public override bool IsClosed => throw new NotImplementedException();
 

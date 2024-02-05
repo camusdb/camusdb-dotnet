@@ -12,6 +12,8 @@ namespace CamusDB.Client.Tests;
 
 public class TestInsert : BaseTest
 {
+    private readonly string[] types = { "mechanical", "electronic", "cyborg" };
+
     public TestInsert()
     {
     }
@@ -70,7 +72,7 @@ public class TestInsert : BaseTest
 
         cmd.Parameters.Add("id", ColumnType.Id, CamusObjectIdGenerator.Generate());
         cmd.Parameters.Add("name", ColumnType.String, Guid.NewGuid().ToString()[..20]);
-        cmd.Parameters.Add("type", ColumnType.String, "mechanical");
+        cmd.Parameters.Add("type", ColumnType.String, types[Random.Shared.Next(0, types.Length - 1)]);
         cmd.Parameters.Add("year", ColumnType.Integer64, Random.Shared.Next(1900, 2050));
 
         Assert.Equal(1, await cmd.ExecuteNonQueryAsync());
@@ -78,9 +80,13 @@ public class TestInsert : BaseTest
 
     private async Task CreateSqlRow(CamusConnection connection)
     {
-        string sql = "INSERT INTO robots (id, name, year, type) VALUES (GEN_ID(), \"optimus prime\", 2017, \"transformer\")";
+        string sql = "INSERT INTO robots (id, name, year, type) VALUES (GEN_ID(), @name, @year, @type)";
 
         using CamusCommand cmd = connection.CreateCamusCommand(sql);
+        
+        cmd.Parameters.Add("@name", ColumnType.String, Guid.NewGuid().ToString()[..20]);
+        cmd.Parameters.Add("@type", ColumnType.String, types[Random.Shared.Next(0, types.Length - 1)]);
+        cmd.Parameters.Add("@year", ColumnType.Integer64, Random.Shared.Next(1900, 2050));
 
         Assert.Equal(1, await cmd.ExecuteNonQueryAsync());
     }
@@ -107,7 +113,9 @@ public class TestInsert : BaseTest
 
         for (int j = 0; j < 100; j++)
         {
-            for (int i = 0; i < 100; i++)
+            tasks.Clear();
+
+            for (int i = 0; i < 300; i++)
                 tasks.Add(CreateSqlRow(connection));
 
             await Task.WhenAll(tasks);

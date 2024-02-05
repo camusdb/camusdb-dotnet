@@ -110,4 +110,32 @@ public class TestSelect : BaseTest
 
         await Task.WhenAll(tasks);
     }
+
+    [Fact]
+    public async void TestRepSelect()
+    {
+        CamusConnection connection = await GetConnection();
+
+        string sql = "SELECT * FROM robots";
+
+        using CamusCommand cmd = connection.CreateSelectCommand(sql);
+
+        CamusDataReader reader = await cmd.ExecuteReaderAsync();
+
+        int i = 0;
+
+        Dictionary<string, bool> columns = new();
+
+        while (await reader.ReadAsync())
+        {
+            string id = reader.GetString(0);
+            
+            if (columns.ContainsKey(id))
+                throw new Exception("Duplicate id " + id);
+
+            columns.Add(id, true);
+        }
+
+        //Assert.Equal(1, i);
+    }
 }

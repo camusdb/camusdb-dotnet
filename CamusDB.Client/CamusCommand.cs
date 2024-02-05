@@ -203,11 +203,11 @@ public class CamusCommand : DbCommand, ICloneable
             Dictionary<string, ColumnValue> commandParameters = GetCommandParameters();
 
             CamusExecuteSqlNonQueryResponse response = await endpoint
-                                    .WithHeader("Accept", "application/json")
-                                    .WithTimeout(CommandTimeout)
-                                    .AppendPathSegments("execute-sql-non-query")
-                                    .PostJsonAsync(new { databaseName = database, sql = source, parameters = commandParameters }, cancellationToken)
-                                    .ReceiveJson<CamusExecuteSqlNonQueryResponse>();
+                                                                .WithHeader("Accept", "application/json")
+                                                                .WithTimeout(CommandTimeout)
+                                                                .AppendPathSegments("execute-sql-non-query")
+                                                                .PostJsonAsync(new { databaseName = database, sql = source, parameters = commandParameters }, cancellationToken)
+                                                                .ReceiveJson<CamusExecuteSqlNonQueryResponse>();
 
             return response.Rows;
         }
