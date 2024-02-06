@@ -82,7 +82,7 @@ public sealed class CamusConnection : DbConnection
     protected override async ValueTask<DbTransaction> BeginDbTransactionAsync(IsolationLevel isolationLevel, CancellationToken cancellationToken)
     {
         if (isolationLevel != IsolationLevel.Unspecified && isolationLevel != IsolationLevel.Serializable)
-            throw new NotSupportedException($"Cloud Spanner only supports isolation levels {IsolationLevel.Serializable} and {IsolationLevel.Unspecified}.");
+            throw new NotSupportedException($"CamusDB only supports isolation levels {IsolationLevel.Serializable} and {IsolationLevel.Unspecified}.");
 
         return await BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
     }

@@ -141,17 +141,30 @@ public class CamusCommand : DbCommand, ICloneable
     protected override async Task<DbDataReader> ExecuteDbDataReaderAsync(CommandBehavior behavior, CancellationToken cancellationToken)
     {
         string endpoint = builder.Config["Endpoint"];
-        string database = builder.Config["Database"];
-
-        Dictionary<string, ColumnValue> commandParameters = GetCommandParameters();
+        string database = builder.Config["Database"];                
 
         try
         {
+            CamusExecuteSqlQueryRequest request = new()
+            {
+                DatabaseName = database,
+                Sql = source,
+                Parameters = GetCommandParameters()
+            };
+
+            if (transaction is not null)
+            {
+                request.TxnIdPT = transaction.TxnIdPT;
+                request.TxnIdCounter = transaction.TxnIdCounter;
+            }
+
+            string jsonRequest = Newtonsoft.Json.JsonConvert.SerializeObject(request);
+
             CamusExecuteSqlQueryResponse response = await endpoint
                                                         .WithHeader("Accept", "application/json")
                                                         .WithTimeout(CommandTimeout)
                                                         .AppendPathSegments("execute-sql-query")
-                                                        .PostJsonAsync(new { databaseName = database, sql = source, parameters = commandParameters }, cancellationToken)
+                                                        .PostStringAsync(jsonRequest, cancellationToken)
                                                         .ReceiveJson<CamusExecuteSqlQueryResponse>();
 
             if (response.Rows == null)
@@ -202,13 +215,26 @@ public class CamusCommand : DbCommand, ICloneable
             string endpoint = builder.Config["Endpoint"];
             string database = builder.Config["Database"];
 
-            Dictionary<string, ColumnValue> commandParameters = GetCommandParameters();
+            CamusExecuteSqlNonQueryRequest request = new()
+            {
+                DatabaseName = database,
+                Sql = source,
+                Parameters = GetCommandParameters()
+            };
+
+            if (transaction is not null)
+            {
+                request.TxnIdPT = transaction.TxnIdPT;
+                request.TxnIdCounter = transaction.TxnIdCounter;
+            }
+
+            string jsonRequest = Newtonsoft.Json.JsonConvert.SerializeObject(request);
 
             CamusExecuteSqlNonQueryResponse response = await endpoint
                                                                 .WithHeader("Accept", "application/json")
                                                                 .WithTimeout(CommandTimeout)
                                                                 .AppendPathSegments("execute-sql-non-query")
-                                                                .PostJsonAsync(new { databaseName = database, sql = source, parameters = commandParameters }, cancellationToken)
+                                                                .PostStringAsync(jsonRequest, cancellationToken)
                                                                 .ReceiveJson<CamusExecuteSqlNonQueryResponse>();
 
             return response.Rows;

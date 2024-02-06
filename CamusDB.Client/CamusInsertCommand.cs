@@ -26,7 +26,7 @@ public class CamusInsertCommand : CamusCommand
             string endpoint = builder.Config["Endpoint"];
             string database = builder.Config["Database"];
 
-            CamusExecuteSqlNonQueryRequest request = new()
+            CamusInsertRequest request = new()
             {
                 DatabaseName = database,
                 TableName = source,
@@ -45,7 +45,7 @@ public class CamusInsertCommand : CamusCommand
                                                         .WithHeader("Accept", "application/json")
                                                         .WithTimeout(CommandTimeout)
                                                         .AppendPathSegments("insert")
-                                                        .PostStringAsync(jsonRequest)
+                                                        .PostStringAsync(jsonRequest, cancellationToken)
                                                         .ReceiveJson<CamusExecuteSqlNonQueryResponse>();            
 
             return response.Rows;

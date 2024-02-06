@@ -10,7 +10,7 @@ using Newtonsoft.Json;
 
 namespace CamusDB.Client;
 
-public sealed class CamusExecuteSqlNonQueryRequest
+public sealed class CamusExecuteSqlQueryRequest
 {
     [JsonProperty("txnIdPT")]
     public long TxnIdPT { get; set; }
@@ -25,6 +25,6 @@ public sealed class CamusExecuteSqlNonQueryRequest
     public string? Sql { get; set; }
 
     [JsonProperty("parameters")]
-    public Dictionary<string, ColumnValue>? Parameters { get; set; }    
+    public Dictionary<string, ColumnValue>? Parameters { get; set; }
 }
 
