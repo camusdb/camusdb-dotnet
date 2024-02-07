@@ -92,6 +92,10 @@ public class CamusCommand : DbCommand, ICloneable
                 commandParameters.Add(parameter.ParameterName, new() { Type = parameter.ColumnType, LongValue = (int)parameter.Value! });
             else if (parameter.ColumnType == ColumnType.Integer64 && parameter.Value is long)
                 commandParameters.Add(parameter.ParameterName, new() { Type = parameter.ColumnType, LongValue = (long)parameter.Value! });
+            else if (parameter.ColumnType == ColumnType.Float64 && parameter.Value is float)
+                commandParameters.Add(parameter.ParameterName, new() { Type = parameter.ColumnType, FloatValue = (float)parameter.Value! });
+            else if (parameter.ColumnType == ColumnType.Float64 && parameter.Value is double)
+                commandParameters.Add(parameter.ParameterName, new() { Type = parameter.ColumnType, FloatValue = (double)parameter.Value! });
             else if (parameter.ColumnType == ColumnType.Bool)
                 commandParameters.Add(parameter.ParameterName, new() { Type = parameter.ColumnType, BoolValue = (bool)parameter.Value! });
             else

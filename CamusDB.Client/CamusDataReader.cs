@@ -153,7 +153,19 @@ public class CamusDataReader : DbDataReader
 
     public override double GetDouble(int ordinal)
     {
-        throw new NotImplementedException();
+        Dictionary<string, ColumnValue> current = GetCurrent();
+
+        int i = 0;
+
+        foreach (KeyValuePair<string, ColumnValue> keyValue in current)
+        {
+            if (i == ordinal)
+                return (double)keyValue.Value.FloatValue;
+
+            i++;
+        }
+
+        return 0;
     }
 
     public override IEnumerator GetEnumerator()
@@ -168,7 +180,19 @@ public class CamusDataReader : DbDataReader
 
     public override float GetFloat(int ordinal)
     {
-        throw new NotImplementedException();
+        Dictionary<string, ColumnValue> current = GetCurrent();
+
+        int i = 0;
+
+        foreach (KeyValuePair<string, ColumnValue> keyValue in current)
+        {
+            if (i == ordinal)
+                return (float)keyValue.Value.FloatValue;
+
+            i++;
+        }
+
+        return 0;
     }
 
     public override Guid GetGuid(int ordinal)

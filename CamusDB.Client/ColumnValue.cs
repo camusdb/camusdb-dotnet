@@ -24,6 +24,9 @@ public sealed class ColumnValue
     [JsonProperty("longValue")]
     public long LongValue { get; set; }
 
+    [JsonProperty("floatValue")]
+    public double FloatValue { get; set; }
+
     [JsonProperty("boolValue")]
     public bool BoolValue { get; set; }
 }
