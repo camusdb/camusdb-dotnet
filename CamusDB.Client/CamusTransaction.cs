@@ -62,7 +62,7 @@ public class CamusTransaction : DbTransaction
                                                         .WithHeader("Accept", "application/json")
                                                         .WithTimeout(10)
                                                         .AppendPathSegments("commit-transaction")
-                                                        .PostJsonAsync(new { databaseName = database, txnIdPT = txnIdPT, txnIdCounter = txnIdCounter }, cancellationToken)
+                                                        .PostJsonAsync(new { databaseName = database, txnIdPT = txnIdPT, txnIdCounter = txnIdCounter }, cancellationToken: cancellationToken)
                                                         .ReceiveJson<CamusStartTransactionResponse>();
 
             if (response.Status != "ok")
@@ -108,7 +108,7 @@ public class CamusTransaction : DbTransaction
                                                         .WithHeader("Accept", "application/json")
                                                         .WithTimeout(10)
                                                         .AppendPathSegments("rollback-transaction")
-                                                        .PostJsonAsync(new { databaseName = database, txnIdPT = txnIdPT, txnIdCounter = txnIdCounter }, cancellationToken)
+                                                        .PostJsonAsync(new { databaseName = database, txnIdPT = txnIdPT, txnIdCounter = txnIdCounter }, cancellationToken: cancellationToken)
                                                         .ReceiveJson<CamusStartTransactionResponse>();
 
             if (response.Status != "ok")

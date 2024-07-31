@@ -6,8 +6,8 @@
  * file that was distributed with this source code.
  */
 
+using System.Text.Json;
 using Flurl.Http;
-using Newtonsoft.Json;
 
 namespace CamusDB.Client;
 
@@ -39,13 +39,13 @@ public class CamusInsertCommand : CamusCommand
                 request.TxnIdCounter = transaction.TxnIdCounter;
             }
 
-            string jsonRequest = JsonConvert.SerializeObject(request);            
+            string jsonRequest = JsonSerializer.Serialize(request);            
 
             CamusExecuteSqlNonQueryResponse response = await endpoint
                                                         .WithHeader("Accept", "application/json")
                                                         .WithTimeout(CommandTimeout)
                                                         .AppendPathSegments("insert")
-                                                        .PostStringAsync(jsonRequest, cancellationToken)
+                                                        .PostStringAsync(jsonRequest, cancellationToken: cancellationToken)
                                                         .ReceiveJson<CamusExecuteSqlNonQueryResponse>();            
 
             return response.Rows;
@@ -58,7 +58,7 @@ public class CamusInsertCommand : CamusCommand
             {              
                 try
                 {
-                    CamusErrorResponse? errorResponse = System.Text.Json.JsonSerializer.Deserialize<CamusErrorResponse>(response);
+                    CamusErrorResponse? errorResponse = JsonSerializer.Deserialize<CamusErrorResponse>(response);
 
                     if (errorResponse is not null)
                         throw new CamusException(errorResponse.Code ?? "CADB0000", errorResponse.Message ?? "");

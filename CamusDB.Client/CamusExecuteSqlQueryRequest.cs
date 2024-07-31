@@ -6,25 +6,25 @@
  * file that was distributed with this source code.
  */
 
-using Newtonsoft.Json;
+using System.Text.Json.Serialization;
 
 namespace CamusDB.Client;
 
 public sealed class CamusExecuteSqlQueryRequest
 {
-    [JsonProperty("txnIdPT")]
+    [JsonPropertyName("txnIdPT")]
     public long TxnIdPT { get; set; }
 
-    [JsonProperty("txnIdCounter")]
+    [JsonPropertyName("txnIdCounter")]
     public uint TxnIdCounter { get; set; }
 
-    [JsonProperty("databaseName")]
+    [JsonPropertyName("databaseName")]
     public string? DatabaseName { get; set; }
 
-    [JsonProperty("sql")]
+    [JsonPropertyName("sql")]
     public string? Sql { get; set; }
 
-    [JsonProperty("parameters")]
+    [JsonPropertyName("parameters")]
     public Dictionary<string, ColumnValue>? Parameters { get; set; }
 }
 

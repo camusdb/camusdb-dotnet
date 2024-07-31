@@ -101,7 +101,7 @@ public sealed class CamusConnection : DbConnection
                                                         .WithHeader("Accept", "application/json")
                                                         .WithTimeout(10)
                                                         .AppendPathSegments("start-transaction")
-                                                        .PostJsonAsync(new { databaseName = database }, cancellationToken)
+                                                        .PostJsonAsync(new { databaseName = database }, cancellationToken: cancellationToken)
                                                         .ReceiveJson<CamusStartTransactionResponse>();
 
             if (response.Status != "ok")

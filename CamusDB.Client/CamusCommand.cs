@@ -162,13 +162,13 @@ public class CamusCommand : DbCommand, ICloneable
                 request.TxnIdCounter = transaction.TxnIdCounter;
             }
 
-            string jsonRequest = Newtonsoft.Json.JsonConvert.SerializeObject(request);
+            string jsonRequest = JsonSerializer.Serialize(request);
 
             CamusExecuteSqlQueryResponse response = await endpoint
                                                         .WithHeader("Accept", "application/json")
                                                         .WithTimeout(CommandTimeout)
                                                         .AppendPathSegments("execute-sql-query")
-                                                        .PostStringAsync(jsonRequest, cancellationToken)
+                                                        .PostStringAsync(jsonRequest, cancellationToken: cancellationToken)
                                                         .ReceiveJson<CamusExecuteSqlQueryResponse>();
 
             if (response.Rows == null)
@@ -232,13 +232,13 @@ public class CamusCommand : DbCommand, ICloneable
                 request.TxnIdCounter = transaction.TxnIdCounter;
             }
 
-            string jsonRequest = Newtonsoft.Json.JsonConvert.SerializeObject(request);
+            string jsonRequest = JsonSerializer.Serialize(request);
 
             CamusExecuteSqlNonQueryResponse response = await endpoint
                                                                 .WithHeader("Accept", "application/json")
                                                                 .WithTimeout(CommandTimeout)
                                                                 .AppendPathSegments("execute-sql-non-query")
-                                                                .PostStringAsync(jsonRequest, cancellationToken)
+                                                                .PostStringAsync(jsonRequest, cancellationToken: cancellationToken)
                                                                 .ReceiveJson<CamusExecuteSqlNonQueryResponse>();
 
             return response.Rows;
@@ -296,7 +296,7 @@ public class CamusCommand : DbCommand, ICloneable
                                     .WithHeader("Accept", "application/json")
                                     .WithTimeout(CommandTimeout)
                                     .AppendPathSegments("execute-sql-ddl")
-                                    .PostJsonAsync(new { databaseName = database, sql = source }, cancellationToken)
+                                    .PostJsonAsync(new { databaseName = database, sql = source }, cancellationToken: cancellationToken)
                                     .ReceiveJson<CamusExecuteDDLResponse>();
 
             return response.Status == "ok";

@@ -6,12 +6,12 @@
  * file that was distributed with this source code.
  */
 
-using Newtonsoft.Json;
+using System.Text.Json.Serialization;
 
 namespace CamusDB.Client;
 
 internal sealed class CamusExecuteDDLResponse
 {
-    [JsonProperty("status")]
+    [JsonPropertyName("status")]
     public string? Status { get; set; }    
 }

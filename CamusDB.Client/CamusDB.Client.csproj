@@ -7,7 +7,7 @@
         <ImplicitUsings>enable</ImplicitUsings>
         <Nullable>enable</Nullable>
         <PackageId>CamusDB.Client</PackageId>
-        <Version>0.0.9-alpha</Version>
+        <Version>0.1.1-alpha</Version>
         <Description>CamusDB.Client is the ADO.NET provider for CamusDB. It is the recommended package for regular CamusDB database access from .NET.</Description>
         <Authors>CamusDB</Authors>
         <Company>CamusDB</Company>    
@@ -21,8 +21,8 @@
     </PropertyGroup>
 
     <ItemGroup>
-        <PackageReference Include="Flurl" Version="3.0.7" />
-        <PackageReference Include="Flurl.Http" Version="3.2.4" />
+        <PackageReference Include="Flurl" Version="4.0.0" />
+        <PackageReference Include="Flurl.Http" Version="4.0.2" />
         <PackageReference Include="Polly" Version="7.2.4" />
         <PackageReference Include="Polly.Contrib.WaitAndRetry" Version="1.1.1" />
     </ItemGroup>

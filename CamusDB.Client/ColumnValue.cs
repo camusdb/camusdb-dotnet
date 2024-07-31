@@ -6,7 +6,7 @@
  * file that was distributed with this source code.
  */
 
-using Newtonsoft.Json;
+using System.Text.Json.Serialization;
 
 namespace CamusDB.Client;
 
@@ -15,18 +15,18 @@ namespace CamusDB.Client;
 /// </summary>
 public sealed class ColumnValue
 {
-    [JsonProperty("type")]
+    [JsonPropertyName("type")]
     public ColumnType Type { get; set; }
 
-    [JsonProperty("strValue")]
+    [JsonPropertyName("strValue")]
     public string? StrValue { get; set; }
 
-    [JsonProperty("longValue")]
+    [JsonPropertyName("longValue")]
     public long LongValue { get; set; }
 
-    [JsonProperty("floatValue")]
+    [JsonPropertyName("floatValue")]
     public double FloatValue { get; set; }
 
-    [JsonProperty("boolValue")]
+    [JsonPropertyName("boolValue")]
     public bool BoolValue { get; set; }
 }

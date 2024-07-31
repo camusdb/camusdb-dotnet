@@ -6,15 +6,13 @@
  * file that was distributed with this source code.
  */
 
-using Flurl.Http;
-
 namespace CamusDB.Client.Tests;
 
 public class TestPoolManager
 {
     public TestPoolManager()
     {
-        FlurlHttp.ConfigureClient("https://localhost:7141", cli => cli.Settings.HttpClientFactory = new UntrustedCertClientFactory());
+        //FlurlHttp.ConfigureClient("https://localhost:7141", cli => cli.Settings.HttpClientFactory = new UntrustedCertClientFactory());
     }
 
     [Fact]

@@ -6,18 +6,18 @@
  * file that was distributed with this source code.
  */
 
-using Newtonsoft.Json;
+using System.Text.Json.Serialization;
 
 namespace CamusDB.Client;
 
 public sealed class CamusStartTransactionResponse
 {
-    [JsonProperty("txnIdPT")]
+    [JsonPropertyName("txnIdPT")]
     public long TxnIdPT { get; set; }
 
-    [JsonProperty("txnIdCounter")]
+    [JsonPropertyName("txnIdCounter")]
     public uint TxnIdCounter { get; set; }
 
-    [JsonProperty("status")]
+    [JsonPropertyName("status")]
     public string? Status { get; set; }
 }
