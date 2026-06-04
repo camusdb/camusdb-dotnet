@@ -21,26 +21,32 @@ public class CamusPingCommand : CamusCommand
     /// <inheritdoc />
     public override async Task<int> ExecuteNonQueryAsync(CancellationToken cancellationToken)
     {
+        string endpoint = "";
+
         try
         {
-            string endpoint = builder.Config["Endpoint"];
+            endpoint = builder.GetEndpoint();
 
-            CamusExecuteSqlNonQueryResponse response = await endpoint
+            string responseJson = await endpoint
                                                         .WithTimeout(CommandTimeout)
                                                         .AppendPathSegments("ping")
-                                                        .GetJsonAsync<CamusExecuteSqlNonQueryResponse>();
+                                                        .GetStringAsync(cancellationToken: cancellationToken);
 
-            return response.Status == "ok" ? 1 : 0;
+            CamusExecuteSqlNonQueryResponse? response = JsonSerializer.Deserialize(responseJson, CamusJsonSerializerContext.Default.CamusExecuteSqlNonQueryResponse);
+
+            return response?.Status == "ok" ? 1 : 0;
         }
         catch (FlurlHttpException ex)
         {
+            CamusEndpointHealth.MarkUnreachableIfTransportFailed(builder, endpoint, ex);
+
             string response = await ex.GetResponseStringAsync();
 
             if (!string.IsNullOrEmpty(response))
             {
                 try
                 {
-                    CamusErrorResponse? errorResponse = JsonSerializer.Deserialize<CamusErrorResponse>(response);
+                    CamusErrorResponse? errorResponse = JsonSerializer.Deserialize(response, CamusJsonSerializerContext.Default.CamusErrorResponse);
 
                     if (errorResponse is not null)
                         throw new CamusException(errorResponse.Code ?? "CADB0000", errorResponse.Message ?? "");

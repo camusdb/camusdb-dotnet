@@ -21,9 +21,11 @@ public class CamusInsertCommand : CamusCommand
     /// <inheritdoc />
     public override async Task<int> ExecuteNonQueryAsync(CancellationToken cancellationToken)
     {
+        string endpoint = "";
+
         try
         {
-            string endpoint = builder.Config["Endpoint"];
+            endpoint = builder.GetEndpoint();
             string database = builder.Config["Database"];
 
             CamusInsertRequest request = new()
@@ -39,26 +41,33 @@ public class CamusInsertCommand : CamusCommand
                 request.TxnIdCounter = transaction.TxnIdCounter;
             }
 
-            string jsonRequest = JsonSerializer.Serialize(request);            
+            string jsonRequest = JsonSerializer.Serialize(request, CamusJsonSerializerContext.Default.CamusInsertRequest);
 
-            CamusExecuteSqlNonQueryResponse response = await endpoint
+            string responseJson = await endpoint
                                                         .WithHeader("Accept", "application/json")
                                                         .WithTimeout(CommandTimeout)
                                                         .AppendPathSegments("insert")
-                                                        .PostStringAsync(jsonRequest, cancellationToken: cancellationToken)
-                                                        .ReceiveJson<CamusExecuteSqlNonQueryResponse>();            
+                                                        .PostAsync(CamusJsonContent.Create(jsonRequest), cancellationToken: cancellationToken)
+                                                        .ReceiveString();
+
+            CamusExecuteSqlNonQueryResponse? response = JsonSerializer.Deserialize(responseJson, CamusJsonSerializerContext.Default.CamusExecuteSqlNonQueryResponse);
+
+            if (response is null)
+                throw new CamusException("CADB0000", "Empty result returned");
 
             return response.Rows;
         }
         catch (FlurlHttpException ex)
         {
+            CamusEndpointHealth.MarkUnreachableIfTransportFailed(builder, endpoint, ex);
+
             string response = await ex.GetResponseStringAsync();          
 
             if (!string.IsNullOrEmpty(response))
             {              
                 try
                 {
-                    CamusErrorResponse? errorResponse = JsonSerializer.Deserialize<CamusErrorResponse>(response);
+                    CamusErrorResponse? errorResponse = JsonSerializer.Deserialize(response, CamusJsonSerializerContext.Default.CamusErrorResponse);
 
                     if (errorResponse is not null)
                         throw new CamusException(errorResponse.Code ?? "CADB0000", errorResponse.Message ?? "");

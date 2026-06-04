@@ -144,11 +144,13 @@ public class CamusCommand : DbCommand, ICloneable
     /// <inheritdoc />
     protected override async Task<DbDataReader> ExecuteDbDataReaderAsync(CommandBehavior behavior, CancellationToken cancellationToken)
     {
-        string endpoint = builder.Config["Endpoint"];
+        string endpoint = "";
         string database = builder.Config["Database"];                
 
         try
         {
+            endpoint = builder.GetEndpoint();
+
             CamusExecuteSqlQueryRequest request = new()
             {
                 DatabaseName = database,
@@ -162,29 +164,33 @@ public class CamusCommand : DbCommand, ICloneable
                 request.TxnIdCounter = transaction.TxnIdCounter;
             }
 
-            string jsonRequest = JsonSerializer.Serialize(request);
+            string jsonRequest = JsonSerializer.Serialize(request, CamusJsonSerializerContext.Default.CamusExecuteSqlQueryRequest);
 
-            CamusExecuteSqlQueryResponse response = await endpoint
-                                                        .WithHeader("Accept", "application/json")
-                                                        .WithTimeout(CommandTimeout)
-                                                        .AppendPathSegments("execute-sql-query")
-                                                        .PostStringAsync(jsonRequest, cancellationToken: cancellationToken)
-                                                        .ReceiveJson<CamusExecuteSqlQueryResponse>();
+            string responseJson = await endpoint
+                                        .WithHeader("Accept", "application/json")
+                                        .WithTimeout(CommandTimeout)
+                                        .AppendPathSegments("execute-sql-query")
+                                        .PostAsync(CamusJsonContent.Create(jsonRequest), cancellationToken: cancellationToken)
+                                        .ReceiveString();
 
-            if (response.Rows == null)
+            CamusExecuteSqlQueryResponse? response = JsonSerializer.Deserialize(responseJson, CamusJsonSerializerContext.Default.CamusExecuteSqlQueryResponse);
+
+            if (response?.Rows == null)
                 throw new CamusException("CADB0000", "Empty result returned");
 
             return new CamusDataReader(response.Rows);
         }
         catch (FlurlHttpException ex)
         {
+            CamusEndpointHealth.MarkUnreachableIfTransportFailed(builder, endpoint, ex);
+
             string response = await ex.GetResponseStringAsync();
 
             if (!string.IsNullOrEmpty(response))
             {
                 try
                 {
-                    CamusErrorResponse? errorResponse = JsonSerializer.Deserialize<CamusErrorResponse>(response);
+                    CamusErrorResponse? errorResponse = JsonSerializer.Deserialize(response, CamusJsonSerializerContext.Default.CamusErrorResponse);
 
                     if (errorResponse is not null)
                         throw new CamusException(errorResponse.Code ?? "CADB0000", errorResponse.Message ?? "");
@@ -214,9 +220,11 @@ public class CamusCommand : DbCommand, ICloneable
     /// <inheritdoc />
     public override async Task<int> ExecuteNonQueryAsync(CancellationToken cancellationToken)
     {
+        string endpoint = "";
+
         try
         {
-            string endpoint = builder.Config["Endpoint"];
+            endpoint = builder.GetEndpoint();
             string database = builder.Config["Database"];
 
             CamusExecuteSqlNonQueryRequest request = new()
@@ -232,26 +240,33 @@ public class CamusCommand : DbCommand, ICloneable
                 request.TxnIdCounter = transaction.TxnIdCounter;
             }
 
-            string jsonRequest = JsonSerializer.Serialize(request);
+            string jsonRequest = JsonSerializer.Serialize(request, CamusJsonSerializerContext.Default.CamusExecuteSqlNonQueryRequest);
 
-            CamusExecuteSqlNonQueryResponse response = await endpoint
-                                                                .WithHeader("Accept", "application/json")
-                                                                .WithTimeout(CommandTimeout)
-                                                                .AppendPathSegments("execute-sql-non-query")
-                                                                .PostStringAsync(jsonRequest, cancellationToken: cancellationToken)
-                                                                .ReceiveJson<CamusExecuteSqlNonQueryResponse>();
+            string responseJson = await endpoint
+                                        .WithHeader("Accept", "application/json")
+                                        .WithTimeout(CommandTimeout)
+                                        .AppendPathSegments("execute-sql-non-query")
+                                        .PostAsync(CamusJsonContent.Create(jsonRequest), cancellationToken: cancellationToken)
+                                        .ReceiveString();
+
+            CamusExecuteSqlNonQueryResponse? response = JsonSerializer.Deserialize(responseJson, CamusJsonSerializerContext.Default.CamusExecuteSqlNonQueryResponse);
+
+            if (response is null)
+                throw new CamusException("CADB0000", "Empty result returned");
 
             return response.Rows;
         }
         catch (FlurlHttpException ex)
         {
+            CamusEndpointHealth.MarkUnreachableIfTransportFailed(builder, endpoint, ex);
+
             string response = await ex.GetResponseStringAsync();
 
             if (!string.IsNullOrEmpty(response))
             {
                 try
                 {
-                    CamusErrorResponse? errorResponse = JsonSerializer.Deserialize<CamusErrorResponse>(response);
+                    CamusErrorResponse? errorResponse = JsonSerializer.Deserialize(response, CamusJsonSerializerContext.Default.CamusErrorResponse);
 
                     if (errorResponse is not null)
                         throw new CamusException(errorResponse.Code ?? "CADB0000", errorResponse.Message ?? "");
@@ -287,29 +302,43 @@ public class CamusCommand : DbCommand, ICloneable
     /// <inheritdoc />
     public async Task<bool> ExecuteDDLAsync(CancellationToken cancellationToken)
     {
+        string endpoint = "";
+
         try
         {
-            string endpoint = builder.Config["Endpoint"];
+            endpoint = builder.GetEndpoint();
             string database = builder.Config["Database"];            
 
-            CamusExecuteDDLResponse response = await endpoint
+            CamusExecuteDDLRequest request = new()
+            {
+                DatabaseName = database,
+                Sql = source
+            };
+
+            string jsonRequest = JsonSerializer.Serialize(request, CamusJsonSerializerContext.Default.CamusExecuteDDLRequest);
+
+            string responseJson = await endpoint
                                     .WithHeader("Accept", "application/json")
                                     .WithTimeout(CommandTimeout)
                                     .AppendPathSegments("execute-sql-ddl")
-                                    .PostJsonAsync(new { databaseName = database, sql = source }, cancellationToken: cancellationToken)
-                                    .ReceiveJson<CamusExecuteDDLResponse>();
+                                    .PostAsync(CamusJsonContent.Create(jsonRequest), cancellationToken: cancellationToken)
+                                    .ReceiveString();
 
-            return response.Status == "ok";
+            CamusExecuteDDLResponse? response = JsonSerializer.Deserialize(responseJson, CamusJsonSerializerContext.Default.CamusExecuteDDLResponse);
+
+            return response?.Status == "ok";
         }
         catch (FlurlHttpException ex)
         {
+            CamusEndpointHealth.MarkUnreachableIfTransportFailed(builder, endpoint, ex);
+
             string response = await ex.GetResponseStringAsync();
 
             if (!string.IsNullOrEmpty(response))
             {
                 try
                 {
-                    CamusErrorResponse? errorResponse = JsonSerializer.Deserialize<CamusErrorResponse>(response);
+                    CamusErrorResponse? errorResponse = JsonSerializer.Deserialize(response, CamusJsonSerializerContext.Default.CamusErrorResponse);
 
                     if (errorResponse is not null)
                         throw new CamusException(errorResponse.Code ?? "CADB0000", errorResponse.Message ?? "");

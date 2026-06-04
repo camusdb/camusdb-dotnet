@@ -53,30 +53,45 @@ public class CamusTransaction : DbTransaction
     /// <param name="cancellationToken">A cancellation token used for this task.</param>    
     public new async Task CommitAsync(CancellationToken cancellationToken = default)
     {        
-        string endpoint = builder.Config["Endpoint"];
+        string endpoint = "";
         string database = builder.Config["Database"];
 
         try
         {
-            CamusStartTransactionResponse response = await endpoint
+            endpoint = builder.GetEndpoint();
+
+            CamusTransactionRequest request = new()
+            {
+                DatabaseName = database,
+                TxnIdPT = txnIdPT,
+                TxnIdCounter = txnIdCounter
+            };
+
+            string jsonRequest = JsonSerializer.Serialize(request, CamusJsonSerializerContext.Default.CamusTransactionRequest);
+
+            string responseJson = await endpoint
                                                         .WithHeader("Accept", "application/json")
                                                         .WithTimeout(10)
                                                         .AppendPathSegments("commit-transaction")
-                                                        .PostJsonAsync(new { databaseName = database, txnIdPT = txnIdPT, txnIdCounter = txnIdCounter }, cancellationToken: cancellationToken)
-                                                        .ReceiveJson<CamusStartTransactionResponse>();
+                                                        .PostAsync(CamusJsonContent.Create(jsonRequest), cancellationToken: cancellationToken)
+                                                        .ReceiveString();
 
-            if (response.Status != "ok")
+            CamusStartTransactionResponse? response = JsonSerializer.Deserialize(responseJson, CamusJsonSerializerContext.Default.CamusStartTransactionResponse);
+
+            if (response?.Status != "ok")
                 throw new CamusException("CADB0000", "Empty result returned");            
         }
         catch (FlurlHttpException ex)
         {
+            CamusEndpointHealth.MarkUnreachableIfTransportFailed(builder, endpoint, ex);
+
             string response = await ex.GetResponseStringAsync();
 
             if (!string.IsNullOrEmpty(response))
             {
                 try
                 {
-                    CamusErrorResponse? errorResponse = JsonSerializer.Deserialize<CamusErrorResponse>(response);
+                    CamusErrorResponse? errorResponse = JsonSerializer.Deserialize(response, CamusJsonSerializerContext.Default.CamusErrorResponse);
 
                     if (errorResponse is not null)
                         throw new CamusException(errorResponse.Code ?? "CADB0000", errorResponse.Message ?? "");
@@ -99,30 +114,45 @@ public class CamusTransaction : DbTransaction
     /// <param name="cancellationToken">A cancellation token used for this task.</param>    
     public new async Task RollbackAsync(CancellationToken cancellationToken = default)
     {
-        string endpoint = builder.Config["Endpoint"];
+        string endpoint = "";
         string database = builder.Config["Database"];
 
         try
         {
-            CamusStartTransactionResponse response = await endpoint
+            endpoint = builder.GetEndpoint();
+
+            CamusTransactionRequest request = new()
+            {
+                DatabaseName = database,
+                TxnIdPT = txnIdPT,
+                TxnIdCounter = txnIdCounter
+            };
+
+            string jsonRequest = JsonSerializer.Serialize(request, CamusJsonSerializerContext.Default.CamusTransactionRequest);
+
+            string responseJson = await endpoint
                                                         .WithHeader("Accept", "application/json")
                                                         .WithTimeout(10)
                                                         .AppendPathSegments("rollback-transaction")
-                                                        .PostJsonAsync(new { databaseName = database, txnIdPT = txnIdPT, txnIdCounter = txnIdCounter }, cancellationToken: cancellationToken)
-                                                        .ReceiveJson<CamusStartTransactionResponse>();
+                                                        .PostAsync(CamusJsonContent.Create(jsonRequest), cancellationToken: cancellationToken)
+                                                        .ReceiveString();
 
-            if (response.Status != "ok")
+            CamusStartTransactionResponse? response = JsonSerializer.Deserialize(responseJson, CamusJsonSerializerContext.Default.CamusStartTransactionResponse);
+
+            if (response?.Status != "ok")
                 throw new CamusException("CADB0000", "Empty result returned");
         }
         catch (FlurlHttpException ex)
         {
+            CamusEndpointHealth.MarkUnreachableIfTransportFailed(builder, endpoint, ex);
+
             string response = await ex.GetResponseStringAsync();
 
             if (!string.IsNullOrEmpty(response))
             {
                 try
                 {
-                    CamusErrorResponse? errorResponse = JsonSerializer.Deserialize<CamusErrorResponse>(response);
+                    CamusErrorResponse? errorResponse = JsonSerializer.Deserialize(response, CamusJsonSerializerContext.Default.CamusErrorResponse);
 
                     if (errorResponse is not null)
                         throw new CamusException(errorResponse.Code ?? "CADB0000", errorResponse.Message ?? "");

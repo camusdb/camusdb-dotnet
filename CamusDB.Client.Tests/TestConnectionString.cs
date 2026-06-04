@@ -61,5 +61,37 @@ public class TestConnectionString : BaseTest
 
         Assert.Equal("https://localhost:7141", builder.Config["Endpoint"]);
         Assert.Equal("test", builder.Config["Database"]);
-    } 
-}
+    }
+
+    [Fact]
+    public void TestConnectionStringEndpointPoolRoundRobin()
+    {
+        CamusConnectionStringBuilder builder = new("Endpoint=http://localhost:8082,http://localhost:8084,http://localhost:8086;Database=test")
+        {
+
+        };
+
+        Assert.Equal("http://localhost:8082,http://localhost:8084,http://localhost:8086", builder.Config["Endpoint"]);
+        Assert.Equal("http://localhost:8082", builder.GetEndpoint());
+        Assert.Equal("http://localhost:8084", builder.GetEndpoint());
+        Assert.Equal("http://localhost:8086", builder.GetEndpoint());
+        Assert.Equal("http://localhost:8082", builder.GetEndpoint());
+    }
+
+    [Fact]
+    public void TestConnectionStringEndpointPoolSkipsUnreachableEndpoints()
+    {
+        CamusConnectionStringBuilder builder = new("Endpoint=http://localhost:8082,http://localhost:8084,http://localhost:8086;Database=test")
+        {
+
+        };
+
+        Assert.Equal("http://localhost:8082", builder.GetEndpoint());
+
+        builder.MarkEndpointUnreachable("http://localhost:8084");
+
+        Assert.Equal("http://localhost:8086", builder.GetEndpoint());
+        Assert.Equal("http://localhost:8082", builder.GetEndpoint());
+        Assert.Equal("http://localhost:8086", builder.GetEndpoint());
+    }
+} 
