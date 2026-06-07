@@ -56,7 +56,7 @@ public class CamusUpdateSqlGenerator : UpdateSqlGenerator
         requiresTransaction = false;
 
         var setOps = command.ColumnModifications.Where(o => o.IsWrite && !o.IsKey).ToList();
-        var keyOps = command.ColumnModifications.Where(o => o.IsKey).ToList();
+        var whereOps = command.ColumnModifications.Where(o => o.IsKey || o.IsCondition).ToList();
 
         if (setOps.Count == 0)
             return ResultSetMapping.NoResults;
@@ -75,11 +75,11 @@ public class CamusUpdateSqlGenerator : UpdateSqlGenerator
             first = false;
         }
 
-        if (keyOps.Count > 0)
+        if (whereOps.Count > 0)
         {
             commandStringBuilder.Append(" WHERE ");
             first = true;
-            foreach (var op in keyOps)
+            foreach (var op in whereOps)
             {
                 if (!first) commandStringBuilder.Append(" AND ");
                 commandStringBuilder.Append(op.ColumnName).Append(" = ");
@@ -104,15 +104,15 @@ public class CamusUpdateSqlGenerator : UpdateSqlGenerator
     {
         requiresTransaction = false;
 
-        var keyOps = command.ColumnModifications.Where(o => o.IsKey).ToList();
+        var whereOps = command.ColumnModifications.Where(o => o.IsKey || o.IsCondition).ToList();
 
         commandStringBuilder.Append("DELETE FROM ").Append(command.TableName);
 
-        if (keyOps.Count > 0)
+        if (whereOps.Count > 0)
         {
             commandStringBuilder.Append(" WHERE ");
             bool first = true;
-            foreach (var op in keyOps)
+            foreach (var op in whereOps)
             {
                 if (!first) commandStringBuilder.Append(" AND ");
                 commandStringBuilder.Append(op.ColumnName).Append(" = ");

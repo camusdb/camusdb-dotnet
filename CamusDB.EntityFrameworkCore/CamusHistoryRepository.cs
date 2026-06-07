@@ -7,9 +7,9 @@ public class CamusHistoryRepository : HistoryRepository
     public CamusHistoryRepository(HistoryRepositoryDependencies dependencies)
         : base(dependencies) { }
 
-    // CamusDB will throw if this table doesn't exist — we wrap Exists() in a try-catch
+    // Use backtick-quoted identifiers; CamusDB throws if the table doesn't exist
     protected override string ExistsSql
-        => $"SELECT {MigrationIdColumnName} FROM {TableName} WHERE 1 = 0";
+        => $"SELECT `{MigrationIdColumnName}` FROM `{TableName}` WHERE 1 = 0";
 
     // If the query above ran without throwing, the table is there
     protected override bool InterpretExistsResult(object? value) => true;
@@ -26,8 +26,9 @@ public class CamusHistoryRepository : HistoryRepository
         catch { return false; }
     }
 
-    // CamusDB has no IF NOT EXISTS table syntax; rely on Exists() check + normal CreateScript
-    public override string GetCreateIfNotExistsScript() => GetCreateScript();
+    // Inject IF NOT EXISTS into the generated CREATE TABLE statement
+    public override string GetCreateIfNotExistsScript()
+        => GetCreateScript().Replace("CREATE TABLE ", "CREATE TABLE IF NOT EXISTS ", StringComparison.Ordinal);
 
     // Conditional scripting blocks — CamusDB has no equivalent of DO $$ BEGIN ... END $$
     public override string GetBeginIfExistsScript(string migrationId) => "";

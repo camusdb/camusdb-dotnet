@@ -310,7 +310,18 @@ await ctx.SaveChangesAsync();
 
 ### Migrations
 
-The provider supports EF Core migrations for `CREATE TABLE`, `DROP TABLE`, `CREATE INDEX`, and `DROP INDEX`. Schema-altering operations (ADD COLUMN, RENAME TABLE, foreign keys, etc.) are not supported and will throw `NotSupportedException` at migration generation time.
+The provider supports EF Core migrations for the following DDL operations:
+
+| Operation | Generated SQL |
+| --- | --- |
+| Create table | `CREATE TABLE t (col TYPE [PRIMARY KEY NOT NULL \| NOT NULL], ...)` |
+| Drop table | `DROP TABLE t` |
+| Add column | `ALTER TABLE t ADD COLUMN col TYPE [NOT NULL] [DEFAULT (value)]` |
+| Drop column | `ALTER TABLE t DROP COLUMN col` |
+| Create index | `CREATE INDEX name ON t (col1, col2)` |
+| Create unique index | `CREATE UNIQUE INDEX name ON t (col1, col2)` |
+| Drop index | `ALTER TABLE t DROP INDEX name` |
+| Raw SQL | passed through as-is |
 
 Add and apply a migration:
 
@@ -319,12 +330,62 @@ dotnet ef migrations add InitialCreate
 dotnet ef database update
 ```
 
+Example migration using the supported operations:
+
+```csharp
+public partial class AddStockColumn : Migration
+{
+    protected override void Up(MigrationBuilder migrationBuilder)
+    {
+        migrationBuilder.AddColumn<int>(
+            name: "Stock",
+            table: "products",
+            type: "int64",
+            nullable: false,
+            defaultValue: 0);
+
+        migrationBuilder.CreateIndex(
+            name: "idx_products_name",
+            table: "products",
+            column: "Name",
+            unique: true);
+    }
+
+    protected override void Down(MigrationBuilder migrationBuilder)
+    {
+        migrationBuilder.DropIndex(name: "idx_products_name", table: "products");
+        migrationBuilder.DropColumn(name: "Stock", table: "products");
+    }
+}
+```
+
+### Concurrency Tokens
+
+`[ConcurrencyCheck]` is supported on numeric columns (`short`, `int`, `long`). The application is responsible for incrementing the version column before calling `SaveChanges()` — CamusDB has no server-side auto-increment version type:
+
+```csharp
+public class Order
+{
+    public string Id      { get; set; } = "";
+    public string Status  { get; set; } = "";
+    [ConcurrencyCheck]
+    public long Version   { get; set; }
+}
+
+// On update: increment Version manually so EF adds AND Version = @original_version to the WHERE
+order.Status = "shipped";
+order.Version++;
+await ctx.SaveChangesAsync();
+```
+
+`[Timestamp]` (byte array row version) is not supported.
+
 ### Provider Limitations
 
-- No concurrency tokens (`[ConcurrencyCheck]`, `[Timestamp]`).
 - No computed columns.
 - No foreign key constraints.
-- No ALTER TABLE after a table is created — dropping and recreating is required.
+- No `ALTER COLUMN` — changing a column type requires dropping and recreating the column.
+- No `RENAME COLUMN`, `RENAME TABLE`, or `RENAME INDEX`.
 - Key CLR types must be one of: `string`, `int`, `long`, `short`, or `Guid`.
 
 ---

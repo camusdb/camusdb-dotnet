@@ -1,3 +1,4 @@
+using CamusDB.Client;
 using CamusDB.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
@@ -24,6 +25,40 @@ public class TestEntityFrameworkProvider
 
         Assert.NotNull(extension);
         Assert.Equal("Endpoint=http://localhost:5095;Database=test", extension!.ConnectionString);
+    }
+
+    [Fact]
+    public void TestUseCamusDBWithExternalConnectionStoresConnection()
+    {
+        var connection = new CamusConnection(
+            new CamusConnectionStringBuilder("Endpoint=http://localhost:5095;Database=test"));
+
+        DbContextOptionsBuilder builder = new();
+        builder.UseCamusDB(connection);
+
+        CamusDBOptionsExtension? extension = builder.Options.FindExtension<CamusDBOptionsExtension>();
+
+        Assert.NotNull(extension);
+        Assert.Same(connection, extension!.Connection);
+        Assert.Null(extension.ConnectionString);
+    }
+
+    [Fact]
+    public void TestUseCamusDBWithExternalConnectionContextOpens()
+    {
+        var connection = new CamusConnection(
+            new CamusConnectionStringBuilder("Endpoint=http://localhost:5095;Database=test"));
+
+        var options = new DbContextOptionsBuilder<SimpleProductContext>()
+            .UseCamusDB(connection)
+            .Options;
+
+        using var ctx = new SimpleProductContext(options);
+
+        // The registered relational connection should wrap the externally supplied DbConnection
+        var relationalConnection = ctx.GetService<IRelationalConnection>();
+        Assert.NotNull(relationalConnection);
+        Assert.Same(connection, relationalConnection.DbConnection);
     }
 
     [Fact]
@@ -88,7 +123,7 @@ public class TestEntityFrameworkProvider
     }
 
     [Fact]
-    public void TestModelValidatorRejectsConcurrencyTokens()
+    public void TestModelValidatorRejectsNonNumericConcurrencyTokens()
     {
         var options = new DbContextOptionsBuilder<ConcurrencyTokenContext>()
             .UseCamusDB("Endpoint=http://localhost:5095;Database=test")
@@ -99,6 +134,19 @@ public class TestEntityFrameworkProvider
             using var ctx = new ConcurrencyTokenContext(options);
             ctx.Model.GetEntityTypes(); // triggers model building + validation
         });
+    }
+
+    [Fact]
+    public void TestModelValidatorAcceptsNumericConcurrencyTokens()
+    {
+        var options = new DbContextOptionsBuilder<NumericConcurrencyTokenContext>()
+            .UseCamusDB("Endpoint=http://localhost:5095;Database=test")
+            .Options;
+
+        // Should not throw — int/long/short are supported concurrency token types
+        using var ctx = new NumericConcurrencyTokenContext(options);
+        var entityTypes = ctx.Model.GetEntityTypes();
+        Assert.NotEmpty(entityTypes);
     }
 
     [Fact]
@@ -295,6 +343,122 @@ public class TestEntityFrameworkProvider
     }
 
     [Fact]
+    public void TestMigrationsSqlGeneratorCreateUniqueIndex()
+    {
+        var options = new DbContextOptionsBuilder<SimpleProductContext>()
+            .UseCamusDB("Endpoint=http://localhost:5095;Database=test")
+            .Options;
+
+        using var ctx = new SimpleProductContext(options);
+        var generator = ctx.GetService<IMigrationsSqlGenerator>();
+
+        var operation = new CreateIndexOperation
+        {
+            Name = "uq_products_name",
+            Table = "products",
+            Columns = ["Name"],
+            IsUnique = true
+        };
+
+        var commands = generator.Generate([operation], null);
+
+        Assert.Single(commands);
+        Assert.Contains("CREATE UNIQUE INDEX uq_products_name ON products", commands[0].CommandText);
+    }
+
+    [Fact]
+    public void TestMigrationsSqlGeneratorDropIndex()
+    {
+        var options = new DbContextOptionsBuilder<SimpleProductContext>()
+            .UseCamusDB("Endpoint=http://localhost:5095;Database=test")
+            .Options;
+
+        using var ctx = new SimpleProductContext(options);
+        var generator = ctx.GetService<IMigrationsSqlGenerator>();
+
+        var operation = new DropIndexOperation { Name = "idx_products_name", Table = "products" };
+
+        var commands = generator.Generate([operation], null);
+
+        Assert.Single(commands);
+        // CamusDB syntax: ALTER TABLE t DROP INDEX name
+        Assert.Contains("ALTER TABLE products DROP INDEX idx_products_name", commands[0].CommandText);
+    }
+
+    [Fact]
+    public void TestMigrationsSqlGeneratorAddColumn()
+    {
+        var options = new DbContextOptionsBuilder<SimpleProductContext>()
+            .UseCamusDB("Endpoint=http://localhost:5095;Database=test")
+            .Options;
+
+        using var ctx = new SimpleProductContext(options);
+        var generator = ctx.GetService<IMigrationsSqlGenerator>();
+
+        var operation = new AddColumnOperation
+        {
+            Name = "Stock",
+            Table = "products",
+            ClrType = typeof(int),
+            ColumnType = "int64",
+            IsNullable = false
+        };
+
+        var commands = generator.Generate([operation], null);
+
+        Assert.Single(commands);
+        var sql = commands[0].CommandText;
+        Assert.Contains("ALTER TABLE products ADD COLUMN Stock INT64", sql);
+        Assert.Contains("NOT NULL", sql);
+    }
+
+    [Fact]
+    public void TestMigrationsSqlGeneratorAddColumnWithDefault()
+    {
+        var options = new DbContextOptionsBuilder<SimpleProductContext>()
+            .UseCamusDB("Endpoint=http://localhost:5095;Database=test")
+            .Options;
+
+        using var ctx = new SimpleProductContext(options);
+        var generator = ctx.GetService<IMigrationsSqlGenerator>();
+
+        var operation = new AddColumnOperation
+        {
+            Name = "Active",
+            Table = "products",
+            ClrType = typeof(bool),
+            ColumnType = "bool",
+            IsNullable = false,
+            DefaultValue = true
+        };
+
+        var commands = generator.Generate([operation], null);
+
+        Assert.Single(commands);
+        var sql = commands[0].CommandText;
+        Assert.Contains("ALTER TABLE products ADD COLUMN Active BOOL", sql);
+        Assert.Contains("DEFAULT (true)", sql);
+    }
+
+    [Fact]
+    public void TestMigrationsSqlGeneratorDropColumn()
+    {
+        var options = new DbContextOptionsBuilder<SimpleProductContext>()
+            .UseCamusDB("Endpoint=http://localhost:5095;Database=test")
+            .Options;
+
+        using var ctx = new SimpleProductContext(options);
+        var generator = ctx.GetService<IMigrationsSqlGenerator>();
+
+        var operation = new DropColumnOperation { Name = "Price", Table = "products" };
+
+        var commands = generator.Generate([operation], null);
+
+        Assert.Single(commands);
+        Assert.Contains("ALTER TABLE products DROP COLUMN Price", commands[0].CommandText);
+    }
+
+    [Fact]
     public void TestMigrationsSqlGeneratorThrowsForUnsupportedOperations()
     {
         var options = new DbContextOptionsBuilder<SimpleProductContext>()
@@ -304,7 +468,7 @@ public class TestEntityFrameworkProvider
         using var ctx = new SimpleProductContext(options);
         var generator = ctx.GetService<IMigrationsSqlGenerator>();
 
-        var op = new AddColumnOperation { Name = "NewCol", Table = "t", ClrType = typeof(string) };
+        var op = new AlterColumnOperation { Name = "Price", Table = "products", ClrType = typeof(string) };
 
         Assert.Throws<NotSupportedException>(() => generator.Generate([op], null));
     }
@@ -381,6 +545,19 @@ public class TestEntityFrameworkProvider
         public string Name { get; set; } = "";
         [System.ComponentModel.DataAnnotations.ConcurrencyCheck]
         public string RowVersion { get; set; } = "";
+    }
+
+    private class NumericConcurrencyTokenContext(DbContextOptions options) : DbContext(options)
+    {
+        public DbSet<VersionedEntity> Entities => Set<VersionedEntity>();
+    }
+
+    private class VersionedEntity
+    {
+        public int Id { get; set; }
+        public string Name { get; set; } = "";
+        [System.ComponentModel.DataAnnotations.ConcurrencyCheck]
+        public long Version { get; set; }
     }
 
     private class BadKeyTypeContext(DbContextOptions options) : DbContext(options)

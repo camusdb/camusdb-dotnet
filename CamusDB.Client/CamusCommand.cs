@@ -111,6 +111,28 @@ public class CamusCommand : DbCommand, ICloneable
 
     protected string GetEndpoint() => transaction?.Endpoint ?? builder.GetEndpoint();
 
+    private static readonly string[] DdlPrefixes =
+    [
+        "CREATE TABLE",
+        "DROP TABLE",
+        "ALTER TABLE",
+        "CREATE UNIQUE INDEX",
+        "CREATE INDEX",
+        "DROP INDEX",
+    ];
+
+    private static bool IsDdlStatement(string sql)
+    {
+        ReadOnlySpan<char> trimmed = sql.AsSpan().TrimStart();
+        foreach (string prefix in DdlPrefixes)
+        {
+            if (trimmed.Length >= prefix.Length &&
+                trimmed[..prefix.Length].Equals(prefix.AsSpan(), StringComparison.OrdinalIgnoreCase))
+                return true;
+        }
+        return false;
+    }
+
     protected Dictionary<string, ColumnValue> GetCommandParameters()
     {
         Dictionary<string, ColumnValue> commandParameters = new(Parameters.Count);
@@ -258,6 +280,12 @@ public class CamusCommand : DbCommand, ICloneable
     /// <inheritdoc />
     public override async Task<int> ExecuteNonQueryAsync(CancellationToken cancellationToken)
     {
+        if (IsDdlStatement(CommandText))
+        {
+            await ExecuteDDLAsync(cancellationToken).ConfigureAwait(false);
+            return 0;
+        }
+
         string endpoint = "";
 
         try

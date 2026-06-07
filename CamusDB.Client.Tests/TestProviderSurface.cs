@@ -259,6 +259,56 @@ public class TestProviderSurface
         httpTest.ShouldNotHaveCalled("http://localhost:8084/execute-sql-non-query");
     }
 
+    [Theory]
+    [InlineData("CREATE TABLE robots (id OID PRIMARY KEY NOT NULL)")]
+    [InlineData("DROP TABLE robots")]
+    [InlineData("ALTER TABLE robots ADD COLUMN name STRING NOT NULL")]
+    [InlineData("ALTER TABLE robots DROP COLUMN name")]
+    [InlineData("CREATE INDEX idx ON robots (name)")]
+    [InlineData("CREATE UNIQUE INDEX idx ON robots (name)")]
+    [InlineData("  create table robots (id OID PRIMARY KEY NOT NULL)")]  // leading whitespace + lowercase
+    public async Task TestExecuteNonQueryRoutesDdlToExecuteSqlDdl(string sql)
+    {
+        using HttpTest httpTest = new();
+
+        httpTest
+            .ForCallsTo("*/execute-sql-ddl")
+            .RespondWithJson(new { status = "ok" });
+
+        CamusConnectionStringBuilder builder = new("Endpoint=http://localhost:8082;Database=test");
+        using CamusConnection connection = new(builder);
+        await using CamusCommand command = connection.CreateCamusCommand(sql);
+
+        int rows = await command.ExecuteNonQueryAsync();
+
+        Assert.Equal(0, rows);
+        httpTest.ShouldHaveCalled("http://localhost:8082/execute-sql-ddl").Times(1);
+        httpTest.ShouldNotHaveCalled("http://localhost:8082/execute-sql-non-query");
+    }
+
+    [Theory]
+    [InlineData("INSERT INTO robots (name) VALUES (@name)")]
+    [InlineData("UPDATE robots SET name = @name WHERE id = @id")]
+    [InlineData("DELETE FROM robots WHERE id = @id")]
+    public async Task TestExecuteNonQueryRoutesDmlToExecuteSqlNonQuery(string sql)
+    {
+        using HttpTest httpTest = new();
+
+        httpTest
+            .ForCallsTo("*/execute-sql-non-query")
+            .RespondWithJson(new { status = "ok", rows = 1 });
+
+        CamusConnectionStringBuilder builder = new("Endpoint=http://localhost:8082;Database=test");
+        using CamusConnection connection = new(builder);
+        await using CamusCommand command = connection.CreateCamusCommand(sql);
+
+        int rows = await command.ExecuteNonQueryAsync();
+
+        Assert.Equal(1, rows);
+        httpTest.ShouldHaveCalled("http://localhost:8082/execute-sql-non-query").Times(1);
+        httpTest.ShouldNotHaveCalled("http://localhost:8082/execute-sql-ddl");
+    }
+
     private sealed class ScalarTestCommand : CamusCommand
     {
         public ScalarTestCommand(CamusConnectionStringBuilder builder) : base("SELECT 1", builder)

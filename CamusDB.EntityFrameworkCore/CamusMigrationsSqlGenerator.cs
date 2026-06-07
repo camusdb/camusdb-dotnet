@@ -1,3 +1,4 @@
+using System.Globalization;
 using Microsoft.EntityFrameworkCore.Metadata;
 using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Migrations.Operations;
@@ -15,9 +16,10 @@ public class CamusMigrationsSqlGenerator : MigrationsSqlGenerator
         MigrationCommandListBuilder builder,
         bool terminate = true)
     {
+        var helper = Dependencies.SqlGenerationHelper;
         var pkCols = operation.PrimaryKey?.Columns.ToHashSet(StringComparer.OrdinalIgnoreCase) ?? [];
 
-        builder.Append("CREATE TABLE ").Append(operation.Name).AppendLine(" (");
+        builder.Append("CREATE TABLE ").Append(helper.DelimitIdentifier(operation.Name)).AppendLine(" (");
 
         bool first = true;
         foreach (var col in operation.Columns)
@@ -25,7 +27,7 @@ public class CamusMigrationsSqlGenerator : MigrationsSqlGenerator
             if (!first) builder.AppendLine(",");
             first = false;
 
-            builder.Append(col.Name).Append(" ").Append(GetDdlType(col));
+            builder.Append(helper.DelimitIdentifier(col.Name)).Append(" ").Append(GetDdlType(col));
 
             if (pkCols.Contains(col.Name))
                 builder.Append(" PRIMARY KEY NOT NULL");
@@ -45,7 +47,46 @@ public class CamusMigrationsSqlGenerator : MigrationsSqlGenerator
         MigrationCommandListBuilder builder,
         bool terminate = true)
     {
-        builder.Append("DROP TABLE ").Append(operation.Name);
+        builder.Append("DROP TABLE ").Append(Dependencies.SqlGenerationHelper.DelimitIdentifier(operation.Name));
+
+        if (terminate)
+            builder.EndCommand();
+    }
+
+    protected override void Generate(
+        AddColumnOperation operation,
+        IModel? model,
+        MigrationCommandListBuilder builder,
+        bool terminate = true)
+    {
+        var helper = Dependencies.SqlGenerationHelper;
+
+        builder.Append("ALTER TABLE ").Append(helper.DelimitIdentifier(operation.Table))
+               .Append(" ADD COLUMN ").Append(helper.DelimitIdentifier(operation.Name))
+               .Append(" ").Append(GetDdlType(operation));
+
+        if (!operation.IsNullable)
+            builder.Append(" NOT NULL");
+
+        if (operation.DefaultValue is not null)
+            builder.Append(" DEFAULT (").Append(FormatDefaultValue(operation.DefaultValue)).Append(")");
+        else if (!string.IsNullOrEmpty(operation.DefaultValueSql))
+            builder.Append(" DEFAULT (").Append(operation.DefaultValueSql).Append(")");
+
+        if (terminate)
+            builder.EndCommand();
+    }
+
+    protected override void Generate(
+        DropColumnOperation operation,
+        IModel? model,
+        MigrationCommandListBuilder builder,
+        bool terminate = true)
+    {
+        var helper = Dependencies.SqlGenerationHelper;
+
+        builder.Append("ALTER TABLE ").Append(helper.DelimitIdentifier(operation.Table))
+               .Append(" DROP COLUMN ").Append(helper.DelimitIdentifier(operation.Name));
 
         if (terminate)
             builder.EndCommand();
@@ -57,12 +98,15 @@ public class CamusMigrationsSqlGenerator : MigrationsSqlGenerator
         MigrationCommandListBuilder builder,
         bool terminate = true)
     {
+        var helper = Dependencies.SqlGenerationHelper;
+
+        // Both CREATE INDEX and CREATE UNIQUE INDEX are supported by CamusDB
         builder.Append(operation.IsUnique ? "CREATE UNIQUE INDEX " : "CREATE INDEX ")
-               .Append(operation.Name)
+               .Append(helper.DelimitIdentifier(operation.Name))
                .Append(" ON ")
-               .Append(operation.Table)
+               .Append(helper.DelimitIdentifier(operation.Table))
                .Append(" (")
-               .Append(string.Join(", ", operation.Columns))
+               .Append(string.Join(", ", operation.Columns.Select(c => helper.DelimitIdentifier(c))))
                .Append(")");
 
         if (terminate)
@@ -75,8 +119,11 @@ public class CamusMigrationsSqlGenerator : MigrationsSqlGenerator
         MigrationCommandListBuilder builder,
         bool terminate = true)
     {
-        builder.Append("DROP INDEX ").Append(operation.Name)
-               .Append(" ON ").Append(operation.Table ?? "");
+        var helper = Dependencies.SqlGenerationHelper;
+
+        // CamusDB syntax: ALTER TABLE t DROP INDEX name
+        builder.Append("ALTER TABLE ").Append(helper.DelimitIdentifier(operation.Table ?? ""))
+               .Append(" DROP INDEX ").Append(helper.DelimitIdentifier(operation.Name ?? ""));
 
         if (terminate)
             builder.EndCommand();
@@ -95,21 +142,22 @@ public class CamusMigrationsSqlGenerator : MigrationsSqlGenerator
     protected override void Generate(EnsureSchemaOperation operation, IModel? model, MigrationCommandListBuilder builder) { }
     protected override void Generate(DropSchemaOperation operation, IModel? model, MigrationCommandListBuilder builder) { }
 
-    // Unsupported structural changes
-    protected override void Generate(AddColumnOperation operation, IModel? model, MigrationCommandListBuilder builder, bool terminate = true)
-        => throw new NotSupportedException("CamusDB does not support ALTER TABLE ADD COLUMN via migrations.");
+    // No-ops for table/database metadata changes that don't affect CamusDB structure
+    protected override void Generate(AlterDatabaseOperation operation, IModel? model, MigrationCommandListBuilder builder) { }
+    protected override void Generate(AlterTableOperation operation, IModel? model, MigrationCommandListBuilder builder) { }
 
-    protected override void Generate(DropColumnOperation operation, IModel? model, MigrationCommandListBuilder builder, bool terminate = true)
-        => throw new NotSupportedException("CamusDB does not support ALTER TABLE DROP COLUMN via migrations.");
-
+    // Unsupported operations
     protected override void Generate(AlterColumnOperation operation, IModel? model, MigrationCommandListBuilder builder)
-        => throw new NotSupportedException("CamusDB does not support ALTER TABLE ALTER COLUMN via migrations.");
+        => throw new NotSupportedException("CamusDB does not support altering an existing column type.");
 
     protected override void Generate(RenameColumnOperation operation, IModel? model, MigrationCommandListBuilder builder)
-        => throw new NotSupportedException("CamusDB does not support RENAME COLUMN via migrations.");
+        => throw new NotSupportedException("CamusDB does not support RENAME COLUMN.");
 
     protected override void Generate(RenameTableOperation operation, IModel? model, MigrationCommandListBuilder builder)
-        => throw new NotSupportedException("CamusDB does not support RENAME TABLE via migrations.");
+        => throw new NotSupportedException("CamusDB does not support RENAME TABLE.");
+
+    protected override void Generate(RenameIndexOperation operation, IModel? model, MigrationCommandListBuilder builder)
+        => throw new NotSupportedException("CamusDB does not support RENAME INDEX.");
 
     protected override void Generate(AddForeignKeyOperation operation, IModel? model, MigrationCommandListBuilder builder, bool terminate = true)
         => throw new NotSupportedException("CamusDB does not support foreign key constraints.");
@@ -124,10 +172,10 @@ public class CamusMigrationsSqlGenerator : MigrationsSqlGenerator
         => throw new NotSupportedException("CamusDB does not support DROP PRIMARY KEY via migrations.");
 
     protected override void Generate(AddUniqueConstraintOperation operation, IModel? model, MigrationCommandListBuilder builder)
-        => throw new NotSupportedException("CamusDB does not support UNIQUE constraints via migrations.");
+        => throw new NotSupportedException("CamusDB does not support inline UNIQUE constraints; use CreateIndex with IsUnique=true instead.");
 
     protected override void Generate(DropUniqueConstraintOperation operation, IModel? model, MigrationCommandListBuilder builder)
-        => throw new NotSupportedException("CamusDB does not support UNIQUE constraints via migrations.");
+        => throw new NotSupportedException("CamusDB does not support inline UNIQUE constraints.");
 
     protected override void Generate(AddCheckConstraintOperation operation, IModel? model, MigrationCommandListBuilder builder)
         => throw new NotSupportedException("CamusDB does not support CHECK constraints.");
@@ -150,13 +198,6 @@ public class CamusMigrationsSqlGenerator : MigrationsSqlGenerator
     protected override void Generate(RestartSequenceOperation operation, IModel? model, MigrationCommandListBuilder builder)
         => throw new NotSupportedException("CamusDB does not support sequences.");
 
-    protected override void Generate(AlterDatabaseOperation operation, IModel? model, MigrationCommandListBuilder builder) { }
-
-    protected override void Generate(AlterTableOperation operation, IModel? model, MigrationCommandListBuilder builder) { }
-
-    protected override void Generate(RenameIndexOperation operation, IModel? model, MigrationCommandListBuilder builder)
-        => throw new NotSupportedException("CamusDB does not support RENAME INDEX via migrations.");
-
     private static string GetDdlType(ColumnOperation col)
     {
         var storeType = (col.ColumnType ?? "").ToUpperInvariant();
@@ -173,4 +214,15 @@ public class CamusMigrationsSqlGenerator : MigrationsSqlGenerator
                 : "STRING"
         };
     }
+
+    private static string FormatDefaultValue(object value) => value switch
+    {
+        bool b   => b ? "true" : "false",
+        string s => $"'{s}'",
+        int i    => i.ToString(CultureInfo.InvariantCulture),
+        long l   => l.ToString(CultureInfo.InvariantCulture),
+        float f  => f.ToString(CultureInfo.InvariantCulture),
+        double d => d.ToString(CultureInfo.InvariantCulture),
+        _        => value.ToString() ?? "null"
+    };
 }

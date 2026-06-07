@@ -1,3 +1,4 @@
+using System.Data.Common;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 
@@ -31,6 +32,35 @@ public static class CamusDBDbContextOptionsExtensions
         where TContext : DbContext
     {
         UseCamusDB((DbContextOptionsBuilder)optionsBuilder, connectionString, camusOptionsAction);
+        return optionsBuilder;
+    }
+
+    public static DbContextOptionsBuilder UseCamusDB(
+        this DbContextOptionsBuilder optionsBuilder,
+        DbConnection connection,
+        Action<CamusDBDbContextOptionsBuilder>? camusOptionsAction = null)
+    {
+        ArgumentNullException.ThrowIfNull(optionsBuilder);
+        ArgumentNullException.ThrowIfNull(connection);
+
+        var extension = (CamusDBOptionsExtension)(
+            optionsBuilder.Options.FindExtension<CamusDBOptionsExtension>() ?? new CamusDBOptionsExtension()
+        ).WithConnection(connection);
+
+        ((IDbContextOptionsBuilderInfrastructure)optionsBuilder).AddOrUpdateExtension(extension);
+
+        camusOptionsAction?.Invoke(new CamusDBDbContextOptionsBuilder(optionsBuilder));
+
+        return optionsBuilder;
+    }
+
+    public static DbContextOptionsBuilder<TContext> UseCamusDB<TContext>(
+        this DbContextOptionsBuilder<TContext> optionsBuilder,
+        DbConnection connection,
+        Action<CamusDBDbContextOptionsBuilder>? camusOptionsAction = null)
+        where TContext : DbContext
+    {
+        UseCamusDB((DbContextOptionsBuilder)optionsBuilder, connection, camusOptionsAction);
         return optionsBuilder;
     }
 }

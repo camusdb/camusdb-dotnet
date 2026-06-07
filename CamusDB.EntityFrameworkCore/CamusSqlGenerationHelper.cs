@@ -8,12 +8,19 @@ public class CamusSqlGenerationHelper : RelationalSqlGenerationHelper
     public CamusSqlGenerationHelper(RelationalSqlGenerationHelperDependencies dependencies)
         : base(dependencies) { }
 
-    // CamusDB uses bare (unquoted) identifiers — no " wrapping
-    public override string DelimitIdentifier(string identifier) => identifier;
-    public override void DelimitIdentifier(StringBuilder builder, string identifier) => builder.Append(identifier);
-    public override string DelimitIdentifier(string name, string? schema) => name;
-    public override void DelimitIdentifier(StringBuilder builder, string name, string? schema) => builder.Append(name);
+    public override string DelimitIdentifier(string identifier) => $"`{EscapeIdentifier(identifier)}`";
 
-    // CamusDB doesn't use statement terminators
+    public override void DelimitIdentifier(StringBuilder builder, string identifier)
+    {
+        builder.Append('`');
+        EscapeIdentifier(builder, identifier);
+        builder.Append('`');
+    }
+
+    public override string DelimitIdentifier(string name, string? schema) => DelimitIdentifier(name);
+
+    public override void DelimitIdentifier(StringBuilder builder, string name, string? schema)
+        => DelimitIdentifier(builder, name);
+
     public override string StatementTerminator => "";
 }

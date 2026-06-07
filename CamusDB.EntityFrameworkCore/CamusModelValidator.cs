@@ -29,16 +29,28 @@ public class CamusModelValidator : RelationalModelValidator
         ValidateKeyTypes(model);
     }
 
+    private static readonly HashSet<Type> SupportedConcurrencyTokenClrTypes = new()
+    {
+        typeof(short),
+        typeof(int),
+        typeof(long),
+    };
+
     private static void ValidateConcurrencyTokens(IModel model)
     {
         foreach (var entityType in model.GetEntityTypes())
         {
             foreach (var property in entityType.GetProperties())
             {
-                if (property.IsConcurrencyToken)
+                if (!property.IsConcurrencyToken)
+                    continue;
+
+                var clrType = Nullable.GetUnderlyingType(property.ClrType) ?? property.ClrType;
+                if (!SupportedConcurrencyTokenClrTypes.Contains(clrType))
                     throw new NotSupportedException(
-                        $"CamusDB does not support concurrency tokens. " +
-                        $"Remove the concurrency token from '{entityType.DisplayName()}.{property.Name}'.");
+                        $"CamusDB only supports [ConcurrencyCheck] on numeric columns (short, int, long). " +
+                        $"Property '{entityType.DisplayName()}.{property.Name}' uses unsupported CLR type '{clrType.Name}'. " +
+                        $"Note: [Timestamp] (byte[]) is not supported.");
             }
         }
     }
