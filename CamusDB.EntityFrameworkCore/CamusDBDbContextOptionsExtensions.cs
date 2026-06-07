@@ -13,8 +13,9 @@ public static class CamusDBDbContextOptionsExtensions
         ArgumentNullException.ThrowIfNull(optionsBuilder);
         ArgumentException.ThrowIfNullOrWhiteSpace(connectionString);
 
-        CamusDBOptionsExtension extension = optionsBuilder.Options.FindExtension<CamusDBOptionsExtension>() ?? new CamusDBOptionsExtension();
-        extension = extension.WithConnectionString(connectionString);
+        var extension = (CamusDBOptionsExtension)(
+            optionsBuilder.Options.FindExtension<CamusDBOptionsExtension>() ?? new CamusDBOptionsExtension()
+        ).WithConnectionString(connectionString);
 
         ((IDbContextOptionsBuilderInfrastructure)optionsBuilder).AddOrUpdateExtension(extension);
 

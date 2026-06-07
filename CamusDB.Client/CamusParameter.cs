@@ -8,6 +8,7 @@
 
 using System.Data;
 using System.Data.Common;
+using System.Diagnostics.CodeAnalysis;
 
 namespace CamusDB.Client;
 
@@ -81,11 +82,13 @@ public sealed class CamusParameter : DbParameter, ICloneable
 
     public override bool IsNullable { get; set; }
 
-    public override string? ParameterName { get; set; }
+    [AllowNull]
+    public override string ParameterName { get; set; } = "";
 
     public override int Size { get; set; }
 
-    public override string? SourceColumn { get; set; }
+    [AllowNull]
+    public override string SourceColumn { get; set; } = "";
 
     public override bool SourceColumnNullMapping { get; set; }
 

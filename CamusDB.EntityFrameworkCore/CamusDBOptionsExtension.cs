@@ -3,56 +3,38 @@ using Microsoft.Extensions.DependencyInjection;
 
 namespace CamusDB.EntityFrameworkCore;
 
-public sealed class CamusDBOptionsExtension : IDbContextOptionsExtension
+public sealed class CamusDBOptionsExtension : RelationalOptionsExtension
 {
-    private DbContextOptionsExtensionInfo? info;
+    private DbContextOptionsExtensionInfo? _info;
 
-    public string? ConnectionString { get; private set; }
+    public CamusDBOptionsExtension() { }
 
-    public DbContextOptionsExtensionInfo Info => info ??= new ExtensionInfo(this);
+    private CamusDBOptionsExtension(CamusDBOptionsExtension copyFrom) : base(copyFrom) { }
 
-    public void ApplyServices(IServiceCollection services)
-    {
-        CamusDBServiceCollectionExtensions.AddEntityFrameworkCamusDB(services);
-    }
+    protected override RelationalOptionsExtension Clone() => new CamusDBOptionsExtension(this);
 
-    public void Validate(IDbContextOptions options)
-    {
-        if (string.IsNullOrWhiteSpace(ConnectionString))
-            throw new InvalidOperationException("A CamusDB connection string is required.");
-    }
+    public override DbContextOptionsExtensionInfo Info => _info ??= new ExtensionInfo(this);
 
-    public CamusDBOptionsExtension WithConnectionString(string connectionString)
-    {
-        CamusDBOptionsExtension clone = new()
-        {
-            ConnectionString = connectionString
-        };
+    public override void ApplyServices(IServiceCollection services)
+        => CamusDBServiceCollectionExtensions.AddEntityFrameworkCamusDB(services);
 
-        return clone;
-    }
-
-    private sealed class ExtensionInfo(IDbContextOptionsExtension extension) : DbContextOptionsExtensionInfo(extension)
+    private sealed class ExtensionInfo(IDbContextOptionsExtension extension)
+        : RelationalOptionsExtension.RelationalExtensionInfo(extension)
     {
         private new CamusDBOptionsExtension Extension => (CamusDBOptionsExtension)base.Extension;
 
         public override bool IsDatabaseProvider => true;
 
-        public override string LogFragment =>
-            string.IsNullOrWhiteSpace(Extension.ConnectionString)
-                ? "using CamusDB "
-                : "using CamusDB ";
+        public override string LogFragment => "using CamusDB ";
 
-        public override int GetServiceProviderHashCode() =>
-            Extension.ConnectionString?.GetHashCode(StringComparison.Ordinal) ?? 0;
+        public override int GetServiceProviderHashCode()
+            => Extension.ConnectionString?.GetHashCode(StringComparison.Ordinal) ?? 0;
 
         public override void PopulateDebugInfo(IDictionary<string, string> debugInfo)
-        {
-            debugInfo["CamusDB:ConnectionString"] = Extension.ConnectionString ?? "";
-        }
+            => debugInfo["CamusDB:ConnectionString"] = Extension.ConnectionString ?? "";
 
-        public override bool ShouldUseSameServiceProvider(DbContextOptionsExtensionInfo other) =>
-            other is ExtensionInfo otherInfo &&
-            string.Equals(Extension.ConnectionString, otherInfo.Extension.ConnectionString, StringComparison.Ordinal);
+        public override bool ShouldUseSameServiceProvider(DbContextOptionsExtensionInfo other)
+            => other is ExtensionInfo otherInfo &&
+               string.Equals(Extension.ConnectionString, otherInfo.Extension.ConnectionString, StringComparison.Ordinal);
     }
 }

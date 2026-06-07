@@ -8,6 +8,7 @@
 
 using System.Data;
 using System.Data.Common;
+using System.Diagnostics.CodeAnalysis;
 using Flurl.Http;
 using System.Net;
 using System.Text.Json;
@@ -35,6 +36,7 @@ public sealed class CamusConnection : DbConnection
 
     private ConnectionState state = ConnectionState.Closed;
 
+    [AllowNull]
     public override string ConnectionString { get; set; }
 
     public override string Database => builder.Config.TryGetValue("Database", out string? database) ? database : "";

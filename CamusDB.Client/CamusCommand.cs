@@ -8,6 +8,7 @@
 
 using System.Data;
 using System.Data.Common;
+using System.Diagnostics.CodeAnalysis;
 using System.Text.Json;
 using CamusDB.Core.Util.ObjectIds;
 using Flurl.Http;
@@ -53,6 +54,7 @@ public class CamusCommand : DbCommand, ICloneable
     /// </summary>
     public new CamusParameterCollection Parameters { get; } = new CamusParameterCollection();
 
+    [AllowNull]
     public override string CommandText { get; set; } = "";
 
     public override int CommandTimeout { get; set; } = 10;
