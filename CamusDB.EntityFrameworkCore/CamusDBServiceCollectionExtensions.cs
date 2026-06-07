@@ -1,6 +1,8 @@
 using Microsoft.EntityFrameworkCore.Diagnostics;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Metadata.Conventions.Infrastructure;
 using Microsoft.EntityFrameworkCore.Migrations;
+using Microsoft.EntityFrameworkCore.Query;
 using Microsoft.EntityFrameworkCore.Storage;
 using Microsoft.EntityFrameworkCore.Update;
 using Microsoft.EntityFrameworkCore.ValueGeneration;
@@ -16,6 +18,9 @@ public static class CamusDBServiceCollectionExtensions
 
         var builder = new EntityFrameworkRelationalServicesBuilder(serviceCollection);
 
+        builder.TryAdd<IProviderConventionSetBuilder, CamusConventionSetBuilder>();
+        builder.TryAdd<IQuerySqlGeneratorFactory, CamusQuerySqlGeneratorFactory>();
+        builder.TryAdd<IRelationalTransactionFactory, CamusRelationalTransactionFactory>();
         builder.TryAdd<IDatabaseProvider, DatabaseProvider<CamusDBOptionsExtension>>();
         builder.TryAdd<LoggingDefinitions, CamusLoggingDefinitions>();
         builder.TryAdd<ISqlGenerationHelper, CamusSqlGenerationHelper>();

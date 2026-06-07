@@ -18,5 +18,5 @@ public sealed class CamusModificationCommandBatchFactory : IModificationCommandB
         _dependencies = dependencies;
     }
 
-    public ModificationCommandBatch Create() => new SingularModificationCommandBatch(_dependencies);
+    public ModificationCommandBatch Create() => new CamusModificationCommandBatch(_dependencies);
 }

@@ -20,13 +20,15 @@ public class CamusUpdateSqlGenerator : UpdateSqlGenerator
         if (writeOps.Count == 0)
             return ResultSetMapping.NoResults;
 
-        commandStringBuilder.Append("INSERT INTO ").Append(command.TableName).Append(" (");
+        commandStringBuilder.Append("INSERT INTO ")
+            .Append(SqlGenerationHelper.DelimitIdentifier(command.TableName))
+            .Append(" (");
 
         bool first = true;
         foreach (var op in writeOps)
         {
             if (!first) commandStringBuilder.Append(", ");
-            commandStringBuilder.Append(op.ColumnName);
+            commandStringBuilder.Append(SqlGenerationHelper.DelimitIdentifier(op.ColumnName));
             first = false;
         }
 
@@ -61,13 +63,15 @@ public class CamusUpdateSqlGenerator : UpdateSqlGenerator
         if (setOps.Count == 0)
             return ResultSetMapping.NoResults;
 
-        commandStringBuilder.Append("UPDATE ").Append(command.TableName).Append(" SET ");
+        commandStringBuilder.Append("UPDATE ")
+            .Append(SqlGenerationHelper.DelimitIdentifier(command.TableName))
+            .Append(" SET ");
 
         bool first = true;
         foreach (var op in setOps)
         {
             if (!first) commandStringBuilder.Append(", ");
-            commandStringBuilder.Append(op.ColumnName).Append(" = ");
+            commandStringBuilder.Append(SqlGenerationHelper.DelimitIdentifier(op.ColumnName)).Append(" = ");
             if (op.UseCurrentValueParameter && op.ParameterName is not null)
                 commandStringBuilder.Append(SqlGenerationHelper.GenerateParameterName(op.ParameterName));
             else
@@ -82,7 +86,7 @@ public class CamusUpdateSqlGenerator : UpdateSqlGenerator
             foreach (var op in whereOps)
             {
                 if (!first) commandStringBuilder.Append(" AND ");
-                commandStringBuilder.Append(op.ColumnName).Append(" = ");
+                commandStringBuilder.Append(SqlGenerationHelper.DelimitIdentifier(op.ColumnName)).Append(" = ");
                 var paramName = op.UseOriginalValueParameter ? op.OriginalParameterName : op.ParameterName;
                 if (paramName is not null)
                     commandStringBuilder.Append(SqlGenerationHelper.GenerateParameterName(paramName));
@@ -106,7 +110,8 @@ public class CamusUpdateSqlGenerator : UpdateSqlGenerator
 
         var whereOps = command.ColumnModifications.Where(o => o.IsKey || o.IsCondition).ToList();
 
-        commandStringBuilder.Append("DELETE FROM ").Append(command.TableName);
+        commandStringBuilder.Append("DELETE FROM ")
+            .Append(SqlGenerationHelper.DelimitIdentifier(command.TableName));
 
         if (whereOps.Count > 0)
         {
@@ -115,7 +120,7 @@ public class CamusUpdateSqlGenerator : UpdateSqlGenerator
             foreach (var op in whereOps)
             {
                 if (!first) commandStringBuilder.Append(" AND ");
-                commandStringBuilder.Append(op.ColumnName).Append(" = ");
+                commandStringBuilder.Append(SqlGenerationHelper.DelimitIdentifier(op.ColumnName)).Append(" = ");
                 var paramName = op.UseOriginalValueParameter ? op.OriginalParameterName : op.ParameterName;
                 if (paramName is not null)
                     commandStringBuilder.Append(SqlGenerationHelper.GenerateParameterName(paramName));

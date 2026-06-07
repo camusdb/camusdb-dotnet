@@ -121,10 +121,29 @@ public class CamusCommand : DbCommand, ICloneable
         "DROP INDEX",
     ];
 
+    private static readonly string[] DmlPrefixes =
+    [
+        "INSERT",
+        "UPDATE",
+        "DELETE",
+    ];
+
     private static bool IsDdlStatement(string sql)
     {
         ReadOnlySpan<char> trimmed = sql.AsSpan().TrimStart();
         foreach (string prefix in DdlPrefixes)
+        {
+            if (trimmed.Length >= prefix.Length &&
+                trimmed[..prefix.Length].Equals(prefix.AsSpan(), StringComparison.OrdinalIgnoreCase))
+                return true;
+        }
+        return false;
+    }
+
+    private static bool IsDmlStatement(string sql)
+    {
+        ReadOnlySpan<char> trimmed = sql.AsSpan().TrimStart();
+        foreach (string prefix in DmlPrefixes)
         {
             if (trimmed.Length >= prefix.Length &&
                 trimmed[..prefix.Length].Equals(prefix.AsSpan(), StringComparison.OrdinalIgnoreCase))
@@ -142,24 +161,26 @@ public class CamusCommand : DbCommand, ICloneable
             if (string.IsNullOrEmpty(parameter.ParameterName))
                 throw new CamusException("CADB0400", "Parameter name cannot be null or empty");
 
-            if (parameter.Value is null || parameter.ColumnType == ColumnType.Null)
+            if (parameter.Value is null or DBNull || parameter.ColumnType == ColumnType.Null)
                 commandParameters.Add(parameter.ParameterName, new() { Type = ColumnType.Null });
             else if ((parameter.ColumnType == ColumnType.Id || parameter.ColumnType == ColumnType.String) && parameter.Value is string)
                 commandParameters.Add(parameter.ParameterName, new() { Type = parameter.ColumnType, StrValue = (string)parameter.Value! });
+            else if ((parameter.ColumnType == ColumnType.Id || parameter.ColumnType == ColumnType.String) && parameter.Value is Guid g)
+                commandParameters.Add(parameter.ParameterName, new() { Type = parameter.ColumnType, StrValue = g.ToString() });
             else if ((parameter.ColumnType == ColumnType.Id) && parameter.Value is CamusObjectIdValue)
                 commandParameters.Add(parameter.ParameterName, new() { Type = parameter.ColumnType, StrValue = parameter.Value!.ToString() });
-            else if (parameter.ColumnType == ColumnType.Integer64 && parameter.Value is int)
-                commandParameters.Add(parameter.ParameterName, new() { Type = parameter.ColumnType, LongValue = (int)parameter.Value! });
-            else if (parameter.ColumnType == ColumnType.Integer64 && parameter.Value is long)
-                commandParameters.Add(parameter.ParameterName, new() { Type = parameter.ColumnType, LongValue = (long)parameter.Value! });
-            else if (parameter.ColumnType == ColumnType.Float64 && parameter.Value is float)
-                commandParameters.Add(parameter.ParameterName, new() { Type = parameter.ColumnType, FloatValue = (float)parameter.Value! });
-            else if (parameter.ColumnType == ColumnType.Float64 && parameter.Value is double)
-                commandParameters.Add(parameter.ParameterName, new() { Type = parameter.ColumnType, FloatValue = (double)parameter.Value! });
-            else if (parameter.ColumnType == ColumnType.Bool)
-                commandParameters.Add(parameter.ParameterName, new() { Type = parameter.ColumnType, BoolValue = (bool)parameter.Value! });
+            else if (parameter.ColumnType == ColumnType.Integer64 && parameter.Value is IConvertible c)
+                commandParameters.Add(parameter.ParameterName, new() { Type = parameter.ColumnType, LongValue = c.ToInt64(null) });
+            else if (parameter.ColumnType == ColumnType.Float64 && parameter.Value is float f)
+                commandParameters.Add(parameter.ParameterName, new() { Type = parameter.ColumnType, FloatValue = f });
+            else if (parameter.ColumnType == ColumnType.Float64 && parameter.Value is double d)
+                commandParameters.Add(parameter.ParameterName, new() { Type = parameter.ColumnType, FloatValue = d });
+            else if (parameter.ColumnType == ColumnType.Bool && parameter.Value is bool b)
+                commandParameters.Add(parameter.ParameterName, new() { Type = parameter.ColumnType, BoolValue = b });
+            else if (parameter.ColumnType == ColumnType.String)
+                commandParameters.Add(parameter.ParameterName, new() { Type = ColumnType.String, StrValue = Convert.ToString(parameter.Value) ?? "" });
             else
-                throw new CamusException("CADB0400", "Unknown parameter column type: " + parameter.ColumnType);
+                throw new CamusException("CADB0400", $"Cannot map parameter '{parameter.ParameterName}' (ColumnType={parameter.ColumnType}, ValueType={parameter.Value?.GetType().Name})");
         }
 
         return commandParameters;
@@ -204,8 +225,11 @@ public class CamusCommand : DbCommand, ICloneable
     /// <inheritdoc />
     protected override async Task<DbDataReader> ExecuteDbDataReaderAsync(CommandBehavior behavior, CancellationToken cancellationToken)
     {
+        if (IsDmlStatement(CommandText))
+            return await ExecuteDmlAsReaderAsync(cancellationToken).ConfigureAwait(false);
+
         string endpoint = "";
-        string database = builder.Config["Database"];                
+        string database = builder.Config["Database"];
 
         try
         {
@@ -258,6 +282,70 @@ public class CamusCommand : DbCommand, ICloneable
                 catch (JsonException)
                 {
 
+                }
+
+                throw new CamusException("CADB0000", response);
+            }
+
+            throw new CamusException("CADB0000", ex.Message);
+        }
+    }
+
+    private async Task<CamusDataReader> ExecuteDmlAsReaderAsync(CancellationToken cancellationToken)
+    {
+        string endpoint = "";
+
+        try
+        {
+            endpoint = GetEndpoint();
+            string database = builder.Config["Database"];
+
+            CamusExecuteSqlNonQueryRequest request = new()
+            {
+                DatabaseName = database,
+                Sql = GetRequestTarget(),
+                Parameters = GetCommandParameters()
+            };
+
+            if (transaction is not null)
+            {
+                request.TxnIdPT = transaction.TxnIdPT;
+                request.TxnIdCounter = transaction.TxnIdCounter;
+            }
+
+            string jsonRequest = JsonSerializer.Serialize(request, CamusJsonSerializerContext.Default.CamusExecuteSqlNonQueryRequest);
+
+            string responseJson = await endpoint
+                                        .WithHeader("Accept", "application/json")
+                                        .WithTimeout(CommandTimeout)
+                                        .AppendPathSegments("execute-sql-non-query")
+                                        .PostAsync(CamusJsonContent.Create(jsonRequest), cancellationToken: cancellationToken)
+                                        .ReceiveString();
+
+            CamusExecuteSqlNonQueryResponse? response = JsonSerializer.Deserialize(responseJson, CamusJsonSerializerContext.Default.CamusExecuteSqlNonQueryResponse);
+
+            if (response is null)
+                throw new CamusException("CADB0000", "Empty result returned");
+
+            return new CamusDataReader(response.Rows);
+        }
+        catch (FlurlHttpException ex)
+        {
+            CamusEndpointHealth.MarkUnreachableIfTransportFailed(builder, endpoint, ex);
+
+            string response = await ex.GetResponseStringAsync();
+
+            if (!string.IsNullOrEmpty(response))
+            {
+                try
+                {
+                    CamusErrorResponse? errorResponse = JsonSerializer.Deserialize(response, CamusJsonSerializerContext.Default.CamusErrorResponse);
+
+                    if (errorResponse is not null)
+                        throw new CamusException(errorResponse.Code ?? "CADB0000", errorResponse.Message ?? "");
+                }
+                catch (JsonException)
+                {
                 }
 
                 throw new CamusException("CADB0000", response);

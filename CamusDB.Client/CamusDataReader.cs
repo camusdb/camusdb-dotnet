@@ -29,7 +29,9 @@ public class CamusDataReader : DbDataReader
 
     public override bool IsClosed => isClosed;
 
-    public override int RecordsAffected => -1;
+    private readonly int recordsAffected = -1;
+
+    public override int RecordsAffected => recordsAffected;
 
     public override object this[string name] => GetValue(GetOrdinal(name));
 
@@ -39,6 +41,13 @@ public class CamusDataReader : DbDataReader
     {
         this.rows = rows;
         columnNames = rows.Count > 0 ? rows[0].Keys.ToArray() : Array.Empty<string>();
+    }
+
+    public CamusDataReader(int recordsAffected)
+    {
+        this.rows = [];
+        this.columnNames = [];
+        this.recordsAffected = recordsAffected;
     }
 
     public override void Close()

@@ -1,4 +1,3 @@
-using System.Runtime.CompilerServices;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.Extensions.DependencyInjection;
 
@@ -28,10 +27,8 @@ public sealed class CamusDBOptionsExtension : RelationalOptionsExtension
 
         public override string LogFragment => "using CamusDB ";
 
-        public override int GetServiceProviderHashCode()
-            => Extension.Connection is not null
-                ? RuntimeHelpers.GetHashCode(Extension.Connection)
-                : Extension.ConnectionString?.GetHashCode(StringComparison.Ordinal) ?? 0;
+        // Service provider configuration is identical for all CamusDB contexts — share it
+        public override int GetServiceProviderHashCode() => 0;
 
         public override void PopulateDebugInfo(IDictionary<string, string> debugInfo)
         {
@@ -42,9 +39,6 @@ public sealed class CamusDBOptionsExtension : RelationalOptionsExtension
         }
 
         public override bool ShouldUseSameServiceProvider(DbContextOptionsExtensionInfo other)
-            => other is ExtensionInfo otherInfo &&
-               (Extension.Connection is not null
-                   ? ReferenceEquals(Extension.Connection, otherInfo.Extension.Connection)
-                   : string.Equals(Extension.ConnectionString, otherInfo.Extension.ConnectionString, StringComparison.Ordinal));
+            => other is ExtensionInfo;
     }
 }

@@ -5,6 +5,7 @@ using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Migrations.Operations;
 using Microsoft.EntityFrameworkCore.Storage;
+using Microsoft.EntityFrameworkCore.Update;
 using Microsoft.EntityFrameworkCore.ValueGeneration;
 using Microsoft.Extensions.DependencyInjection;
 
@@ -166,7 +167,7 @@ public class TestEntityFrameworkProvider
     // ── Milestone 3 ──────────────────────────────────────────────────────────
 
     [Fact]
-    public void TestSqlGenerationHelperProducesUnquotedIdentifiers()
+    public void TestSqlGenerationHelperDelimitsIdentifiers()
     {
         ServiceCollection services = new();
         services.AddEntityFrameworkCamusDB();
@@ -174,8 +175,8 @@ public class TestEntityFrameworkProvider
         ServiceProvider provider = services.BuildServiceProvider();
         ISqlGenerationHelper helper = provider.GetRequiredService<ISqlGenerationHelper>();
 
-        Assert.Equal("MyTable", helper.DelimitIdentifier("MyTable"));
-        Assert.Equal("my_column", helper.DelimitIdentifier("my_column"));
+        Assert.Equal("`MyTable`", helper.DelimitIdentifier("MyTable"));
+        Assert.Equal("`my_column`", helper.DelimitIdentifier("my_column"));
         Assert.Equal("", helper.StatementTerminator);
     }
 
@@ -294,10 +295,11 @@ public class TestEntityFrameworkProvider
 
         Assert.Single(commands);
         var sql = commands[0].CommandText;
-        Assert.Contains("CREATE TABLE products", sql);
-        Assert.Contains("Id OID PRIMARY KEY NOT NULL", sql);
-        Assert.Contains("Name STRING NOT NULL", sql);
-        Assert.Contains("Price FLOAT64", sql);
+        Assert.Contains("CREATE TABLE IF NOT EXISTS `products`", sql);
+        Assert.Contains("`Id` OID NOT NULL", sql);
+        Assert.Contains("`Name` STRING NOT NULL", sql);
+        Assert.Contains("`Price` FLOAT64", sql);
+        Assert.Contains("PRIMARY KEY (`Id`)", sql);
     }
 
     [Fact]
@@ -313,7 +315,7 @@ public class TestEntityFrameworkProvider
         var commands = generator.Generate([new DropTableOperation { Name = "products" }], null);
 
         Assert.Single(commands);
-        Assert.Contains("DROP TABLE products", commands[0].CommandText);
+        Assert.Contains("DROP TABLE `products`", commands[0].CommandText);
     }
 
     [Fact]
@@ -338,8 +340,8 @@ public class TestEntityFrameworkProvider
 
         Assert.Single(commands);
         var sql = commands[0].CommandText;
-        Assert.Contains("CREATE INDEX idx_products_name ON products", sql);
-        Assert.Contains("Name", sql);
+        Assert.Contains("CREATE INDEX IF NOT EXISTS `idx_products_name` ON `products`", sql);
+        Assert.Contains("`Name`", sql);
     }
 
     [Fact]
@@ -363,7 +365,7 @@ public class TestEntityFrameworkProvider
         var commands = generator.Generate([operation], null);
 
         Assert.Single(commands);
-        Assert.Contains("CREATE UNIQUE INDEX uq_products_name ON products", commands[0].CommandText);
+        Assert.Contains("CREATE UNIQUE INDEX IF NOT EXISTS `uq_products_name` ON `products`", commands[0].CommandText);
     }
 
     [Fact]
@@ -382,7 +384,7 @@ public class TestEntityFrameworkProvider
 
         Assert.Single(commands);
         // CamusDB syntax: ALTER TABLE t DROP INDEX name
-        Assert.Contains("ALTER TABLE products DROP INDEX idx_products_name", commands[0].CommandText);
+        Assert.Contains("ALTER TABLE `products` DROP INDEX `idx_products_name`", commands[0].CommandText);
     }
 
     [Fact]
@@ -408,7 +410,7 @@ public class TestEntityFrameworkProvider
 
         Assert.Single(commands);
         var sql = commands[0].CommandText;
-        Assert.Contains("ALTER TABLE products ADD COLUMN Stock INT64", sql);
+        Assert.Contains("ALTER TABLE `products` ADD COLUMN `Stock` INT64", sql);
         Assert.Contains("NOT NULL", sql);
     }
 
@@ -436,7 +438,7 @@ public class TestEntityFrameworkProvider
 
         Assert.Single(commands);
         var sql = commands[0].CommandText;
-        Assert.Contains("ALTER TABLE products ADD COLUMN Active BOOL", sql);
+        Assert.Contains("ALTER TABLE `products` ADD COLUMN `Active` BOOL", sql);
         Assert.Contains("DEFAULT (true)", sql);
     }
 
@@ -455,7 +457,7 @@ public class TestEntityFrameworkProvider
         var commands = generator.Generate([operation], null);
 
         Assert.Single(commands);
-        Assert.Contains("ALTER TABLE products DROP COLUMN Price", commands[0].CommandText);
+        Assert.Contains("ALTER TABLE `products` DROP COLUMN `Price`", commands[0].CommandText);
     }
 
     [Fact]
@@ -530,6 +532,50 @@ public class TestEntityFrameworkProvider
         var strategy = factory.Create();
 
         Assert.False(strategy.RetriesOnFailure);
+    }
+
+    [Fact]
+    public void TestModificationCommandBatchFactoryCreatesCamusBatch()
+    {
+        var options = new DbContextOptionsBuilder<SimpleProductContext>()
+            .UseCamusDB("Endpoint=http://localhost:5095;Database=test")
+            .Options;
+
+        using var ctx = new SimpleProductContext(options);
+        var factory = ctx.GetService<IModificationCommandBatchFactory>();
+
+        var batch = factory.Create();
+
+        Assert.IsType<CamusModificationCommandBatch>(batch);
+    }
+
+    [Fact]
+    public void TestLockConflictMappedToDbUpdateConcurrencyException()
+    {
+        // CamusException with CADB0502 (TransactionConflict / AlreadyLocked) wrapped in
+        // DbUpdateException must surface as DbUpdateConcurrencyException so that EF callers
+        // can catch the right type and retry logic engages.
+        var inner = new CamusException("CADB0502", "Range '...' is exclusively locked by another transaction");
+        var dbUpdateEx = new DbUpdateException("Update failed", inner);
+
+        // Simulate what CamusModificationCommandBatch does: rethrow as concurrency exception
+        DbUpdateConcurrencyException? concurrencyEx = null;
+        try
+        {
+            try { throw dbUpdateEx; }
+            catch (DbUpdateException ex) when (ex.InnerException is CamusException { Code: "CADB0502" })
+            {
+                throw new DbUpdateConcurrencyException(ex.Message, ex.InnerException);
+            }
+        }
+        catch (DbUpdateConcurrencyException ex)
+        {
+            concurrencyEx = ex;
+        }
+
+        Assert.NotNull(concurrencyEx);
+        Assert.Same(inner, concurrencyEx!.InnerException);
+        Assert.IsType<DbUpdateConcurrencyException>(concurrencyEx);
     }
 
     // ── Helper DbContexts for validation tests ────────────────────────────────

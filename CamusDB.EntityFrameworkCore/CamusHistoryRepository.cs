@@ -26,9 +26,8 @@ public class CamusHistoryRepository : HistoryRepository
         catch { return false; }
     }
 
-    // Inject IF NOT EXISTS into the generated CREATE TABLE statement
-    public override string GetCreateIfNotExistsScript()
-        => GetCreateScript().Replace("CREATE TABLE ", "CREATE TABLE IF NOT EXISTS ", StringComparison.Ordinal);
+    // Generator always emits CREATE TABLE IF NOT EXISTS
+    public override string GetCreateIfNotExistsScript() => GetCreateScript();
 
     // Conditional scripting blocks — CamusDB has no equivalent of DO $$ BEGIN ... END $$
     public override string GetBeginIfExistsScript(string migrationId) => "";

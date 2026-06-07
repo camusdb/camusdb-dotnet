@@ -17,23 +17,23 @@ public class CamusMigrationsSqlGenerator : MigrationsSqlGenerator
         bool terminate = true)
     {
         var helper = Dependencies.SqlGenerationHelper;
-        var pkCols = operation.PrimaryKey?.Columns.ToHashSet(StringComparer.OrdinalIgnoreCase) ?? [];
+        var pkCols = operation.PrimaryKey?.Columns ?? [];
 
-        builder.Append("CREATE TABLE ").Append(helper.DelimitIdentifier(operation.Name)).AppendLine(" (");
+        builder.Append("CREATE TABLE IF NOT EXISTS ").Append(helper.DelimitIdentifier(operation.Name)).AppendLine(" (");
 
-        bool first = true;
         foreach (var col in operation.Columns)
         {
-            if (!first) builder.AppendLine(",");
-            first = false;
-
             builder.Append(helper.DelimitIdentifier(col.Name)).Append(" ").Append(GetDdlType(col));
 
-            if (pkCols.Contains(col.Name))
-                builder.Append(" PRIMARY KEY NOT NULL");
-            else if (!col.IsNullable)
+            if (!col.IsNullable)
                 builder.Append(" NOT NULL");
+
+            builder.AppendLine(",");
         }
+
+        builder.Append("PRIMARY KEY (")
+               .Append(string.Join(", ", pkCols.Select(c => helper.DelimitIdentifier(c))))
+               .Append(")");
 
         builder.AppendLine().Append(")");
 
@@ -101,7 +101,7 @@ public class CamusMigrationsSqlGenerator : MigrationsSqlGenerator
         var helper = Dependencies.SqlGenerationHelper;
 
         // Both CREATE INDEX and CREATE UNIQUE INDEX are supported by CamusDB
-        builder.Append(operation.IsUnique ? "CREATE UNIQUE INDEX " : "CREATE INDEX ")
+        builder.Append(operation.IsUnique ? "CREATE UNIQUE INDEX IF NOT EXISTS " : "CREATE INDEX IF NOT EXISTS ")
                .Append(helper.DelimitIdentifier(operation.Name))
                .Append(" ON ")
                .Append(helper.DelimitIdentifier(operation.Table))
