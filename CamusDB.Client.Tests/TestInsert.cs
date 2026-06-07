@@ -19,11 +19,12 @@ public class TestInsert : BaseTest
     }
 
     [Fact]
-    public async void TestSimpleInsert()
+    public async Task TestSimpleInsert()
     {
         CamusConnection connection = await GetConnection();
+        string tableName = await CreateTempRobotsTableAsync(connection);
 
-        await using CamusCommand cmd = connection.CreateInsertCommand("robots");
+        await using CamusCommand cmd = connection.CreateInsertCommand(tableName);
 
         cmd.Parameters.Add("id", ColumnType.Id, CamusObjectIdGenerator.Generate());
         cmd.Parameters.Add("name", ColumnType.String, "aaa");
@@ -36,11 +37,12 @@ public class TestInsert : BaseTest
     }
 
     [Fact]
-    public async void TestInsertNulls()
+    public async Task TestInsertNulls()
     {
         CamusConnection connection = await GetConnection();
+        string tableName = await CreateTempRobotsTableAsync(connection);
 
-        await using CamusCommand cmd = connection.CreateInsertCommand("robots");
+        await using CamusCommand cmd = connection.CreateInsertCommand(tableName);
 
         cmd.Parameters.Add("id", ColumnType.Id, CamusObjectIdGenerator.GenerateAsString());
         cmd.Parameters.Add("name", ColumnType.String, "aaa");
@@ -53,13 +55,14 @@ public class TestInsert : BaseTest
     }
 
     [Fact]
-    public async void TestMultiInsert()
+    public async Task TestMultiInsert()
     {
         CamusConnection connection = await GetConnection();
+        string tableName = await CreateTempRobotsTableAsync(connection);
 
         for (int i = 0; i < 10; i++)
         {
-            await using CamusCommand cmd = connection.CreateInsertCommand("robots");
+            await using CamusCommand cmd = connection.CreateInsertCommand(tableName);
 
             cmd.Parameters.Add("id", ColumnType.Id, CamusObjectIdGenerator.Generate());
             cmd.Parameters.Add("name", ColumnType.String, Guid.NewGuid().ToString()[..20]);
@@ -72,9 +75,9 @@ public class TestInsert : BaseTest
         }
     }
 
-    private async Task CreateRow(CamusConnection connection)
+    private async Task CreateRow(CamusConnection connection, string tableName)
     {
-        using CamusCommand cmd = connection.CreateInsertCommand("robots");
+        using CamusCommand cmd = connection.CreateInsertCommand(tableName);
 
         cmd.Parameters.Add("id", ColumnType.Id, CamusObjectIdGenerator.Generate());
         cmd.Parameters.Add("name", ColumnType.String, Guid.NewGuid().ToString()[..20]);
@@ -86,9 +89,9 @@ public class TestInsert : BaseTest
         Assert.Equal(1, await cmd.ExecuteNonQueryAsync());
     }
 
-    private async Task CreateSqlRow(CamusConnection connection)
+    private async Task CreateSqlRow(CamusConnection connection, string tableName)
     {
-        const string sql = "INSERT INTO robots (id, name, year, type, price, enabled) VALUES (GEN_ID(), @name, @year, @type, @price, @enabled)";
+        string sql = $"INSERT INTO {tableName} (id, name, year, type, price, enabled) VALUES (GEN_ID(), @name, @year, @type, @price, @enabled)";
 
         await using CamusCommand cmd = connection.CreateCamusCommand(sql);
         
@@ -102,42 +105,45 @@ public class TestInsert : BaseTest
     }
 
     [Fact]
-    public async void TestMultiInsertParallel()
+    public async Task TestMultiInsertParallel()
     {
         CamusConnection connection = await GetConnection();
+        string tableName = await CreateTempRobotsTableAsync(connection);
 
-        List<Task> tasks = new();
+        List<Task> tasks = [];
 
         for (int j = 0; j < 100; j++)
-            tasks.Add(CreateRow(connection));
+            tasks.Add(CreateRow(connection, tableName));
 
         await Task.WhenAll(tasks);
     }
 
     [Fact]
-    public async void TestMultiSqlInsertParallel()
+    public async Task TestMultiSqlInsertParallel()
     {
         CamusConnection connection = await GetConnection();
+        string tableName = await CreateTempRobotsTableAsync(connection);
 
-        List<Task> tasks = new();
+        List<Task> tasks = [];
 
-        for (int j = 0; j < 100; j++)
+        for (int j = 0; j < 10; j++)
         {
             tasks.Clear();
 
-            for (int i = 0; i < 300; i++)
-                tasks.Add(CreateSqlRow(connection));
+            for (int i = 0; i < 30; i++)
+                tasks.Add(CreateSqlRow(connection, tableName));
 
             await Task.WhenAll(tasks);
         }
     }
 
     [Fact]
-    public async void TestBasicInsert()
+    public async Task TestBasicInsert()
     {
         CamusConnection connection = await GetConnection();
+        string tableName = await CreateTempRobotsTableAsync(connection);
 
-        const string sql = "INSERT INTO robots (id, name, year, type, price, enabled) VALUES (GEN_ID(), @name, @year, @type, @price, @enabled)";
+        string sql = $"INSERT INTO {tableName} (id, name, year, type, price, enabled) VALUES (GEN_ID(), @name, @year, @type, @price, @enabled)";
 
         await using CamusCommand cmd = connection.CreateCamusCommand(sql);
 

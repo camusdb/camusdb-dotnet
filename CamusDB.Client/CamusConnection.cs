@@ -33,50 +33,63 @@ public sealed class CamusConnection : DbConnection
 {
     private readonly CamusConnectionStringBuilder builder;
 
+    private ConnectionState state = ConnectionState.Closed;
+
     public override string ConnectionString { get; set; }
 
-    public override string Database => throw new NotImplementedException();
+    public override string Database => builder.Config.TryGetValue("Database", out string? database) ? database : "";
 
-    public override string DataSource => throw new NotImplementedException();
+    public override string DataSource => builder.Config.TryGetValue("Endpoint", out string? endpoint) ? endpoint : "";
 
-    public override string ServerVersion => throw new NotImplementedException();
+    public override string ServerVersion => "1.0";
 
-    public override ConnectionState State => throw new NotImplementedException();
+    public override ConnectionState State => state;
 
     public CamusConnection(CamusConnectionStringBuilder builder)
     {
-        ConnectionString = "";
+        ConnectionString = builder.ToString();
         this.builder = builder;
     }
 
     public override void ChangeDatabase(string databaseName)
     {
-        throw new NotImplementedException();
+        ArgumentException.ThrowIfNullOrWhiteSpace(databaseName);
+
+        builder.Config["Database"] = databaseName;
     }
 
     public override void Close()
     {
-        throw new NotImplementedException();
+        state = ConnectionState.Closed;
     }
 
     public override void Open()
     {
-        //throw new NotImplementedException();
+        if (State == ConnectionState.Open)
+            return;
+
+        if (!builder.Config.ContainsKey("Endpoint"))
+            throw new CamusException("CADB0000", "Endpoint is required");
+
+        if (!builder.Config.ContainsKey("Database"))
+            throw new CamusException("CADB0000", "Database is required");
+
+        state = ConnectionState.Open;
     }
 
-    //public override async Task OpenAsync()
-    //{
-    //    await Task.Delay(1);
-    //}
+    public override Task OpenAsync(CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        Open();
+        return Task.CompletedTask;
+    }
 
     protected override DbTransaction BeginDbTransaction(IsolationLevel isolationLevel)
     {
         if (isolationLevel != IsolationLevel.Unspecified && isolationLevel != IsolationLevel.Serializable)
             throw new NotSupportedException($"CamusDB only supports isolation levels {IsolationLevel.Serializable} and {IsolationLevel.Unspecified}.");
 
-        var x = Task.Run(() => BeginTransactionAsync());
-
-        return x.Result;
+        return BeginTransactionAsync().GetAwaiter().GetResult();
     }
 
     protected override async ValueTask<DbTransaction> BeginDbTransactionAsync(IsolationLevel isolationLevel, CancellationToken cancellationToken)
@@ -118,7 +131,7 @@ public sealed class CamusConnection : DbConnection
             if (response?.Status != "ok")
                 throw new CamusException("CADB0000", "Empty result returned");
 
-            return new CamusTransaction(response.TxnIdPT, response.TxnIdCounter, builder);
+            return new CamusTransaction(response.TxnIdPT, response.TxnIdCounter, endpoint, this, builder);
         }
         catch (FlurlHttpException ex)
         {
@@ -149,26 +162,26 @@ public sealed class CamusConnection : DbConnection
 
     protected override DbCommand CreateDbCommand()
     {
-        throw new NotImplementedException();
+        return new CamusCommand("", builder, this);
     }
 
     public CamusCommand CreateCamusCommand(string sql)
     {
-        return new CamusCommand(sql, builder);
+        return new CamusCommand(sql, builder, this);
     }
 
     public CamusInsertCommand CreateInsertCommand(string source)
     {
-        return new CamusInsertCommand(source, builder);
+        return new CamusInsertCommand(source, builder, this);
     }
 
     public CamusCommand CreateSelectCommand(string sql)
     {
-        return new CamusCommand(sql, builder);
+        return new CamusCommand(sql, builder, this);
     }
 
     public CamusPingCommand CreatePingCommand()
     {
-        return new CamusPingCommand("", builder);
+        return new CamusPingCommand("", builder, this);
     }
 }

@@ -18,7 +18,13 @@ public class CamusTransaction : DbTransaction
 
     private readonly uint txnIdCounter;
 
+    private readonly string endpoint;
+
+    private readonly CamusConnection connection;
+
     protected readonly CamusConnectionStringBuilder builder;
+
+    internal string Endpoint => endpoint;
 
     public long TxnIdPT => txnIdPT;
 
@@ -26,26 +32,28 @@ public class CamusTransaction : DbTransaction
 
     public string TransactionId => string.Concat(txnIdPT, ":", txnIdCounter);
 
-    public CamusTransaction(long txnIdPT, uint txnIdCounter, CamusConnectionStringBuilder builder)
+    public CamusTransaction(long txnIdPT, uint txnIdCounter, string endpoint, CamusConnection connection, CamusConnectionStringBuilder builder)
     {
         this.txnIdPT = txnIdPT;
         this.txnIdCounter = txnIdCounter;
+        this.endpoint = endpoint;
+        this.connection = connection;
         this.builder = builder;
     }
 
-    public override IsolationLevel IsolationLevel => throw new NotImplementedException();
+    public override IsolationLevel IsolationLevel => IsolationLevel.Serializable;
 
-    protected override DbConnection? DbConnection => throw new NotImplementedException();
+    protected override DbConnection? DbConnection => connection;
     
     /// <summary>
     /// Commits the database transaction synchronously
     /// </summary>
-    public override void Commit() => Task.Run(() => CommitAsync(default));
+    public override void Commit() => CommitAsync(default).GetAwaiter().GetResult();
 
     /// <summary>
     /// Rollbacks the database transaction synchronously
     /// </summary>
-    public override void Rollback() => Task.Run(() => RollbackAsync(default));    
+    public override void Rollback() => RollbackAsync(default).GetAwaiter().GetResult();    
 
     /// <summary>
     /// Commits the database transaction asynchronously, returning the commit timestamp.
@@ -53,13 +61,10 @@ public class CamusTransaction : DbTransaction
     /// <param name="cancellationToken">A cancellation token used for this task.</param>    
     public new async Task CommitAsync(CancellationToken cancellationToken = default)
     {        
-        string endpoint = "";
         string database = builder.Config["Database"];
 
         try
         {
-            endpoint = builder.GetEndpoint();
-
             CamusTransactionRequest request = new()
             {
                 DatabaseName = database,
@@ -69,7 +74,7 @@ public class CamusTransaction : DbTransaction
 
             string jsonRequest = JsonSerializer.Serialize(request, CamusJsonSerializerContext.Default.CamusTransactionRequest);
 
-            string responseJson = await endpoint
+            string responseJson = await this.endpoint
                                                         .WithHeader("Accept", "application/json")
                                                         .WithTimeout(10)
                                                         .AppendPathSegments("commit-transaction")
@@ -114,13 +119,10 @@ public class CamusTransaction : DbTransaction
     /// <param name="cancellationToken">A cancellation token used for this task.</param>    
     public new async Task RollbackAsync(CancellationToken cancellationToken = default)
     {
-        string endpoint = "";
         string database = builder.Config["Database"];
 
         try
         {
-            endpoint = builder.GetEndpoint();
-
             CamusTransactionRequest request = new()
             {
                 DatabaseName = database,
@@ -130,7 +132,7 @@ public class CamusTransaction : DbTransaction
 
             string jsonRequest = JsonSerializer.Serialize(request, CamusJsonSerializerContext.Default.CamusTransactionRequest);
 
-            string responseJson = await endpoint
+            string responseJson = await this.endpoint
                                                         .WithHeader("Accept", "application/json")
                                                         .WithTimeout(10)
                                                         .AppendPathSegments("rollback-transaction")

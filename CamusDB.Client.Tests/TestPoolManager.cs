@@ -24,7 +24,7 @@ public class TestPoolManager
             MaximumActiveSessions = 200,
         };
 
-        string connectionString = $"Endpoint=https://localhost:7141;Database=test";
+        string connectionString = "Endpoint=http://localhost:5095;Database=test";
 
         SessionPoolManager manager = SessionPoolManager.Create(options);
 

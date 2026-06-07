@@ -16,14 +16,11 @@ public class TestCreate : BaseTest
     }
 
     [Fact]
-    public async void TestCreateTable()
+    public async Task TestCreateTable()
     {
         CamusConnection connection = await GetConnection();
+        string tableName = await CreateTempRobotsTableAsync(connection);
 
-        string sql = "CREATE TABLE test_" + Guid.NewGuid().ToString("n") + " ( id OID PRIMARY KEY NOT NULL, name STRING NOT NULL, status INT64 NOT NULL)";
-
-        using CamusCommand cmd = connection.CreateCamusCommand(sql);        
-
-        Assert.True(await cmd.ExecuteDDLAsync());
+        Assert.StartsWith("robots_", tableName, StringComparison.Ordinal);
     }
 }

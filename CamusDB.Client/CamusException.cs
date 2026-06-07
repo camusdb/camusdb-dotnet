@@ -6,14 +6,16 @@
  * file that was distributed with this source code.
  */
 
+using System.Data.Common;
+
 namespace CamusDB.Client;
 
-public class CamusException : Exception
+public class CamusException : DbException
 {
-	public string Code { get; }
+    public string Code { get; }
 
-	public CamusException(string code, string message) : base(message)
-	{
-		Code = code;
-	}
+    public CamusException(string code, string message) : base(message)
+    {
+        Code = code;
+    }
 }

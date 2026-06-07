@@ -5,3 +5,6 @@ CamusDB.Client/.idea
 CamusDB.Client.Tests/bin
 CamusDB.Client.Tests/obj
 CamusDB.Client.Tests/.vs
+CamusDB.EntityFrameworkCore/bin
+CamusDB.EntityFrameworkCore/obj
+artifacts

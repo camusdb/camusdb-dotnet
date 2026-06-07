@@ -1,6 +1,5 @@
-﻿
 /**
- * This file is part of CamusDB  
+ * This file is part of CamusDB
  *
  * For the full copyright and license information, please view the LICENSE.txt
  * file that was distributed with this source code.
@@ -8,260 +7,283 @@
 
 using System.Collections;
 using System.Data.Common;
+using System.Globalization;
 
 namespace CamusDB.Client;
 
 public class CamusDataReader : DbDataReader
 {
-	private int position;
+    private int position = -1;
 
-	private readonly List<Dictionary<string, ColumnValue>> rows;
+    private bool isClosed;
 
-    public override int Depth => throw new NotImplementedException();
+    private readonly List<Dictionary<string, ColumnValue>> rows;
 
-    public override int FieldCount => throw new NotImplementedException();
+    private readonly string[] columnNames;
 
-    public override bool HasRows => position >= rows.Count;
+    public override int Depth => 0;
 
-    public override bool IsClosed => throw new NotImplementedException();
+    public override int FieldCount => columnNames.Length;
 
-    public override int RecordsAffected => throw new NotImplementedException();
+    public override bool HasRows => rows.Count > 0;
 
-    public override object this[string name] => throw new NotImplementedException();
+    public override bool IsClosed => isClosed;
 
-    public override object this[int ordinal] => throw new NotImplementedException();
+    public override int RecordsAffected => -1;
+
+    public override object this[string name] => GetValue(GetOrdinal(name));
+
+    public override object this[int ordinal] => GetValue(ordinal);
 
     public CamusDataReader(List<Dictionary<string, ColumnValue>> rows)
-	{
-		this.position = -1;
-		this.rows = rows;
-	}
-
-    /// <summary>
-    /// Reads the next row of values from CamusDB.
-    /// Important: CamusDB supports limited cancellation of this task.
-    /// </summary>
-    /// <param name="cancellationToken">A cancellation token to cancel the read. CamusDB currently
-    /// supports limited cancellation while advancing the read to the next row.</param>
-    /// <returns>True if another row was read.</returns>
-    public override Task<bool> ReadAsync(CancellationToken cancellationToken)
-	{
-        position++;
-
-        if (position >= rows.Count)
-			return Task.FromResult(false);
-		
-		return Task.FromResult(true);
-	}
-
-	public Dictionary<string, ColumnValue> GetCurrent()
-	{
-		return rows[position];
-	}
-
-	public override bool IsDBNull(int ordinal)
-	{
-        Dictionary<string, ColumnValue> current = GetCurrent();
-
-        int i = 0;
-
-        foreach (KeyValuePair<string, ColumnValue> keyValue in current)
-        {
-            if (i == ordinal)
-                return keyValue.Value.Type == ColumnType.Null;
-
-            i++;
-        }
-
-        return false;
+    {
+        this.rows = rows;
+        columnNames = rows.Count > 0 ? rows[0].Keys.ToArray() : Array.Empty<string>();
     }
 
-
-    public override int GetInt32(int ordinal)
-	{
-        Dictionary<string, ColumnValue> current = GetCurrent();
-
-		int i = 0;
-
-		foreach (KeyValuePair<string, ColumnValue> keyValue in current)
-		{
-			if (i == ordinal)
-				return (int)keyValue.Value.LongValue;
-
-			i++;
-		}
-
-		return 0;
-	}
-
-    public override string GetString(int ordinal)
+    public override void Close()
     {
-        Dictionary<string, ColumnValue> current = GetCurrent();
-
-        int i = 0;
-
-        foreach (KeyValuePair<string, ColumnValue> keyValue in current)
-        {
-            if (i == ordinal)
-                return keyValue.Value.StrValue!;
-
-            i++;
-        }
-
-        return null!;
-    }
-
-    public override bool GetBoolean(int ordinal)
-    {
-        throw new NotImplementedException();
-    }
-
-    public override byte GetByte(int ordinal)
-    {
-        throw new NotImplementedException();
-    }
-
-    public override long GetBytes(int ordinal, long dataOffset, byte[]? buffer, int bufferOffset, int length)
-    {
-        throw new NotImplementedException();
-    }
-
-    public override char GetChar(int ordinal)
-    {
-        throw new NotImplementedException();
-    }
-
-    public override long GetChars(int ordinal, long dataOffset, char[]? buffer, int bufferOffset, int length)
-    {
-        throw new NotImplementedException();
-    }
-
-    public override string GetDataTypeName(int ordinal)
-    {
-        throw new NotImplementedException();
-    }
-
-    public override DateTime GetDateTime(int ordinal)
-    {
-        throw new NotImplementedException();
-    }
-
-    public override decimal GetDecimal(int ordinal)
-    {
-        throw new NotImplementedException();
-    }
-
-    public override double GetDouble(int ordinal)
-    {
-        Dictionary<string, ColumnValue> current = GetCurrent();
-
-        int i = 0;
-
-        foreach (KeyValuePair<string, ColumnValue> keyValue in current)
-        {
-            if (i == ordinal)
-                return (double)keyValue.Value.FloatValue;
-
-            i++;
-        }
-
-        return 0;
-    }
-
-    public override IEnumerator GetEnumerator()
-    {
-        throw new NotImplementedException();
-    }
-
-    public override Type GetFieldType(int ordinal)
-    {
-        throw new NotImplementedException();
-    }
-
-    public override float GetFloat(int ordinal)
-    {
-        Dictionary<string, ColumnValue> current = GetCurrent();
-
-        int i = 0;
-
-        foreach (KeyValuePair<string, ColumnValue> keyValue in current)
-        {
-            if (i == ordinal)
-                return (float)keyValue.Value.FloatValue;
-
-            i++;
-        }
-
-        return 0;
-    }
-
-    public override Guid GetGuid(int ordinal)
-    {
-        throw new NotImplementedException();
-    }
-
-    public override short GetInt16(int ordinal)
-    {
-        Dictionary<string, ColumnValue> current = GetCurrent();
-
-        int i = 0;
-
-        foreach (KeyValuePair<string, ColumnValue> keyValue in current)
-        {
-            if (i == ordinal)
-                return (short)keyValue.Value.LongValue;
-
-            i++;
-        }
-
-        return 0;
-    }    
-
-    public override long GetInt64(int ordinal)
-    {
-        Dictionary<string, ColumnValue> current = GetCurrent();
-
-        int i = 0;
-
-        foreach (KeyValuePair<string, ColumnValue> keyValue in current)
-        {
-            if (i == ordinal)
-                return keyValue.Value.LongValue;
-
-            i++;
-        }
-
-        return 0;
-    }
-
-    public override string GetName(int ordinal)
-    {
-        throw new NotImplementedException();
-    }
-
-    public override int GetOrdinal(string name)
-    {
-        throw new NotImplementedException();
-    }    
-
-    public override object GetValue(int ordinal)
-    {
-        throw new NotImplementedException();
-    }
-
-    public override int GetValues(object[] values)
-    {
-        throw new NotImplementedException();
-    }    
-
-    public override bool NextResult()
-    {
-        throw new NotImplementedException();
+        isClosed = true;
     }
 
     public override bool Read()
     {
-        throw new NotImplementedException();
+        ThrowIfClosed();
+
+        position++;
+        return position < rows.Count;
+    }
+
+    public override Task<bool> ReadAsync(CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        return Task.FromResult(Read());
+    }
+
+    public override bool NextResult() => false;
+
+    public override int GetOrdinal(string name)
+    {
+        for (int i = 0; i < columnNames.Length; i++)
+        {
+            if (string.Equals(columnNames[i], name, StringComparison.Ordinal))
+                return i;
+        }
+
+        throw new IndexOutOfRangeException($"Column '{name}' was not found.");
+    }
+
+    public override string GetName(int ordinal) => columnNames[ordinal];
+
+    public override string GetDataTypeName(int ordinal) => GetColumnValue(ordinal).Type.ToString();
+
+    public override Type GetFieldType(int ordinal) => GetColumnValue(ordinal).Type switch
+    {
+        ColumnType.Bool => typeof(bool),
+        ColumnType.Float64 => typeof(double),
+        ColumnType.Id => typeof(string),
+        ColumnType.Integer64 => typeof(long),
+        ColumnType.Null => typeof(DBNull),
+        ColumnType.String => typeof(string),
+        _ => typeof(object)
+    };
+
+    public override object GetValue(int ordinal)
+    {
+        ColumnValue value = GetColumnValue(ordinal);
+
+        return value.Type switch
+        {
+            ColumnType.Bool => value.BoolValue,
+            ColumnType.Float64 => value.FloatValue,
+            ColumnType.Id => value.StrValue ?? "",
+            ColumnType.Integer64 => value.LongValue,
+            ColumnType.Null => DBNull.Value,
+            ColumnType.String => value.StrValue ?? "",
+            _ => DBNull.Value
+        };
+    }
+
+    public override int GetValues(object[] values)
+    {
+        int count = Math.Min(values.Length, FieldCount);
+
+        for (int i = 0; i < count; i++)
+            values[i] = GetValue(i);
+
+        return count;
+    }
+
+    public override bool IsDBNull(int ordinal) => GetColumnValue(ordinal).Type == ColumnType.Null;
+
+    public override bool GetBoolean(int ordinal) => GetColumnValue(ordinal).Type switch
+    {
+        ColumnType.Bool => GetColumnValue(ordinal).BoolValue,
+        ColumnType.Integer64 => GetColumnValue(ordinal).LongValue != 0,
+        _ => throw new InvalidCastException()
+    };
+
+    public override byte GetByte(int ordinal)
+    {
+        long value = GetInt64(ordinal);
+
+        if (value < byte.MinValue || value > byte.MaxValue)
+            throw new OverflowException();
+
+        return (byte)value;
+    }
+
+    public override long GetBytes(int ordinal, long dataOffset, byte[]? buffer, int bufferOffset, int length)
+    {
+        byte[] data = System.Text.Encoding.UTF8.GetBytes(GetString(ordinal));
+        return CopyBuffer(data, dataOffset, buffer, bufferOffset, length);
+    }
+
+    public override char GetChar(int ordinal)
+    {
+        string value = GetString(ordinal);
+
+        if (value.Length != 1)
+            throw new InvalidCastException();
+
+        return value[0];
+    }
+
+    public override long GetChars(int ordinal, long dataOffset, char[]? buffer, int bufferOffset, int length)
+    {
+        char[] data = GetString(ordinal).ToCharArray();
+        return CopyBuffer(data, dataOffset, buffer, bufferOffset, length);
+    }
+
+    public override DateTime GetDateTime(int ordinal)
+    {
+        object value = GetValue(ordinal);
+
+        if (value is DateTime dateTime)
+            return dateTime;
+
+        return DateTime.Parse(Convert.ToString(value, CultureInfo.InvariantCulture)!, CultureInfo.InvariantCulture);
+    }
+
+    public override decimal GetDecimal(int ordinal) => Convert.ToDecimal(GetValue(ordinal), CultureInfo.InvariantCulture);
+
+    public override double GetDouble(int ordinal) => GetColumnValue(ordinal).Type switch
+    {
+        ColumnType.Float64 => GetColumnValue(ordinal).FloatValue,
+        ColumnType.Integer64 => GetColumnValue(ordinal).LongValue,
+        _ => throw new InvalidCastException()
+    };
+
+    public override IEnumerator GetEnumerator()
+    {
+        while (Read())
+            yield return this;
+    }
+
+    public override float GetFloat(int ordinal) => Convert.ToSingle(GetDouble(ordinal), CultureInfo.InvariantCulture);
+
+    public override Guid GetGuid(int ordinal)
+    {
+        string value = GetString(ordinal);
+        return Guid.Parse(value);
+    }
+
+    public override short GetInt16(int ordinal)
+    {
+        long value = GetInt64(ordinal);
+
+        if (value < short.MinValue || value > short.MaxValue)
+            throw new OverflowException();
+
+        return (short)value;
+    }
+
+    public override int GetInt32(int ordinal)
+    {
+        long value = GetInt64(ordinal);
+
+        if (value < int.MinValue || value > int.MaxValue)
+            throw new OverflowException();
+
+        return (int)value;
+    }
+
+    public override long GetInt64(int ordinal)
+    {
+        ColumnValue value = GetColumnValue(ordinal);
+
+        return value.Type switch
+        {
+            ColumnType.Integer64 => value.LongValue,
+            ColumnType.Float64 => checked((long)value.FloatValue),
+            _ => throw new InvalidCastException()
+        };
+    }
+
+    public override string GetString(int ordinal)
+    {
+        ColumnValue value = GetColumnValue(ordinal);
+
+        return value.Type switch
+        {
+            ColumnType.Id => value.StrValue ?? "",
+            ColumnType.String => value.StrValue ?? "",
+            _ => Convert.ToString(GetValue(ordinal), CultureInfo.InvariantCulture) ?? ""
+        };
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing)
+            Close();
+
+        base.Dispose(disposing);
+    }
+
+    private Dictionary<string, ColumnValue> GetCurrent()
+    {
+        ThrowIfClosed();
+
+        if (position < 0 || position >= rows.Count)
+            throw new InvalidOperationException("No current row is available.");
+
+        return rows[position];
+    }
+
+    private ColumnValue GetColumnValue(int ordinal)
+    {
+        if (ordinal < 0 || ordinal >= FieldCount)
+            throw new IndexOutOfRangeException();
+
+        string columnName = columnNames[ordinal];
+        Dictionary<string, ColumnValue> current = GetCurrent();
+
+        if (!current.TryGetValue(columnName, out ColumnValue? value))
+            throw new IndexOutOfRangeException($"Column '{columnName}' was not found in the current row.");
+
+        return value;
+    }
+
+    private void ThrowIfClosed()
+    {
+        if (isClosed)
+            throw new InvalidOperationException("The data reader is closed.");
+    }
+
+    private static long CopyBuffer<T>(T[] data, long dataOffset, T[]? buffer, int bufferOffset, int length)
+    {
+        if (dataOffset < 0)
+            throw new ArgumentOutOfRangeException(nameof(dataOffset));
+
+        if (dataOffset >= data.Length)
+            return 0;
+
+        int available = data.Length - (int)dataOffset;
+        int copied = Math.Min(available, length);
+
+        if (buffer is not null)
+            Array.Copy(data, (int)dataOffset, buffer, bufferOffset, copied);
+
+        return copied;
     }
 }
-

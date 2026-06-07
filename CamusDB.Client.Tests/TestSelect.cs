@@ -15,11 +15,13 @@ public class TestSelect : BaseTest
     }
 
     [Fact]
-    public async void TestBasicSelect()
+    public async Task TestBasicSelect()
     {
         CamusConnection connection = await GetConnection();
+        string tableName = await CreateTempRobotsTableAsync(connection);
+        await InsertRobotAsync(connection, tableName, name: "r1", type: "mechanical", year: 1974, price: 1.0, enabled: true);
 
-        string sql = "SELECT * FROM robots WHERE year = 1974";
+        string sql = $"SELECT * FROM {tableName} WHERE year = 1974";
 
         using CamusCommand cmd = connection.CreateSelectCommand(sql);
 
@@ -41,11 +43,13 @@ public class TestSelect : BaseTest
     }
 
     [Fact]
-    public async void TestBasicSelectBoundParameters()
+    public async Task TestBasicSelectBoundParameters()
     {
         CamusConnection connection = await GetConnection();
+        string tableName = await CreateTempRobotsTableAsync(connection);
+        await InsertRobotAsync(connection, tableName, name: "r1", type: "mechanical", year: 1974, price: 1.0, enabled: true);
 
-        string sql = "SELECT * FROM robots WHERE year = @year";
+        string sql = $"SELECT * FROM {tableName} WHERE year = @year";
 
         using CamusCommand cmd = connection.CreateSelectCommand(sql);
 
@@ -70,9 +74,9 @@ public class TestSelect : BaseTest
         Assert.Equal(1, i);
     }
 
-    private static async Task ExecuteSelect(CamusConnection connection)
+    private static async Task ExecuteSelect(CamusConnection connection, string tableName)
     {
-        string sql = "SELECT * FROM robots WHERE year = 2002";
+        string sql = $"SELECT * FROM {tableName} WHERE year = 2002";
 
         using CamusCommand cmd = connection.CreateSelectCommand(sql);
 
@@ -99,30 +103,34 @@ public class TestSelect : BaseTest
     }
 
     [Fact]
-    public async void TestMultiSelect()
+    public async Task TestMultiSelect()
     {
         CamusConnection connection = await GetConnection();
+        string tableName = await CreateTempRobotsTableAsync(connection);
+        await InsertRobotAsync(connection, tableName, name: "r1", type: "mechanical", year: 2002, price: 1.0, enabled: true);
 
         List<Task> tasks = new();
 
         for (int j = 0; j < 100; j++)
-            tasks.Add(ExecuteSelect(connection));
+            tasks.Add(ExecuteSelect(connection, tableName));
 
         await Task.WhenAll(tasks);
     }
 
     [Fact]
-    public async void TestRepSelect()
+    public async Task TestRepSelect()
     {
         CamusConnection connection = await GetConnection();
+        string tableName = await CreateTempRobotsTableAsync(connection);
+        await InsertRobotAsync(connection, tableName, name: "r1", type: "mechanical", year: 1974, price: 1.0, enabled: true);
+        await InsertRobotAsync(connection, tableName, name: "r2", type: "electronic", year: 1975, price: 2.0, enabled: true);
+        await InsertRobotAsync(connection, tableName, name: "r3", type: "cyborg", year: 1976, price: 3.0, enabled: true);
 
-        string sql = "SELECT * FROM robots";
+        string sql = $"SELECT * FROM {tableName}";
 
         using CamusCommand cmd = connection.CreateSelectCommand(sql);
 
         CamusDataReader reader = await cmd.ExecuteReaderAsync();
-
-        int i = 0;
 
         Dictionary<string, bool> columns = new();
 
@@ -136,6 +144,6 @@ public class TestSelect : BaseTest
             columns.Add(id, true);
         }
 
-        //Assert.Equal(1, i);
+        Assert.Equal(3, columns.Count);
     }
 }

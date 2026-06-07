@@ -13,6 +13,8 @@ namespace CamusDB.Client;
 /// </summary>
 public class CamusConnectionStringBuilder
 {
+    private readonly string connectionString;
+
     public SessionPoolManager? SessionPoolManager { get; set; }
 
     public Dictionary<string, string> Config { get; } = new();
@@ -21,6 +23,8 @@ public class CamusConnectionStringBuilder
 
     public CamusConnectionStringBuilder(string connectionString)
     {
+        this.connectionString = connectionString;
+
         if (string.IsNullOrWhiteSpace(connectionString))
             return;
 
@@ -50,5 +54,6 @@ public class CamusConnectionStringBuilder
     {
         endpointPool?.MarkUnreachable(endpoint);
     }
-}
 
+    public override string ToString() => connectionString;
+}

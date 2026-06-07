@@ -30,16 +30,22 @@ namespace CamusDB.Client;
 /// </summary>
 public class CamusCommand : DbCommand, ICloneable
 {
-    protected readonly string source;
+    protected readonly CamusConnectionStringBuilder builder;
 
     protected CamusTransaction? transaction;
 
-    protected readonly CamusConnectionStringBuilder builder;
+    private CamusConnection? connection;
 
-    public CamusCommand(string source, CamusConnectionStringBuilder builder)
+    private bool designTimeVisible;
+
+    private UpdateRowSource updatedRowSource;
+
+    public CamusCommand(string source, CamusConnectionStringBuilder builder, CamusConnection? connection = null)
     {
-        this.source = source;
         this.builder = builder;
+        this.connection = connection;
+        CommandText = source;
+        updatedRowSource = UpdateRowSource.None;
     }
 
     /// <summary>
@@ -53,25 +59,55 @@ public class CamusCommand : DbCommand, ICloneable
 
     public override CommandType CommandType { get; set; }
 
-    public override bool DesignTimeVisible { get => throw new NotImplementedException(); set => throw new NotImplementedException(); }
+    public override bool DesignTimeVisible { get => designTimeVisible; set => designTimeVisible = value; }
 
-    public override UpdateRowSource UpdatedRowSource { get => throw new NotImplementedException(); set => throw new NotImplementedException(); }
+    public override UpdateRowSource UpdatedRowSource { get => updatedRowSource; set => updatedRowSource = value; }
 
-    protected override DbConnection? DbConnection { get => throw new NotImplementedException(); set => throw new NotImplementedException(); }
+    protected override DbConnection? DbConnection
+    {
+        get => connection;
+        set
+        {
+            if (value is not null and not CamusConnection)
+                throw new ArgumentException("Value must be a CamusConnection.", nameof(value));
 
-    protected override DbParameterCollection DbParameterCollection => throw new NotImplementedException();
+            connection = (CamusConnection?)value;
+        }
+    }
+
+    protected override DbParameterCollection DbParameterCollection => Parameters;
 
     protected override DbTransaction? DbTransaction { get => transaction; set => transaction = (CamusTransaction?) value; }
 
     public override void Cancel()
     {
-        throw new NotImplementedException();
+        // CamusDB uses HTTP requests, so cancellation is cooperative via CancellationToken.
     }
 
     public object Clone()
     {
-        throw new NotImplementedException();
+        CamusCommand clone = this switch
+        {
+            CamusInsertCommand => new CamusInsertCommand(CommandText, builder, connection),
+            CamusPingCommand => new CamusPingCommand(CommandText, builder, connection),
+            _ => new CamusCommand(CommandText, builder, connection)
+        };
+
+        clone.CommandTimeout = CommandTimeout;
+        clone.CommandType = CommandType;
+        clone.DesignTimeVisible = DesignTimeVisible;
+        clone.UpdatedRowSource = UpdatedRowSource;
+        clone.transaction = transaction;
+
+        foreach (CamusParameter parameter in Parameters)
+            clone.Parameters.Add((CamusParameter)parameter.Clone());
+
+        return clone;
     }
+
+    protected string GetRequestTarget() => CommandText;
+
+    protected string GetEndpoint() => transaction?.Endpoint ?? builder.GetEndpoint();
 
     protected Dictionary<string, ColumnValue> GetCommandParameters()
     {
@@ -139,7 +175,7 @@ public class CamusCommand : DbCommand, ICloneable
 
     /// <inheritdoc />
     protected override DbDataReader ExecuteDbDataReader(CommandBehavior behavior) =>
-        Task.Run(() => ExecuteDbDataReaderAsync(behavior, default)).Result;
+        ExecuteDbDataReaderAsync(behavior, default).GetAwaiter().GetResult();
 
     /// <inheritdoc />
     protected override async Task<DbDataReader> ExecuteDbDataReaderAsync(CommandBehavior behavior, CancellationToken cancellationToken)
@@ -149,12 +185,12 @@ public class CamusCommand : DbCommand, ICloneable
 
         try
         {
-            endpoint = builder.GetEndpoint();
+            endpoint = GetEndpoint();
 
             CamusExecuteSqlQueryRequest request = new()
             {
                 DatabaseName = database,
-                Sql = source,
+                Sql = GetRequestTarget(),
                 Parameters = GetCommandParameters()
             };
 
@@ -214,7 +250,7 @@ public class CamusCommand : DbCommand, ICloneable
     /// <returns></returns>
     public override int ExecuteNonQuery()
     {
-        return Task.Run(() => ExecuteNonQueryAsync(default)).Result;
+        return ExecuteNonQueryAsync(default).GetAwaiter().GetResult();
     }
 
     /// <inheritdoc />
@@ -224,13 +260,13 @@ public class CamusCommand : DbCommand, ICloneable
 
         try
         {
-            endpoint = builder.GetEndpoint();
+            endpoint = GetEndpoint();
             string database = builder.Config["Database"];
 
             CamusExecuteSqlNonQueryRequest request = new()
             {
                 DatabaseName = database,
-                Sql = source,
+                Sql = GetRequestTarget(),
                 Parameters = GetCommandParameters()
             };
 
@@ -290,7 +326,7 @@ public class CamusCommand : DbCommand, ICloneable
     /// <returns></returns>
     public bool ExecuteDDL()
     {
-        return Task.Run(() => ExecuteDDLAsync(default)).Result;
+        return ExecuteDDLAsync(default).GetAwaiter().GetResult();
     }
 
     /// <inheritdoc />
@@ -306,13 +342,13 @@ public class CamusCommand : DbCommand, ICloneable
 
         try
         {
-            endpoint = builder.GetEndpoint();
+            endpoint = GetEndpoint();
             string database = builder.Config["Database"];            
 
             CamusExecuteDDLRequest request = new()
             {
                 DatabaseName = database,
-                Sql = source
+                Sql = GetRequestTarget()
             };
 
             string jsonRequest = JsonSerializer.Serialize(request, CamusJsonSerializerContext.Default.CamusExecuteDDLRequest);
@@ -357,16 +393,21 @@ public class CamusCommand : DbCommand, ICloneable
 
     public override object? ExecuteScalar()
     {
-        throw new NotImplementedException();
+        using DbDataReader reader = ExecuteDbDataReader(CommandBehavior.SingleRow);
+
+        if (!reader.Read() || reader.FieldCount == 0)
+            return null;
+
+        return reader.GetValue(0);
     }
 
     public override void Prepare()
     {
-        throw new NotImplementedException();
+        // CamusDB does not currently expose a server-side prepare API.
     }
 
     protected override DbParameter CreateDbParameter()
     {
-        throw new NotImplementedException();
+        return new CamusParameter();
     }
 }

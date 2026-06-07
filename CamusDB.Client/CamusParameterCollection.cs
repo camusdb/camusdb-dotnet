@@ -62,71 +62,94 @@ public sealed class CamusParameterCollection : DbParameterCollection, IEnumerabl
 
     public override void Clear()
     {
-        throw new NotImplementedException();
+        _innerList.Clear();
     }
 
     public override bool Contains(object value)
     {
-        throw new NotImplementedException();
+        return value is CamusParameter parameter && _innerList.Contains(parameter);
     }
 
     public override bool Contains(string value)
     {
-        throw new NotImplementedException();
+        return IndexOf(value) >= 0;
     }
 
     public override void CopyTo(Array array, int index)
     {
-        throw new NotImplementedException();
+        for (int i = 0; i < _innerList.Count; i++)
+            array.SetValue(_innerList[i], index + i);
     }
 
     public override int IndexOf(object value)
     {
-        throw new NotImplementedException();
+        return value is CamusParameter parameter ? _innerList.IndexOf(parameter) : -1;
     }
 
     public override int IndexOf(string parameterName)
     {
-        throw new NotImplementedException();
+        return _innerList.FindIndex(x => string.Equals(x.ParameterName, parameterName, StringComparison.Ordinal));
     }
 
     public override void Insert(int index, object value)
     {
-        throw new NotImplementedException();
+        _innerList.Insert(index, ValidateParameter(value));
     }
 
     public override void Remove(object value)
     {
-        throw new NotImplementedException();
+        if (value is CamusParameter parameter)
+            _innerList.Remove(parameter);
     }
 
     public override void RemoveAt(int index)
     {
-        throw new NotImplementedException();
+        _innerList.RemoveAt(index);
     }
 
     public override void RemoveAt(string parameterName)
     {
-        throw new NotImplementedException();
+        int index = IndexOf(parameterName);
+        if (index >= 0)
+            _innerList.RemoveAt(index);
     }
 
     protected override DbParameter GetParameter(int index)
     {
-        throw new NotImplementedException();
+        return _innerList[index];
     }
 
     protected override DbParameter GetParameter(string parameterName)
     {
-        throw new NotImplementedException();
+        int index = IndexOf(parameterName);
+        if (index < 0)
+            throw new IndexOutOfRangeException($"Parameter '{parameterName}' was not found.");
+
+        return _innerList[index];
     }
 
     protected override void SetParameter(int index, DbParameter value)
     {
-        throw new NotImplementedException();
+        _innerList[index] = ValidateParameter(value);
     }
 
     protected override void SetParameter(string parameterName, DbParameter value)
     {
-        throw new NotImplementedException();
+        int index = IndexOf(parameterName);
+        if (index < 0)
+            throw new IndexOutOfRangeException($"Parameter '{parameterName}' was not found.");
+
+        _innerList[index] = ValidateParameter(value);
+    }
+
+    private static CamusParameter ValidateParameter(object value)
+    {
+        if (value is null)
+            throw new ArgumentNullException(nameof(value));
+
+        if (value is not CamusParameter parameter)
+            throw new ArgumentException("Value must be a CamusParameter.", nameof(value));
+
+        return parameter;
     }
 }

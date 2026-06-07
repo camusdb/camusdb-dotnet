@@ -13,7 +13,7 @@ namespace CamusDB.Client;
 
 public class CamusPingCommand : CamusCommand
 {
-    public CamusPingCommand(string source, CamusConnectionStringBuilder builder) : base(source, builder)
+    public CamusPingCommand(string source, CamusConnectionStringBuilder builder, CamusConnection? connection = null) : base(source, builder, connection)
     {
 
     }
@@ -25,7 +25,7 @@ public class CamusPingCommand : CamusCommand
 
         try
         {
-            endpoint = builder.GetEndpoint();
+            endpoint = GetEndpoint();
 
             string responseJson = await endpoint
                                                         .WithTimeout(CommandTimeout)

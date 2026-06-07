@@ -18,13 +18,14 @@ public class TestTransactions : BaseTest
     }
 
     [Fact]
-    public async void TestBeginTxAndCommit()
+    public async Task TestBeginTxAndCommit()
     {
         CamusConnection connection = await GetConnection();
+        string tableName = await CreateTempRobotsTableAsync(connection);
 
         CamusTransaction transaction = await connection.BeginTransactionAsync();        
 
-        using CamusCommand cmd = connection.CreateInsertCommand("robots");
+        using CamusCommand cmd = connection.CreateInsertCommand(tableName);
 
         cmd.Transaction = transaction;
 
@@ -39,13 +40,14 @@ public class TestTransactions : BaseTest
     }
 
     [Fact]
-    public async void TestBeginTxAndRollback()
+    public async Task TestBeginTxAndRollback()
     {
         CamusConnection connection = await GetConnection();
+        string tableName = await CreateTempRobotsTableAsync(connection);
 
         CamusTransaction transaction = await connection.BeginTransactionAsync();        
 
-        using CamusCommand cmd = connection.CreateInsertCommand("robots");
+        using CamusCommand cmd = connection.CreateInsertCommand(tableName);
 
         cmd.Transaction = transaction;
 

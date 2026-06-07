@@ -16,7 +16,7 @@ public class TestPing : BaseTest
     }
 
     [Fact]
-    public async void TestPingResponse()
+    public async Task TestPingResponse()
     {
         CamusConnection connection = await GetConnection();        
 

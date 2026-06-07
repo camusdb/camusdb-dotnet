@@ -24,8 +24,8 @@ public sealed class CamusParameter : DbParameter, ICloneable
     /// </summary>    
     public override DbType DbType
     {
-        get => DbType.String;
-        set => _camusDbType = ColumnType.String;
+        get => ToDbType(_camusDbType);
+        set => _camusDbType = FromDbType(value);
     }
 
     public ColumnType ColumnType
@@ -93,11 +93,44 @@ public sealed class CamusParameter : DbParameter, ICloneable
 
     public override void ResetDbType()
     {
-        throw new NotImplementedException();
+        _camusDbType = ColumnType.String;
     }
 
     public object Clone()
     {
-        throw new NotImplementedException();
+        return new CamusParameter(ParameterName ?? "", ColumnType, Value, SourceColumn)
+        {
+            DbType = DbType,
+            Direction = Direction,
+            IsNullable = IsNullable,
+            Size = Size,
+            SourceColumnNullMapping = SourceColumnNullMapping
+        };
     }
+
+    private static ColumnType FromDbType(DbType type) => type switch
+    {
+        DbType.Boolean => ColumnType.Bool,
+        DbType.Byte => ColumnType.Integer64,
+        DbType.Decimal => ColumnType.Float64,
+        DbType.Double => ColumnType.Float64,
+        DbType.Guid => ColumnType.Id,
+        DbType.Int16 => ColumnType.Integer64,
+        DbType.Int32 => ColumnType.Integer64,
+        DbType.Int64 => ColumnType.Integer64,
+        DbType.Single => ColumnType.Float64,
+        DbType.String => ColumnType.String,
+        _ => ColumnType.String
+    };
+
+    private static DbType ToDbType(ColumnType type) => type switch
+    {
+        ColumnType.Bool => DbType.Boolean,
+        ColumnType.Float64 => DbType.Double,
+        ColumnType.Id => DbType.String,
+        ColumnType.Integer64 => DbType.Int64,
+        ColumnType.Null => DbType.Object,
+        ColumnType.String => DbType.String,
+        _ => DbType.String
+    };
 }

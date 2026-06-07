@@ -13,7 +13,7 @@ namespace CamusDB.Client;
 
 public class CamusInsertCommand : CamusCommand
 {
-    public CamusInsertCommand(string source, CamusConnectionStringBuilder builder) : base(source, builder)
+    public CamusInsertCommand(string source, CamusConnectionStringBuilder builder, CamusConnection? connection = null) : base(source, builder, connection)
     {
 
     }
@@ -25,13 +25,13 @@ public class CamusInsertCommand : CamusCommand
 
         try
         {
-            endpoint = builder.GetEndpoint();
+            endpoint = GetEndpoint();
             string database = builder.Config["Database"];
 
             CamusInsertRequest request = new()
             {
                 DatabaseName = database,
-                TableName = source,
+                TableName = GetRequestTarget(),
                 Values = GetCommandParameters()
             };
 
