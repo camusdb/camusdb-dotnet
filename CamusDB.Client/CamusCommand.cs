@@ -250,6 +250,7 @@ public class CamusCommand : DbCommand, ICloneable
 
             string jsonRequest = JsonSerializer.Serialize(request, CamusJsonSerializerContext.Default.CamusExecuteSqlQueryRequest);
 
+
             string responseJson = await endpoint
                                         .WithHeader("Accept", "application/json")
                                         .WithTimeout(CommandTimeout)

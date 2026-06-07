@@ -12,7 +12,10 @@ public sealed class CamusTypeMappingSource : RelationalTypeMappingSource
     private static readonly LongTypeMapping Int64Mapping = new("int64");
     private static readonly FloatTypeMapping Float32Mapping = new("float64");
     private static readonly DoubleTypeMapping Float64Mapping = new("float64");
-    private static readonly GuidTypeMapping IdMapping = new("id", DbType.String);
+    // DbType.Guid → CamusParameter.FromDbType → ColumnType.Id (OID), while StringTypeMapping keeps
+    // ClrType=string so the EF Core key-factory gets ValueComparer<string>, not DefaultValueComparer<Guid>.
+    private static readonly StringTypeMapping IdStringMapping = new("id", DbType.Guid);
+    private static readonly GuidTypeMapping IdGuidMapping = new("id", DbType.Guid);
 
     private static readonly Dictionary<Type, RelationalTypeMapping> ClrTypeMappings = new()
     {
@@ -23,7 +26,7 @@ public sealed class CamusTypeMappingSource : RelationalTypeMappingSource
         { typeof(long), Int64Mapping },
         { typeof(float), Float32Mapping },
         { typeof(double), Float64Mapping },
-        { typeof(Guid), IdMapping },
+        { typeof(Guid), IdGuidMapping },
     };
 
     private static readonly Dictionary<string, RelationalTypeMapping> StoreTypeMappings
@@ -33,7 +36,8 @@ public sealed class CamusTypeMappingSource : RelationalTypeMappingSource
         { "bool", BoolMapping },
         { "int64", Int64Mapping },
         { "float64", Float64Mapping },
-        { "id", IdMapping },
+        { "id",  IdStringMapping },
+        { "oid", IdStringMapping },
     };
 
     public CamusTypeMappingSource(
@@ -46,10 +50,21 @@ public sealed class CamusTypeMappingSource : RelationalTypeMappingSource
     protected override RelationalTypeMapping? FindMapping(in RelationalTypeMappingInfo mappingInfo)
     {
         var storeTypeName = mappingInfo.StoreTypeName;
+        var clrType = mappingInfo.ClrType;
+
+        // "id"/"oid" store type: pick string or Guid mapping based on the CLR property type.
+        // Without this check, a string-typed primary key with HasColumnType("id") would receive
+        // a GuidTypeMapping and its DefaultValueComparer<Guid> would crash the key factory.
+        if (storeTypeName is not null &&
+            (storeTypeName.Equals("id", StringComparison.OrdinalIgnoreCase) ||
+             storeTypeName.Equals("oid", StringComparison.OrdinalIgnoreCase)))
+        {
+            return clrType == typeof(Guid) ? IdGuidMapping : IdStringMapping;
+        }
+
         if (storeTypeName is not null && StoreTypeMappings.TryGetValue(storeTypeName, out var storeMapping))
             return storeMapping;
 
-        var clrType = mappingInfo.ClrType;
         if (clrType is not null && ClrTypeMappings.TryGetValue(clrType, out var clrMapping))
             return clrMapping;
 

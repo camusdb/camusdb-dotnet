@@ -130,6 +130,36 @@ public class CamusMigrationsSqlGenerator : MigrationsSqlGenerator
     }
 
     protected override void Generate(
+        InsertDataOperation operation,
+        IModel? model,
+        MigrationCommandListBuilder builder,
+        bool terminate = true)
+    {
+        var helper = Dependencies.SqlGenerationHelper;
+        var tableName = helper.DelimitIdentifier(operation.Table, operation.Schema);
+        var columnList = string.Join(", ", operation.Columns.Select(c => helper.DelimitIdentifier(c)));
+        var rows = operation.Values.GetLength(0);
+        var cols = operation.Values.GetLength(1);
+
+        for (int row = 0; row < rows; row++)
+        {
+            var literals = new string[cols];
+            for (int col = 0; col < cols; col++)
+                literals[col] = FormatLiteral(operation.Values[row, col]);
+
+            builder
+                .Append("INSERT INTO ").Append(tableName)
+                .Append(" (").Append(columnList).Append(")")
+                .Append(" VALUES (")
+                .Append(string.Join(", ", literals))
+                .Append(")");
+
+            if (terminate)
+                builder.EndCommand();
+        }
+    }
+
+    protected override void Generate(
         SqlOperation operation,
         IModel? model,
         MigrationCommandListBuilder builder)
@@ -224,5 +254,19 @@ public class CamusMigrationsSqlGenerator : MigrationsSqlGenerator
         float f  => f.ToString(CultureInfo.InvariantCulture),
         double d => d.ToString(CultureInfo.InvariantCulture),
         _        => value.ToString() ?? "null"
+    };
+
+    private static string FormatLiteral(object? value) => value switch
+    {
+        null or DBNull => "NULL",
+        bool b         => b ? "true" : "false",
+        short s        => s.ToString(CultureInfo.InvariantCulture),
+        int i          => i.ToString(CultureInfo.InvariantCulture),
+        long l         => l.ToString(CultureInfo.InvariantCulture),
+        float f        => f.ToString(CultureInfo.InvariantCulture),
+        double d       => d.ToString(CultureInfo.InvariantCulture),
+        Guid g         => $"'{g}'",
+        string s       => $"'{s.Replace("'", "''")}'",
+        _              => $"'{value.ToString()?.Replace("'", "''") ?? ""}'"
     };
 }

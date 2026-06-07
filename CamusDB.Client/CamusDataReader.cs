@@ -40,7 +40,7 @@ public class CamusDataReader : DbDataReader
     public CamusDataReader(List<Dictionary<string, ColumnValue>> rows)
     {
         this.rows = rows;
-        columnNames = rows.Count > 0 ? rows[0].Keys.ToArray() : Array.Empty<string>();
+        columnNames = rows.Count > 0 ? [.. rows[0].Keys] : [];
     }
 
     public CamusDataReader(int recordsAffected)

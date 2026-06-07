@@ -196,6 +196,24 @@ public class AppDbContext : DbContext
 }
 ```
 
+#### Sharing an existing connection
+
+Pass an open `CamusConnection` when you want to share a connection or attach to an externally managed transaction:
+
+```csharp
+CamusConnection connection = await GetOpenConnectionAsync();
+
+var options = new DbContextOptionsBuilder<AppDbContext>()
+    .UseCamusDB(connection)
+    .Options;
+
+await using var ctx = new AppDbContext(options);
+await ctx.Database.BeginTransactionAsync();
+// ... SaveChangesAsync, then CommitTransactionAsync
+```
+
+The `DbContext` does **not** take ownership of the supplied connection and will not close or dispose it.
+
 ### Defining a Model
 
 Use standard EF Core data annotations or the fluent API. Map ID columns to the `"id"` store type and call `ValueGeneratedOnAdd()` so the provider generates a client-side ObjectId automatically:
@@ -238,11 +256,14 @@ public class AppDbContext : DbContext
 
 | CLR type | CamusDB store type | DDL type |
 | --- | --- | --- |
-| `string` (ID / PK) | `id` | `OID` |
+| `string` (ID / PK) | `id` or `oid` | `OID` |
+| `Guid` (ID / PK) | `id` or `oid` | `OID` |
 | `string` | `string` | `STRING` |
 | `bool` | `bool` | `BOOL` |
 | `short`, `int`, `long` | `int64` | `INT64` |
 | `float`, `double` | `float64` | `FLOAT64` |
+
+Use `HasColumnType("id")` (or the alias `"oid"`) for primary key columns backed by CamusDB ObjectIds. The provider sends the value as an OID on the wire regardless of whether the CLR property is `string` or `Guid`.
 
 ### Creating Tables
 
@@ -323,7 +344,7 @@ The provider supports EF Core migrations for the following DDL operations:
 | Drop index | `ALTER TABLE t DROP INDEX name` |
 | Raw SQL | passed through as-is |
 
-Add and apply a migration:
+The provider ships design-time services so the EF tooling can discover the provider automatically. No extra flags are needed:
 
 ```shell
 dotnet ef migrations add InitialCreate
@@ -380,6 +401,8 @@ await ctx.SaveChangesAsync();
 
 `[Timestamp]` (byte array row version) is not supported.
 
+> **Note on MVCC concurrency:** CamusDB uses multi-version concurrency control (MVCC). Write-write conflicts between transactions are detected at **commit time**, not during the write phase. This means `SaveChangesAsync` will succeed even when two open transactions have both updated the same row — the conflict surfaces when the second transaction calls `CommitTransactionAsync`. Application-level optimistic concurrency via `[ConcurrencyCheck]` (above) is the recommended pattern for detecting stale updates.
+
 ### Provider Limitations
 
 - No computed columns.
@@ -387,6 +410,8 @@ await ctx.SaveChangesAsync();
 - No `ALTER COLUMN` — changing a column type requires dropping and recreating the column.
 - No `RENAME COLUMN`, `RENAME TABLE`, or `RENAME INDEX`.
 - Key CLR types must be one of: `string`, `int`, `long`, `short`, or `Guid`.
+- `[ConcurrencyCheck]` is only supported on `short`, `int`, and `long` columns; `[Timestamp]` is not supported.
+- MVCC conflict detection occurs at commit time, not during `SaveChangesAsync`. Use application-level version columns with `[ConcurrencyCheck]` for optimistic concurrency.
 
 ---
 

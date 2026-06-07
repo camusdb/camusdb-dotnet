@@ -578,6 +578,133 @@ public class TestEntityFrameworkProvider
         Assert.IsType<DbUpdateConcurrencyException>(concurrencyEx);
     }
 
+    // ── Milestone N: InsertData migration seeding ────────────────────────────
+
+    [Fact]
+    public void TestMigrationsSqlGeneratorInsertDataProducesLiteralValues()
+    {
+        // InsertData must emit VALUES with the actual literal values, not NULLs.
+        // Regression: provider was generating VALUES (NULL, NULL, ...) because
+        // parameter values from the InsertDataOperation were not being inlined
+        // into the SQL — instead bare parameter placeholders were emitted and
+        // never substituted.
+        var options = new DbContextOptionsBuilder<SimpleProductContext>()
+            .UseCamusDB("Endpoint=http://localhost:5095;Database=test")
+            .Options;
+
+        using SimpleProductContext ctx = new(options);
+        IMigrationsSqlGenerator generator = ctx.GetService<IMigrationsSqlGenerator>();
+
+        InsertDataOperation operation = new()
+        {
+            Table = "products",
+            Columns = ["Id", "Name", "Price"],
+            ColumnTypes = ["string", "string", "float64"],
+            Values = new object?[,] { { "prod-1", "Widget", 9.99 } }
+        };
+
+        IReadOnlyList<MigrationCommand> commands = generator.Generate([operation], null);
+
+        Assert.Single(commands);
+        string sql = commands[0].CommandText;
+
+        // Values must be inlined as literals, not left as NULL or @p0 placeholders
+        Assert.DoesNotContain("NULL", sql);
+        Assert.Contains("prod-1", sql);
+        Assert.Contains("Widget", sql);
+        Assert.Contains("9.99", sql);
+    }
+
+    [Fact]
+    public void TestMigrationsSqlGeneratorInsertDataMultipleRows()
+    {
+        // Each row in the Values matrix must produce a separate INSERT statement
+        // with the correct literal values for that row.
+        var options = new DbContextOptionsBuilder<SimpleProductContext>()
+            .UseCamusDB("Endpoint=http://localhost:5095;Database=test")
+            .Options;
+
+        using SimpleProductContext ctx = new(options);
+        IMigrationsSqlGenerator generator = ctx.GetService<IMigrationsSqlGenerator>();
+
+        InsertDataOperation operation = new()
+        {
+            Table = "products",
+            Columns = ["Id", "Name", "Price"],
+            ColumnTypes = ["string", "string", "float64"],
+            Values = new object?[,]
+            {
+                { "prod-1", "Widget", 9.99 },
+                { "prod-2", "Gadget", 19.99 },
+            }
+        };
+
+        IReadOnlyList<MigrationCommand> commands = generator.Generate([operation], null);
+
+        // Two rows → two INSERT commands (or one multi-row INSERT — either is acceptable,
+        // but each row's values must appear in the output)
+        string allSql = string.Join("\n", commands.Select(c => c.CommandText));
+
+        Assert.DoesNotContain("NULL", allSql);
+        Assert.Contains("prod-1", allSql);
+        Assert.Contains("Widget", allSql);
+        Assert.Contains("prod-2", allSql);
+        Assert.Contains("Gadget", allSql);
+    }
+
+    [Fact]
+    public void TestMigrationsSqlGeneratorInsertDataBoolAndIntLiterals()
+    {
+        // Bool and int values must be inlined correctly, not coerced to NULL.
+        var options = new DbContextOptionsBuilder<SimpleProductContext>()
+            .UseCamusDB("Endpoint=http://localhost:5095;Database=test")
+            .Options;
+
+        using SimpleProductContext ctx = new(options);
+        IMigrationsSqlGenerator generator = ctx.GetService<IMigrationsSqlGenerator>();
+
+        InsertDataOperation operation = new()
+        {
+            Table = "characters",
+            Columns = ["id", "name", "rarity", "hp", "canBeInitial"],
+            ColumnTypes = ["string", "string", "int64", "int64", "bool"],
+            Values = new object?[,] { { "1", "Striker-X", 0, 920, true } }
+        };
+
+        IReadOnlyList<MigrationCommand> commands = generator.Generate([operation], null);
+
+        Assert.Single(commands);
+        string sql = commands[0].CommandText;
+
+        Assert.DoesNotContain("NULL", sql);
+        Assert.Contains("Striker-X", sql);
+        Assert.Contains("920", sql);
+        // Bool literal must appear as true/false or 1/0 — not NULL
+        Assert.True(sql.Contains("true") || sql.Contains("1"), $"Expected bool literal in: {sql}");
+    }
+
+    [Fact]
+    public void TestGuidOidMappingDbTypeIsGuid()
+    {
+        // IdGuidMapping must use DbType.Guid so that CamusParameter.FromDbType(DbType.Guid)
+        // maps to ColumnType.Id. With DbType.String it would map to ColumnType.String and the
+        // server would reject OID columns with "Type String cannot be assigned to id (Id)".
+        ServiceCollection services = new();
+        services.AddEntityFrameworkCamusDB();
+        ServiceProvider provider = services.BuildServiceProvider();
+        IRelationalTypeMappingSource source = provider.GetRequiredService<IRelationalTypeMappingSource>();
+
+        // Guid CLR type maps to "id" store type
+        var mapping = source.FindMapping(typeof(Guid))!;
+        Assert.Equal("id", mapping.StoreType);
+        Assert.Equal(System.Data.DbType.Guid, mapping.DbType);
+
+        // DbType.Guid on a parameter must resolve to ColumnType.Id
+        var parameter = new CamusParameter("@id", ColumnType.Null, null);
+        parameter.DbType = System.Data.DbType.Guid;
+        Assert.Equal(ColumnType.Id, parameter.ColumnType);
+    }
+
     // ── Helper DbContexts for validation tests ────────────────────────────────
 
     private class ConcurrencyTokenContext(DbContextOptions options) : DbContext(options)
