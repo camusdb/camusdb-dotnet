@@ -470,6 +470,12 @@ public class CamusCommand : DbCommand, ICloneable
                 Sql = GetRequestTarget()
             };
 
+            if (transaction is not null)
+            {
+                request.TxnIdPT = transaction.TxnIdPT;
+                request.TxnIdCounter = transaction.TxnIdCounter;
+            }
+
             string jsonRequest = JsonSerializer.Serialize(request, CamusJsonSerializerContext.Default.CamusExecuteDDLRequest);
 
             string responseJson = await endpoint

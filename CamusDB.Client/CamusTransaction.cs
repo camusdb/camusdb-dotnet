@@ -81,10 +81,10 @@ public class CamusTransaction : DbTransaction
                                                         .PostAsync(CamusJsonContent.Create(jsonRequest), cancellationToken: cancellationToken)
                                                         .ReceiveString();
 
-            CamusStartTransactionResponse? response = JsonSerializer.Deserialize(responseJson, CamusJsonSerializerContext.Default.CamusStartTransactionResponse);
+            CamusExecuteDDLResponse? response = JsonSerializer.Deserialize(responseJson, CamusJsonSerializerContext.Default.CamusExecuteDDLResponse);
 
             if (response?.Status != "ok")
-                throw new CamusException("CADB0000", "Empty result returned");            
+                throw new CamusException("CADB0000", "Commit failed");
         }
         catch (FlurlHttpException ex)
         {
@@ -116,7 +116,7 @@ public class CamusTransaction : DbTransaction
     /// <summary>
     /// Rollbacks the database transaction asynchronously, returning the commit timestamp.
     /// </summary>
-    /// <param name="cancellationToken">A cancellation token used for this task.</param>    
+    /// <param name="cancellationToken">A cancellation token used for this task.</param>
     public new async Task RollbackAsync(CancellationToken cancellationToken = default)
     {
         string database = builder.Config["Database"];
@@ -139,10 +139,10 @@ public class CamusTransaction : DbTransaction
                                                         .PostAsync(CamusJsonContent.Create(jsonRequest), cancellationToken: cancellationToken)
                                                         .ReceiveString();
 
-            CamusStartTransactionResponse? response = JsonSerializer.Deserialize(responseJson, CamusJsonSerializerContext.Default.CamusStartTransactionResponse);
+            CamusExecuteDDLResponse? response = JsonSerializer.Deserialize(responseJson, CamusJsonSerializerContext.Default.CamusExecuteDDLResponse);
 
             if (response?.Status != "ok")
-                throw new CamusException("CADB0000", "Empty result returned");
+                throw new CamusException("CADB0000", "Rollback failed");
         }
         catch (FlurlHttpException ex)
         {

@@ -9,7 +9,24 @@ public sealed class CamusDBOptionsExtension : RelationalOptionsExtension
 
     public CamusDBOptionsExtension() { }
 
-    private CamusDBOptionsExtension(CamusDBOptionsExtension copyFrom) : base(copyFrom) { }
+    private CamusDBOptionsExtension(CamusDBOptionsExtension copyFrom) : base(copyFrom)
+    {
+        RetryOnFailureEnabled = copyFrom.RetryOnFailureEnabled;
+        RetryOnFailureCount = copyFrom.RetryOnFailureCount;
+        RetryMaxDelay = copyFrom.RetryMaxDelay;
+        RetryDeadline = copyFrom.RetryDeadline;
+        RetryMedianFirstDelay = copyFrom.RetryMedianFirstDelay;
+    }
+
+    public bool RetryOnFailureEnabled { get; private set; }
+
+    public int RetryOnFailureCount { get; private set; } = 15;
+
+    public TimeSpan RetryMaxDelay { get; private set; } = TimeSpan.FromSeconds(1);
+
+    public TimeSpan RetryDeadline { get; private set; } = TimeSpan.FromSeconds(5);
+
+    public TimeSpan RetryMedianFirstDelay { get; private set; } = TimeSpan.FromMilliseconds(30);
 
     protected override RelationalOptionsExtension Clone() => new CamusDBOptionsExtension(this);
 
@@ -17,6 +34,33 @@ public sealed class CamusDBOptionsExtension : RelationalOptionsExtension
 
     public override void ApplyServices(IServiceCollection services)
         => CamusDBServiceCollectionExtensions.AddEntityFrameworkCamusDB(services);
+
+    public CamusDBOptionsExtension WithRetryOnFailure(
+        int maxRetryCount,
+        TimeSpan maxRetryDelay,
+        TimeSpan retryDeadline,
+        TimeSpan medianFirstRetryDelay)
+    {
+        if (maxRetryCount < 1)
+            throw new ArgumentOutOfRangeException(nameof(maxRetryCount), "Retry count must be at least 1.");
+
+        if (maxRetryDelay <= TimeSpan.Zero)
+            throw new ArgumentOutOfRangeException(nameof(maxRetryDelay), "Max retry delay must be greater than zero.");
+
+        if (retryDeadline <= TimeSpan.Zero)
+            throw new ArgumentOutOfRangeException(nameof(retryDeadline), "Retry deadline must be greater than zero.");
+
+        if (medianFirstRetryDelay <= TimeSpan.Zero)
+            throw new ArgumentOutOfRangeException(nameof(medianFirstRetryDelay), "Median first retry delay must be greater than zero.");
+
+        var clone = (CamusDBOptionsExtension)Clone();
+        clone.RetryOnFailureEnabled = true;
+        clone.RetryOnFailureCount = maxRetryCount;
+        clone.RetryMaxDelay = maxRetryDelay;
+        clone.RetryDeadline = retryDeadline;
+        clone.RetryMedianFirstDelay = medianFirstRetryDelay;
+        return clone;
+    }
 
     private sealed class ExtensionInfo(IDbContextOptionsExtension extension)
         : RelationalOptionsExtension.RelationalExtensionInfo(extension)
@@ -36,6 +80,12 @@ public sealed class CamusDBOptionsExtension : RelationalOptionsExtension
                 debugInfo["CamusDB:Connection"] = Extension.Connection.GetType().Name;
             else
                 debugInfo["CamusDB:ConnectionString"] = Extension.ConnectionString ?? "";
+
+            debugInfo["CamusDB:RetryOnFailureEnabled"] = Extension.RetryOnFailureEnabled.ToString();
+            debugInfo["CamusDB:RetryOnFailureCount"] = Extension.RetryOnFailureCount.ToString();
+            debugInfo["CamusDB:RetryMaxDelayMs"] = Extension.RetryMaxDelay.TotalMilliseconds.ToString("F0");
+            debugInfo["CamusDB:RetryDeadlineMs"] = Extension.RetryDeadline.TotalMilliseconds.ToString("F0");
+            debugInfo["CamusDB:RetryMedianFirstDelayMs"] = Extension.RetryMedianFirstDelay.TotalMilliseconds.ToString("F0");
         }
 
         public override bool ShouldUseSameServiceProvider(DbContextOptionsExtensionInfo other)

@@ -535,6 +535,86 @@ public class TestEntityFrameworkProvider
     }
 
     [Fact]
+    public void TestEnableRetryOnFailureStoresRetrySettings()
+    {
+        var options = new DbContextOptionsBuilder<SimpleProductContext>()
+            .UseCamusDB(
+                "Endpoint=http://localhost:5095;Database=test",
+                camus => camus.EnableRetryOnFailure(
+                    maxRetryCount: 7,
+                    maxRetryDelay: TimeSpan.FromMilliseconds(250),
+                    retryDeadline: TimeSpan.FromSeconds(2),
+                    medianFirstRetryDelay: TimeSpan.FromMilliseconds(15)))
+            .Options;
+
+        CamusDBOptionsExtension? extension = options.FindExtension<CamusDBOptionsExtension>();
+
+        Assert.NotNull(extension);
+        Assert.True(extension!.RetryOnFailureEnabled);
+        Assert.Equal(7, extension.RetryOnFailureCount);
+        Assert.Equal(TimeSpan.FromMilliseconds(250), extension.RetryMaxDelay);
+        Assert.Equal(TimeSpan.FromSeconds(2), extension.RetryDeadline);
+        Assert.Equal(TimeSpan.FromMilliseconds(15), extension.RetryMedianFirstDelay);
+    }
+
+    [Fact]
+    public void TestExecutionStrategyRetriesRetryableConflictsWhenEnabled()
+    {
+        var options = new DbContextOptionsBuilder<SimpleProductContext>()
+            .UseCamusDB(
+                "Endpoint=http://localhost:5095;Database=test",
+                camus => camus.EnableRetryOnFailure(
+                    maxRetryCount: 2,
+                    maxRetryDelay: TimeSpan.FromMilliseconds(5),
+                    retryDeadline: TimeSpan.FromMilliseconds(100),
+                    medianFirstRetryDelay: TimeSpan.FromMilliseconds(1)))
+            .Options;
+
+        using var ctx = new SimpleProductContext(options);
+        var strategy = ctx.GetService<IExecutionStrategyFactory>().Create();
+        var attempts = 0;
+
+        strategy.Execute(() =>
+        {
+            attempts++;
+
+            if (attempts < 3)
+                throw new DbUpdateConcurrencyException(
+                    "Update failed",
+                    new CamusException("CADB0502", "Range is exclusively locked by another transaction"));
+        });
+
+        Assert.True(strategy.RetriesOnFailure);
+        Assert.Equal(3, attempts);
+    }
+
+    [Fact]
+    public void TestExecutionStrategyDoesNotRetryNonRetryableErrorsWhenEnabled()
+    {
+        var options = new DbContextOptionsBuilder<SimpleProductContext>()
+            .UseCamusDB(
+                "Endpoint=http://localhost:5095;Database=test",
+                camus => camus.EnableRetryOnFailure(
+                    maxRetryCount: 3,
+                    maxRetryDelay: TimeSpan.FromMilliseconds(5),
+                    retryDeadline: TimeSpan.FromMilliseconds(100),
+                    medianFirstRetryDelay: TimeSpan.FromMilliseconds(1)))
+            .Options;
+
+        using var ctx = new SimpleProductContext(options);
+        var strategy = ctx.GetService<IExecutionStrategyFactory>().Create();
+        var attempts = 0;
+
+        Assert.Throws<CamusException>(() => strategy.Execute(() =>
+        {
+            attempts++;
+            throw new CamusException("CADB9999", "Permanent failure");
+        }));
+
+        Assert.Equal(1, attempts);
+    }
+
+    [Fact]
     public void TestModificationCommandBatchFactoryCreatesCamusBatch()
     {
         var options = new DbContextOptionsBuilder<SimpleProductContext>()
