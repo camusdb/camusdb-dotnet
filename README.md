@@ -157,6 +157,78 @@ await transaction.CommitAsync();
 
 Use `await transaction.RollbackAsync()` to roll back instead.
 
+#### Serializable Isolation & Retries
+
+Serializable is the default isolation level in CamusDB. When two serializable transactions conflict, one is aborted immediately and must be **replayed from `BEGIN`** — retrying a single statement is not safe.
+
+Three error codes indicate a transient conflict that a full retry can resolve:
+
+| Code | Name | When raised |
+| --- | --- | --- |
+| `CADB0502` | `TransactionConflict` | Lock conflict; server aborted at lock-acquire time |
+| `CADB0504` | `TransactionMustRetry` | Routing retry budget exhausted; no data written |
+| `CADB0505` | `TransactionLifetimeExceeded` | Transaction held open past the server lifetime limit |
+
+Use `SerializableRetryHelper.IsRetryable(ex)` to test any exception, and `SerializableRetryHelper.ExecuteAutocommitAsync` for bounded automatic retry of single-statement (autocommit) operations:
+
+```csharp
+await SerializableRetryHelper.ExecuteAutocommitAsync(async ct =>
+{
+    CamusTransaction tx = await connection.BeginTransactionAsync(ct);
+    try
+    {
+        await using CamusCommand cmd = connection.CreateCamusCommand(
+            "UPDATE robots SET price = @price WHERE name = @name");
+        cmd.Transaction = tx;
+        cmd.Parameters.Add("@price", ColumnType.Float64, 99.0);
+        cmd.Parameters.Add("@name",  ColumnType.String,  "T-800");
+        await cmd.ExecuteNonQueryAsync(ct);
+        await tx.CommitAsync(ct);
+    }
+    catch
+    {
+        await tx.RollbackAsync(ct);
+        throw;
+    }
+}, maxAttempts: 5, cancellationToken);
+```
+
+Back-off schedule: `min(20 ms × 2^attempt, 400 ms)` ± 25 % jitter. Any non-retryable exception propagates immediately.
+
+For explicit multi-statement transactions, own the retry loop yourself so you can replay every read and write from scratch:
+
+```csharp
+const int MaxAttempts = 5;
+int attempt = 0;
+
+while (true)
+{
+    CamusTransaction tx = await connection.BeginTransactionAsync();
+    try
+    {
+        // re-execute ALL reads and writes on every attempt
+        long balance = await ReadBalance(tx, accountId);
+        if (balance < amount)
+            throw new InvalidOperationException("Insufficient funds");
+        await Debit(tx, accountId, balance - amount);
+        await tx.CommitAsync();
+        break;
+    }
+    catch (CamusException ex) when (SerializableRetryHelper.IsRetryable(ex))
+    {
+        await tx.RollbackAsync();
+        if (++attempt >= MaxAttempts)
+            throw;
+        await Task.Delay(20 * (1 << attempt));
+    }
+    catch
+    {
+        await tx.RollbackAsync();
+        throw;
+    }
+}
+```
+
 ---
 
 ## CamusDB.EntityFrameworkCore (EF Core)
@@ -195,6 +267,40 @@ public class AppDbContext : DbContext
         => optionsBuilder.UseCamusDB("Endpoint=http://localhost:8082;Database=mydb");
 }
 ```
+
+#### Retry on failure
+
+Call `EnableRetryOnFailure` on the `CamusDBDbContextOptionsBuilder` to let EF Core automatically retry `SaveChangesAsync` (and query execution) when a transient serialization conflict is detected. Only the three retryable CamusDB error codes (`CADB0502`, `CADB0504`, `CADB0505`) trigger a retry — all other exceptions propagate immediately.
+
+```csharp
+var options = new DbContextOptionsBuilder<AppDbContext>()
+    .UseCamusDB("Endpoint=http://localhost:8082;Database=mydb", o =>
+    {
+        o.EnableRetryOnFailure();
+    })
+    .Options;
+```
+
+Default parameters:
+
+| Parameter | Default | Description |
+| --- | --- | --- |
+| `maxRetryCount` | `15` | Maximum number of retry attempts |
+| `maxRetryDelay` | `1 s` | Upper bound on the delay between retries |
+| `retryDeadline` | `5 s` | Wall-clock deadline from first failure; no further retries after this |
+| `medianFirstRetryDelay` | `30 ms` | Median delay before the first retry |
+
+Override any parameter explicitly:
+
+```csharp
+o.EnableRetryOnFailure(
+    maxRetryCount: 5,
+    maxRetryDelay: TimeSpan.FromMilliseconds(500),
+    retryDeadline: TimeSpan.FromSeconds(3),
+    medianFirstRetryDelay: TimeSpan.FromMilliseconds(20));
+```
+
+> EF Core's execution strategy retries the **entire unit of work** — never only the failing statement. If you manage transactions manually with `BeginTransactionAsync` / `CommitTransactionAsync`, use `SerializableRetryHelper` in `CamusDB.Client` instead.
 
 #### Sharing an existing connection
 
