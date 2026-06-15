@@ -86,6 +86,7 @@ public class CamusDatabaseCreator : RelationalDatabaseCreator
 
         var pk = entityType.FindPrimaryKey();
         var pkProps = pk?.Properties.ToHashSet() ?? [];
+        var pkColumns = pk?.Properties.Select(p => p.GetColumnName()).ToList() ?? [];
 
         bool first = true;
         foreach (var prop in entityType.GetProperties())
@@ -98,10 +99,19 @@ public class CamusDatabaseCreator : RelationalDatabaseCreator
 
             sb.Append(columnName).Append(' ').Append(ddlType);
 
-            if (pkProps.Contains(prop))
-                sb.Append(" PRIMARY KEY NOT NULL");
-            else if (!prop.IsNullable)
+            if (pkProps.Contains(prop) || !prop.IsNullable)
                 sb.Append(" NOT NULL");
+        }
+
+        // Emit a single table-level PRIMARY KEY constraint so that composite keys
+        // (e.g. HasKey(e => new { e.UsersId, e.Id })) are declared correctly.
+        // Column-level "PRIMARY KEY NOT NULL" on each individual column would create
+        // separate single-column PK constraints and only the last one would survive.
+        if (pkColumns.Count > 0)
+        {
+            sb.Append(", PRIMARY KEY (");
+            sb.Append(string.Join(", ", pkColumns));
+            sb.Append(')');
         }
 
         sb.Append(')');

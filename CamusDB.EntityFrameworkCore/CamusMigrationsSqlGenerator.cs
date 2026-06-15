@@ -21,19 +21,27 @@ public class CamusMigrationsSqlGenerator : MigrationsSqlGenerator
 
         builder.Append("CREATE TABLE IF NOT EXISTS ").Append(helper.DelimitIdentifier(operation.Name)).AppendLine(" (");
 
+        bool firstItem = true;
+
         foreach (var col in operation.Columns)
         {
+            if (!firstItem)
+                builder.AppendLine(",");
+            firstItem = false;
+
             builder.Append(helper.DelimitIdentifier(col.Name)).Append(" ").Append(GetDdlType(col));
 
             if (!col.IsNullable)
                 builder.Append(" NOT NULL");
-
-            builder.AppendLine(",");
         }
 
-        builder.Append("PRIMARY KEY (")
-               .Append(string.Join(", ", pkCols.Select(c => helper.DelimitIdentifier(c))))
-               .Append(")");
+        if (pkCols.Length > 0)
+        {
+            builder.AppendLine(",")
+                   .Append("PRIMARY KEY (")
+                   .Append(string.Join(", ", pkCols.Select(c => helper.DelimitIdentifier(c))))
+                   .Append(")");
+        }
 
         builder.AppendLine().Append(")");
 
