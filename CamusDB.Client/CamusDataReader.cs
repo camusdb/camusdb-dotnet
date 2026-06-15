@@ -259,7 +259,7 @@ public class CamusDataReader : DbDataReader
         return rows[position];
     }
 
-    private ColumnValue GetColumnValue(int ordinal)
+    public ColumnValue GetColumnValue(int ordinal)
     {
         if (ordinal < 0 || ordinal >= FieldCount)
             throw new IndexOutOfRangeException();
