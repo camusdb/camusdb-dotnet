@@ -36,6 +36,8 @@ public static class CamusDBServiceCollectionExtensions
         builder.TryAdd<IExecutionStrategyFactory, CamusExecutionStrategyFactory>();
         builder.TryAddCoreServices();
 
+        serviceCollection.AddSingleton<IInterceptor, CamusDbCommandInterceptor>();
+
         return serviceCollection;
     }
 }

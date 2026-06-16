@@ -7,6 +7,7 @@ CamusDB.Client.Tests/obj
 CamusDB.Client.Tests/.vs
 CamusDB.EntityFrameworkCore/bin
 CamusDB.EntityFrameworkCore/obj
+CamusDB.EntityFrameworkCore/.idea/
 nupkg/
 nupkgs/
 artifacts
