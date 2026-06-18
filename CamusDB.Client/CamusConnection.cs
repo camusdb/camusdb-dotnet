@@ -123,7 +123,7 @@ public sealed class CamusConnection : DbConnection
 
             string responseJson = await endpoint
                                                         .WithHeader("Accept", "application/json")
-                                                        .WithTimeout(10)
+                                                        .WithTimeout(builder.CommandTimeout)
                                                         .AppendPathSegments("start-transaction")
                                                         .PostAsync(CamusJsonContent.Create(jsonRequest), cancellationToken: cancellationToken)
                                                         .ReceiveString();
@@ -185,5 +185,124 @@ public sealed class CamusConnection : DbConnection
     public CamusPingCommand CreatePingCommand()
     {
         return new CamusPingCommand("", builder, this);
+    }
+
+    public Task CreateDatabaseAsync(bool ifNotExists = false, CancellationToken cancellationToken = default)
+        => CreateDatabaseImplAsync(Database, ifNotExists, cancellationToken);
+
+    public Task CreateDatabaseAsync(string databaseName, bool ifNotExists = false, CancellationToken cancellationToken = default)
+        => CreateDatabaseImplAsync(databaseName, ifNotExists, cancellationToken);
+
+    private async Task CreateDatabaseImplAsync(string databaseName, bool ifNotExists, CancellationToken cancellationToken)
+    {
+        string endpoint = "";
+
+        try
+        {
+            endpoint = builder.GetEndpoint();
+
+            CamusCreateDatabaseRequest request = new()
+            {
+                DatabaseName = databaseName,
+                IfNotExists = ifNotExists
+            };
+
+            string jsonRequest = JsonSerializer.Serialize(request, CamusJsonSerializerContext.Default.CamusCreateDatabaseRequest);
+
+            string responseJson = await endpoint
+                                            .WithHeader("Accept", "application/json")
+                                            .WithTimeout(builder.CommandTimeout)
+                                            .AppendPathSegments("create-db")
+                                            .PostAsync(CamusJsonContent.Create(jsonRequest), cancellationToken: cancellationToken)
+                                            .ReceiveString();
+
+            CamusCreateDatabaseResponse? response = JsonSerializer.Deserialize(responseJson, CamusJsonSerializerContext.Default.CamusCreateDatabaseResponse);
+
+            if (response?.Status != "ok")
+                throw new CamusException(response?.Code ?? "CADB0000", response?.Message ?? "Create database failed");
+        }
+        catch (FlurlHttpException ex)
+        {
+            CamusEndpointHealth.MarkUnreachableIfTransportFailed(builder, endpoint, ex);
+
+            string response = await ex.GetResponseStringAsync();
+
+            if (!string.IsNullOrEmpty(response))
+            {
+                try
+                {
+                    CamusErrorResponse? errorResponse = JsonSerializer.Deserialize(response, CamusJsonSerializerContext.Default.CamusErrorResponse);
+
+                    if (errorResponse is not null)
+                        throw new CamusException(errorResponse.Code ?? "CADB0000", errorResponse.Message ?? "");
+                }
+                catch (JsonException)
+                {
+                }
+
+                throw new CamusException("CADB0000", response);
+            }
+
+            throw new CamusException("CADB0000", ex.Message);
+        }
+    }
+
+    public Task DropDatabaseAsync(CancellationToken cancellationToken = default)
+        => DropDatabaseImplAsync(Database, cancellationToken);
+
+    public Task DropDatabaseAsync(string databaseName, CancellationToken cancellationToken = default)
+        => DropDatabaseImplAsync(databaseName, cancellationToken);
+
+    private async Task DropDatabaseImplAsync(string databaseName, CancellationToken cancellationToken)
+    {
+        string endpoint = "";
+
+        try
+        {
+            endpoint = builder.GetEndpoint();
+
+            CamusDropDatabaseRequest request = new()
+            {
+                DatabaseName = databaseName
+            };
+
+            string jsonRequest = JsonSerializer.Serialize(request, CamusJsonSerializerContext.Default.CamusDropDatabaseRequest);
+
+            string responseJson = await endpoint
+                                            .WithHeader("Accept", "application/json")
+                                            .WithTimeout(builder.CommandTimeout)
+                                            .AppendPathSegments("drop-db")
+                                            .PostAsync(CamusJsonContent.Create(jsonRequest), cancellationToken: cancellationToken)
+                                            .ReceiveString();
+
+            CamusDropDatabaseResponse? response = JsonSerializer.Deserialize(responseJson, CamusJsonSerializerContext.Default.CamusDropDatabaseResponse);
+
+            if (response?.Status != "ok")
+                throw new CamusException(response?.Code ?? "CADB0000", response?.Message ?? "Drop database failed");
+        }
+        catch (FlurlHttpException ex)
+        {
+            CamusEndpointHealth.MarkUnreachableIfTransportFailed(builder, endpoint, ex);
+
+            string response = await ex.GetResponseStringAsync();
+
+            if (!string.IsNullOrEmpty(response))
+            {
+                try
+                {
+                    CamusErrorResponse? errorResponse = JsonSerializer.Deserialize(response, CamusJsonSerializerContext.Default.CamusErrorResponse);
+
+                    if (errorResponse is not null)
+                        throw new CamusException(errorResponse.Code ?? "CADB0000", errorResponse.Message ?? "");
+                }
+                catch (JsonException)
+                {
+                }
+
+                throw new CamusException("CADB0000", response);
+            }
+
+            throw new CamusException("CADB0000", ex.Message);
+        }
     }
 }

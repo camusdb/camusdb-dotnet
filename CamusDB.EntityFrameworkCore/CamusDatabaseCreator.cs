@@ -22,23 +22,31 @@ public class CamusDatabaseCreator : RelationalDatabaseCreator
         _currentContext = currentContext;
     }
 
-    // CamusDB server is assumed to be running — existence checks are not meaningful
-    public override bool Exists() => true;
+    // Return false so EnsureCreated always calls Create(), which uses IF NOT EXISTS and is idempotent.
+    public override bool Exists() => false;
 
     public override Task<bool> ExistsAsync(CancellationToken cancellationToken = default)
-        => Task.FromResult(true);
+        => Task.FromResult(false);
 
-    // CamusDB databases are logical — no explicit creation is needed
-    public override void Create() { }
+    public override void Create()
+        => CreateAsync(CancellationToken.None).GetAwaiter().GetResult();
 
-    public override Task CreateAsync(CancellationToken cancellationToken = default)
-        => Task.CompletedTask;
+    public override async Task CreateAsync(CancellationToken cancellationToken = default)
+    {
+        var camusConn = _connection.DbConnection;
+        await camusConn.OpenAsync(cancellationToken).ConfigureAwait(false);
+        await camusConn.CreateDatabaseAsync(ifNotExists: true, cancellationToken).ConfigureAwait(false);
+    }
 
     public override void Delete()
-        => throw new NotSupportedException("CamusDB does not support dropping databases via the EF provider.");
+        => DeleteAsync(CancellationToken.None).GetAwaiter().GetResult();
 
-    public override Task DeleteAsync(CancellationToken cancellationToken = default)
-        => Task.FromException(new NotSupportedException("CamusDB does not support dropping databases via the EF provider."));
+    public override async Task DeleteAsync(CancellationToken cancellationToken = default)
+    {
+        var camusConn = _connection.DbConnection;
+        await camusConn.OpenAsync(cancellationToken).ConfigureAwait(false);
+        await camusConn.DropDatabaseAsync(cancellationToken).ConfigureAwait(false);
+    }
 
     // Without a metadata query we conservatively report no tables so EnsureCreated always tries to create
     public override bool HasTables() => false;

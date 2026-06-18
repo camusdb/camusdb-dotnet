@@ -4,6 +4,10 @@ namespace CamusDB.Client;
 
 [JsonSourceGenerationOptions]
 [JsonSerializable(typeof(CamusErrorResponse))]
+[JsonSerializable(typeof(CamusCreateDatabaseRequest))]
+[JsonSerializable(typeof(CamusCreateDatabaseResponse))]
+[JsonSerializable(typeof(CamusDropDatabaseRequest))]
+[JsonSerializable(typeof(CamusDropDatabaseResponse))]
 [JsonSerializable(typeof(CamusExecuteDDLRequest))]
 [JsonSerializable(typeof(CamusExecuteDDLResponse))]
 [JsonSerializable(typeof(CamusExecuteSqlNonQueryRequest))]

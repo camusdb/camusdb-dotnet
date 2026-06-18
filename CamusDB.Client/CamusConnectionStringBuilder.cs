@@ -40,6 +40,20 @@ public class CamusConnectionStringBuilder
         }
     }
 
+    /// <summary>
+    /// Command timeout in seconds. Read from the "Timeout" key in the connection string.
+    /// Defaults to 10 seconds.
+    /// </summary>
+    public int CommandTimeout
+    {
+        get
+        {
+            if (Config.TryGetValue("Timeout", out string? raw) && int.TryParse(raw, out int seconds) && seconds > 0)
+                return seconds;
+            return 10;
+        }
+    }
+
     internal string GetEndpoint()
     {
         if (!Config.TryGetValue("Endpoint", out string? endpoint) || string.IsNullOrWhiteSpace(endpoint))

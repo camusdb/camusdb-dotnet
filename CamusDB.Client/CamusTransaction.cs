@@ -76,7 +76,7 @@ public class CamusTransaction : DbTransaction
 
             string responseJson = await this.endpoint
                                                         .WithHeader("Accept", "application/json")
-                                                        .WithTimeout(10)
+                                                        .WithTimeout(builder.CommandTimeout)
                                                         .AppendPathSegments("commit-transaction")
                                                         .PostAsync(CamusJsonContent.Create(jsonRequest), cancellationToken: cancellationToken)
                                                         .ReceiveString();
@@ -134,7 +134,7 @@ public class CamusTransaction : DbTransaction
 
             string responseJson = await this.endpoint
                                                         .WithHeader("Accept", "application/json")
-                                                        .WithTimeout(10)
+                                                        .WithTimeout(builder.CommandTimeout)
                                                         .AppendPathSegments("rollback-transaction")
                                                         .PostAsync(CamusJsonContent.Create(jsonRequest), cancellationToken: cancellationToken)
                                                         .ReceiveString();

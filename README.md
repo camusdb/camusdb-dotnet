@@ -44,6 +44,7 @@ Supported connection string keys:
 | --- | --- | --- |
 | `Endpoint` | Yes | Base URL for the CamusDB HTTP endpoint. |
 | `Database` | Yes | Database name sent with requests. |
+| `Timeout` | No | HTTP request timeout in seconds (default: `10`). |
 
 `Endpoint` also supports a comma-separated pool. The client selects endpoints with round-robin routing:
 
@@ -55,6 +56,28 @@ CamusConnectionStringBuilder builder = new(
 When a request fails because an endpoint is unreachable, that endpoint is marked unavailable and skipped by later requests made through the same `CamusConnectionStringBuilder`.
 
 ### Usage
+
+#### Database Management
+
+CamusDB requires databases to be explicitly created before use. Call `CreateDatabaseAsync` once during application startup or provisioning:
+
+```csharp
+// Create the database (no-op if it already exists)
+await connection.CreateDatabaseAsync(ifNotExists: true);
+```
+
+To drop a database:
+
+```csharp
+await connection.DropDatabaseAsync();
+```
+
+Both methods operate on the database named in the connection string. An explicit name can also be passed:
+
+```csharp
+await connection.CreateDatabaseAsync("otherdb", ifNotExists: true);
+await connection.DropDatabaseAsync("otherdb");
+```
 
 #### Ping
 
@@ -254,7 +277,7 @@ using CamusDB.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore;
 
 var options = new DbContextOptionsBuilder<AppDbContext>()
-    .UseCamusDB("Endpoint=http://localhost:8082;Database=mydb")
+    .UseCamusDB("Endpoint=http://localhost:8082;Database=mydb;Timeout=30")
     .Options;
 ```
 
@@ -267,6 +290,8 @@ public class AppDbContext : DbContext
         => optionsBuilder.UseCamusDB("Endpoint=http://localhost:8082;Database=mydb");
 }
 ```
+
+The same connection string keys are supported as in `CamusDB.Client` — see the [connection string reference](#configuration) above.
 
 #### Retry on failure
 
@@ -371,13 +396,19 @@ public class AppDbContext : DbContext
 
 Use `HasColumnType("id")` (or the alias `"oid"`) for primary key columns backed by CamusDB ObjectIds. The provider sends the value as an OID on the wire regardless of whether the CLR property is `string` or `Guid`.
 
-### Creating Tables
+### Database and Table Lifecycle
 
-`EnsureCreated()` creates all tables defined in the model. It is safe to call on a database that already has the tables:
+`EnsureCreatedAsync()` creates the database and all tables defined in the model. Both operations are idempotent — it is safe to call on a database or tables that already exist:
 
 ```csharp
 await using var ctx = new AppDbContext();
 await ctx.Database.EnsureCreatedAsync();
+```
+
+`EnsureDeletedAsync()` drops the database entirely:
+
+```csharp
+await ctx.Database.EnsureDeletedAsync();
 ```
 
 ### Insert
@@ -441,13 +472,16 @@ The provider supports EF Core migrations for the following DDL operations:
 
 | Operation | Generated SQL |
 | --- | --- |
-| Create table | `CREATE TABLE t (col TYPE [PRIMARY KEY NOT NULL \| NOT NULL], ...)` |
+| Create table | `CREATE TABLE t (col TYPE [NOT NULL], ..., PRIMARY KEY (col1, ...))` |
 | Drop table | `DROP TABLE t` |
+| Rename table | `ALTER TABLE t RENAME TO new_name` |
 | Add column | `ALTER TABLE t ADD COLUMN col TYPE [NOT NULL] [DEFAULT (value)]` |
 | Drop column | `ALTER TABLE t DROP COLUMN col` |
+| Rename column | `ALTER TABLE t RENAME COLUMN old TO new` |
 | Create index | `CREATE INDEX name ON t (col1, col2)` |
 | Create unique index | `CREATE UNIQUE INDEX name ON t (col1, col2)` |
 | Drop index | `ALTER TABLE t DROP INDEX name` |
+| Rename index | `ALTER TABLE t RENAME INDEX old TO new` |
 | Raw SQL | passed through as-is |
 
 The provider ships design-time services so the EF tooling can discover the provider automatically. No extra flags are needed:
@@ -514,7 +548,6 @@ await ctx.SaveChangesAsync();
 - No computed columns.
 - No foreign key constraints.
 - No `ALTER COLUMN` — changing a column type requires dropping and recreating the column.
-- No `RENAME COLUMN`, `RENAME TABLE`, or `RENAME INDEX`.
 - Key CLR types must be one of: `string`, `int`, `long`, `short`, or `Guid`.
 - `[ConcurrencyCheck]` is only supported on `short`, `int`, and `long` columns; `[Timestamp]` is not supported.
 - MVCC conflict detection occurs at commit time, not during `SaveChangesAsync`. Use application-level version columns with `[ConcurrencyCheck]` for optimistic concurrency.

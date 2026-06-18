@@ -189,13 +189,32 @@ public class CamusMigrationsSqlGenerator : MigrationsSqlGenerator
         => throw new NotSupportedException("CamusDB does not support altering an existing column type.");
 
     protected override void Generate(RenameColumnOperation operation, IModel? model, MigrationCommandListBuilder builder)
-        => throw new NotSupportedException("CamusDB does not support RENAME COLUMN.");
+    {
+        var helper = Dependencies.SqlGenerationHelper;
+        builder.Append("ALTER TABLE ").Append(helper.DelimitIdentifier(operation.Table))
+               .Append(" RENAME COLUMN ").Append(helper.DelimitIdentifier(operation.Name))
+               .Append(" TO ").Append(helper.DelimitIdentifier(operation.NewName));
+        builder.EndCommand();
+    }
 
     protected override void Generate(RenameTableOperation operation, IModel? model, MigrationCommandListBuilder builder)
-        => throw new NotSupportedException("CamusDB does not support RENAME TABLE.");
+    {
+        var helper = Dependencies.SqlGenerationHelper;
+        var newName = operation.NewName ?? throw new InvalidOperationException("RenameTableOperation.NewName is required.");
+        builder.Append("ALTER TABLE ").Append(helper.DelimitIdentifier(operation.Name))
+               .Append(" RENAME TO ").Append(helper.DelimitIdentifier(newName));
+        builder.EndCommand();
+    }
 
     protected override void Generate(RenameIndexOperation operation, IModel? model, MigrationCommandListBuilder builder)
-        => throw new NotSupportedException("CamusDB does not support RENAME INDEX.");
+    {
+        var helper = Dependencies.SqlGenerationHelper;
+        var newName = operation.NewName ?? throw new InvalidOperationException("RenameIndexOperation.NewName is required.");
+        builder.Append("ALTER TABLE ").Append(helper.DelimitIdentifier(operation.Table ?? ""))
+               .Append(" RENAME INDEX ").Append(helper.DelimitIdentifier(operation.Name))
+               .Append(" TO ").Append(helper.DelimitIdentifier(newName));
+        builder.EndCommand();
+    }
 
     protected override void Generate(AddForeignKeyOperation operation, IModel? model, MigrationCommandListBuilder builder, bool terminate = true)
         => throw new NotSupportedException("CamusDB does not support foreign key constraints.");

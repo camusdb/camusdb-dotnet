@@ -47,6 +47,7 @@ public class CamusCommand : DbCommand, ICloneable
         this.connection = connection;
         CommandText = source;
         updatedRowSource = UpdateRowSource.None;
+        CommandTimeout = builder.CommandTimeout;
     }
 
     /// <summary>
