@@ -59,7 +59,7 @@ public class CamusTransaction : DbTransaction
     /// Commits the database transaction asynchronously, returning the commit timestamp.
     /// </summary>
     /// <param name="cancellationToken">A cancellation token used for this task.</param>    
-    public new async Task CommitAsync(CancellationToken cancellationToken = default)
+    public override async Task CommitAsync(CancellationToken cancellationToken = default)
     {        
         string database = builder.Config["Database"];
 
@@ -117,7 +117,7 @@ public class CamusTransaction : DbTransaction
     /// Rollbacks the database transaction asynchronously, returning the commit timestamp.
     /// </summary>
     /// <param name="cancellationToken">A cancellation token used for this task.</param>
-    public new async Task RollbackAsync(CancellationToken cancellationToken = default)
+    public override async Task RollbackAsync(CancellationToken cancellationToken = default)
     {
         string database = builder.Config["Database"];
 
