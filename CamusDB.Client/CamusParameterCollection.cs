@@ -55,6 +55,19 @@ public sealed class CamusParameterCollection : DbParameterCollection, IEnumerabl
         return parameter;
     }
 
+    /// <summary>
+    /// Adds an <see cref="ColumnType.Array"/> parameter with an explicit scalar element type. Use this
+    /// overload (rather than relying on element-type inference) for empty or nullable-element arrays.
+    /// </summary>
+    public CamusParameter Add(string parameterName, ColumnType arrayElementType, object? value, bool isArray)
+    {
+        CamusParameter parameter = Add(parameterName, isArray ? ColumnType.Array : arrayElementType);
+        parameter.Value = value;
+        if (isArray)
+            parameter.ArrayElementType = arrayElementType;
+        return parameter;
+    }
+
     public override void AddRange(Array values)
     {
         _innerList.AddRange(values.Cast<CamusParameter>());

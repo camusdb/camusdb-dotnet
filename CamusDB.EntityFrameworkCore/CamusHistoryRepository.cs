@@ -16,13 +16,35 @@ public class CamusHistoryRepository : HistoryRepository
 
     public override bool Exists()
     {
-        try { return base.Exists(); }
+        try
+        {
+            Dependencies.Connection.Open();
+            try
+            {
+                using var cmd = Dependencies.Connection.DbConnection.CreateCommand();
+                cmd.CommandText = ExistsSql;
+                using var _ = cmd.ExecuteReader();
+                return true;
+            }
+            finally { Dependencies.Connection.Close(); }
+        }
         catch { return false; }
     }
 
     public override async Task<bool> ExistsAsync(CancellationToken cancellationToken = default)
     {
-        try { return await base.ExistsAsync(cancellationToken).ConfigureAwait(false); }
+        try
+        {
+            await Dependencies.Connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+            try
+            {
+                await using var cmd = Dependencies.Connection.DbConnection.CreateCommand();
+                cmd.CommandText = ExistsSql;
+                await using var _ = await cmd.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+                return true;
+            }
+            finally { await Dependencies.Connection.CloseAsync().ConfigureAwait(false); }
+        }
         catch { return false; }
     }
 

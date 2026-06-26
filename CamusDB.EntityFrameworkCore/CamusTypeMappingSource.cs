@@ -10,8 +10,14 @@ public sealed class CamusTypeMappingSource : RelationalTypeMappingSource
     private static readonly ShortTypeMapping Int16Mapping = new("int64");
     private static readonly IntTypeMapping Int32Mapping = new("int64");
     private static readonly LongTypeMapping Int64Mapping = new("int64");
-    private static readonly FloatTypeMapping Float32Mapping = new("float64");
+    private static readonly FloatTypeMapping Float32Mapping = new("float32", DbType.Single);
     private static readonly DoubleTypeMapping Float64Mapping = new("float64");
+    private static readonly ByteArrayTypeMapping BytesMapping = new("bytes", DbType.Binary);
+    // Date is exposed as both DateOnly (preferred) and DateTime; DateTime is exposed as DateTime/DateTimeOffset.
+    private static readonly DateOnlyTypeMapping DateOnlyMapping = new("date", DbType.Date);
+    private static readonly DateTimeTypeMapping DateAsDateTimeMapping = new("date", DbType.Date);
+    private static readonly DateTimeTypeMapping DateTimeMapping = new("datetime", DbType.DateTime);
+    private static readonly DateTimeOffsetTypeMapping DateTimeOffsetMapping = new("datetime", DbType.DateTime);
     // DbType.Guid → CamusParameter.FromDbType → ColumnType.Id (OID), while StringTypeMapping keeps
     // ClrType=string so the EF Core key-factory gets ValueComparer<string>, not DefaultValueComparer<Guid>.
     private static readonly StringTypeMapping IdStringMapping = new("id", DbType.Guid);
@@ -26,6 +32,10 @@ public sealed class CamusTypeMappingSource : RelationalTypeMappingSource
         { typeof(long), Int64Mapping },
         { typeof(float), Float32Mapping },
         { typeof(double), Float64Mapping },
+        { typeof(byte[]), BytesMapping },
+        { typeof(DateOnly), DateOnlyMapping },
+        { typeof(DateTime), DateTimeMapping },
+        { typeof(DateTimeOffset), DateTimeOffsetMapping },
         { typeof(Guid), IdGuidMapping },
     };
 
@@ -36,6 +46,10 @@ public sealed class CamusTypeMappingSource : RelationalTypeMappingSource
         { "bool", BoolMapping },
         { "int64", Int64Mapping },
         { "float64", Float64Mapping },
+        { "float32", Float32Mapping },
+        { "real", Float32Mapping },
+        { "bytes", BytesMapping },
+        { "blob", BytesMapping },
         { "id",  IdStringMapping },
         { "oid", IdStringMapping },
     };
@@ -60,6 +74,22 @@ public sealed class CamusTypeMappingSource : RelationalTypeMappingSource
              storeTypeName.Equals("oid", StringComparison.OrdinalIgnoreCase)))
         {
             return clrType == typeof(Guid) ? IdGuidMapping : IdStringMapping;
+        }
+
+        // "date"/"datetime"/"timestamp" store types: pick the mapping matching the CLR property type
+        // so a DateTime-typed property declared HasColumnType("date") still gets a DateTime mapping
+        // (its DbType.Date routes through CamusParameter to ColumnType.Date).
+        if (storeTypeName is not null &&
+            storeTypeName.Equals("date", StringComparison.OrdinalIgnoreCase))
+        {
+            return clrType == typeof(DateTime) ? DateAsDateTimeMapping : DateOnlyMapping;
+        }
+
+        if (storeTypeName is not null &&
+            (storeTypeName.Equals("datetime", StringComparison.OrdinalIgnoreCase) ||
+             storeTypeName.Equals("timestamp", StringComparison.OrdinalIgnoreCase)))
+        {
+            return clrType == typeof(DateTimeOffset) ? DateTimeOffsetMapping : DateTimeMapping;
         }
 
         if (storeTypeName is not null && StoreTypeMappings.TryGetValue(storeTypeName, out var storeMapping))

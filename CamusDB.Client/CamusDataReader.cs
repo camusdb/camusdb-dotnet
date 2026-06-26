@@ -90,27 +90,45 @@ public class CamusDataReader : DbDataReader
     {
         ColumnType.Bool => typeof(bool),
         ColumnType.Float64 => typeof(double),
+        ColumnType.Float32 => typeof(float),
         ColumnType.Id => typeof(string),
         ColumnType.Integer64 => typeof(long),
+        ColumnType.Bytes => typeof(byte[]),
+        ColumnType.Date => typeof(DateTime),
+        ColumnType.DateTime => typeof(DateTime),
+        ColumnType.Array => typeof(object[]),
         ColumnType.Null => typeof(DBNull),
         ColumnType.String => typeof(string),
         _ => typeof(object)
     };
 
-    public override object GetValue(int ordinal)
-    {
-        ColumnValue value = GetColumnValue(ordinal);
+    public override object GetValue(int ordinal) => ConvertToClr(GetColumnValue(ordinal));
 
-        return value.Type switch
-        {
-            ColumnType.Bool => value.BoolValue,
-            ColumnType.Float64 => value.FloatValue,
-            ColumnType.Id => value.StrValue ?? "",
-            ColumnType.Integer64 => value.LongValue,
-            ColumnType.Null => DBNull.Value,
-            ColumnType.String => value.StrValue ?? "",
-            _ => DBNull.Value
-        };
+    private static object ConvertToClr(ColumnValue value) => value.Type switch
+    {
+        ColumnType.Bool => value.BoolValue,
+        ColumnType.Float64 => value.FloatValue,
+        ColumnType.Float32 => (float)value.FloatValue,
+        ColumnType.Id => value.StrValue ?? "",
+        ColumnType.Integer64 => value.LongValue,
+        ColumnType.Bytes => value.BytesValue ?? Array.Empty<byte>(),
+        ColumnType.Date => new DateTime(value.LongValue, DateTimeKind.Utc),
+        ColumnType.DateTime => new DateTime(value.LongValue, DateTimeKind.Utc),
+        ColumnType.Array => ConvertArray(value),
+        ColumnType.Null => DBNull.Value,
+        ColumnType.String => value.StrValue ?? "",
+        _ => DBNull.Value
+    };
+
+    private static object?[] ConvertArray(ColumnValue value)
+    {
+        List<ColumnValue> elements = value.ArrayValues ?? [];
+        object?[] result = new object?[elements.Count];
+
+        for (int i = 0; i < elements.Count; i++)
+            result[i] = elements[i].Type == ColumnType.Null ? null : ConvertToClr(elements[i]);
+
+        return result;
     }
 
     public override int GetValues(object[] values)
@@ -144,7 +162,10 @@ public class CamusDataReader : DbDataReader
 
     public override long GetBytes(int ordinal, long dataOffset, byte[]? buffer, int bufferOffset, int length)
     {
-        byte[] data = System.Text.Encoding.UTF8.GetBytes(GetString(ordinal));
+        ColumnValue value = GetColumnValue(ordinal);
+        byte[] data = value.Type == ColumnType.Bytes
+            ? value.BytesValue ?? []
+            : System.Text.Encoding.UTF8.GetBytes(GetString(ordinal));
         return CopyBuffer(data, dataOffset, buffer, bufferOffset, length);
     }
 
@@ -166,12 +187,20 @@ public class CamusDataReader : DbDataReader
 
     public override DateTime GetDateTime(int ordinal)
     {
+        ColumnValue column = GetColumnValue(ordinal);
+
+        if (column.Type is ColumnType.Date or ColumnType.DateTime)
+            return new DateTime(column.LongValue, DateTimeKind.Utc);
+
         object value = GetValue(ordinal);
 
         if (value is DateTime dateTime)
             return dateTime;
 
-        return DateTime.Parse(Convert.ToString(value, CultureInfo.InvariantCulture)!, CultureInfo.InvariantCulture);
+        return DateTime.Parse(
+            Convert.ToString(value, CultureInfo.InvariantCulture)!,
+            CultureInfo.InvariantCulture,
+            DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal);
     }
 
     public override decimal GetDecimal(int ordinal) => Convert.ToDecimal(GetValue(ordinal), CultureInfo.InvariantCulture);
@@ -179,9 +208,44 @@ public class CamusDataReader : DbDataReader
     public override double GetDouble(int ordinal) => GetColumnValue(ordinal).Type switch
     {
         ColumnType.Float64 => GetColumnValue(ordinal).FloatValue,
+        ColumnType.Float32 => (float)GetColumnValue(ordinal).FloatValue,
         ColumnType.Integer64 => GetColumnValue(ordinal).LongValue,
         _ => throw new InvalidCastException()
     };
+
+    /// <summary>
+    /// Returns the value of the specified column reconstructed as <typeparamref name="T"/>. Adds
+    /// conversions the base <see cref="DbDataReader"/> cannot perform off the boxed CLR value —
+    /// notably <see cref="DateOnly"/>, <see cref="TimeOnly"/>, <see cref="DateTimeOffset"/>,
+    /// <see cref="byte"/>[] and <see cref="float"/> — so EF Core's typed materializers work.
+    /// </summary>
+    public override T GetFieldValue<T>(int ordinal)
+    {
+        Type target = typeof(T);
+
+        if (target == typeof(DateOnly))
+            return (T)(object)DateOnly.FromDateTime(GetDateTime(ordinal));
+
+        if (target == typeof(DateTime))
+            return (T)(object)GetDateTime(ordinal);
+
+        if (target == typeof(DateTimeOffset))
+            return (T)(object)new DateTimeOffset(DateTime.SpecifyKind(GetDateTime(ordinal), DateTimeKind.Utc));
+
+        if (target == typeof(TimeOnly))
+            return (T)(object)TimeOnly.FromDateTime(GetDateTime(ordinal));
+
+        if (target == typeof(byte[]))
+            return (T)(object)(GetColumnValue(ordinal).BytesValue ?? Array.Empty<byte>());
+
+        if (target == typeof(float))
+            return (T)(object)GetFloat(ordinal);
+
+        if (target == typeof(Guid))
+            return (T)(object)GetGuid(ordinal);
+
+        return base.GetFieldValue<T>(ordinal);
+    }
 
     public override IEnumerator GetEnumerator()
     {

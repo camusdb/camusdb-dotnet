@@ -6,9 +6,11 @@
  * file that was distributed with this source code.
  */
 
+using System.Collections;
 using System.Data;
 using System.Data.Common;
 using System.Diagnostics.CodeAnalysis;
+using System.Globalization;
 using System.Text.Json;
 using CamusDB.Core.Util.ObjectIds;
 using Flurl.Http;
@@ -162,30 +164,134 @@ public class CamusCommand : DbCommand, ICloneable
             if (string.IsNullOrEmpty(parameter.ParameterName))
                 throw new CamusException("CADB0400", "Parameter name cannot be null or empty");
 
-            if (parameter.Value is null or DBNull || parameter.ColumnType == ColumnType.Null)
-                commandParameters.Add(parameter.ParameterName, new() { Type = ColumnType.Null });
-            else if ((parameter.ColumnType == ColumnType.Id || parameter.ColumnType == ColumnType.String) && parameter.Value is string)
-                commandParameters.Add(parameter.ParameterName, new() { Type = parameter.ColumnType, StrValue = (string)parameter.Value! });
-            else if ((parameter.ColumnType == ColumnType.Id || parameter.ColumnType == ColumnType.String) && parameter.Value is Guid g)
-                commandParameters.Add(parameter.ParameterName, new() { Type = parameter.ColumnType, StrValue = g.ToString() });
-            else if ((parameter.ColumnType == ColumnType.Id) && parameter.Value is CamusObjectIdValue)
-                commandParameters.Add(parameter.ParameterName, new() { Type = parameter.ColumnType, StrValue = parameter.Value!.ToString() });
-            else if (parameter.ColumnType == ColumnType.Integer64 && parameter.Value is IConvertible c)
-                commandParameters.Add(parameter.ParameterName, new() { Type = parameter.ColumnType, LongValue = c.ToInt64(null) });
-            else if (parameter.ColumnType == ColumnType.Float64 && parameter.Value is float f)
-                commandParameters.Add(parameter.ParameterName, new() { Type = parameter.ColumnType, FloatValue = f });
-            else if (parameter.ColumnType == ColumnType.Float64 && parameter.Value is double d)
-                commandParameters.Add(parameter.ParameterName, new() { Type = parameter.ColumnType, FloatValue = d });
-            else if (parameter.ColumnType == ColumnType.Bool && parameter.Value is bool b)
-                commandParameters.Add(parameter.ParameterName, new() { Type = parameter.ColumnType, BoolValue = b });
-            else if (parameter.ColumnType == ColumnType.String)
-                commandParameters.Add(parameter.ParameterName, new() { Type = ColumnType.String, StrValue = Convert.ToString(parameter.Value) ?? "" });
-            else
-                throw new CamusException("CADB0400", $"Cannot map parameter '{parameter.ParameterName}' (ColumnType={parameter.ColumnType}, ValueType={parameter.Value?.GetType().Name})");
+            commandParameters.Add(
+                parameter.ParameterName,
+                BuildColumnValue(parameter.ParameterName, parameter.ColumnType, parameter.Value, parameter.ArrayElementType));
         }
 
         return commandParameters;
-    }    
+    }
+
+    private static ColumnValue BuildColumnValue(string name, ColumnType columnType, object? value, ColumnType arrayElementType)
+    {
+        if (value is null or DBNull || columnType == ColumnType.Null)
+            return new() { Type = ColumnType.Null };
+
+        switch (columnType)
+        {
+            case ColumnType.Id or ColumnType.String when value is string s:
+                return new() { Type = columnType, StrValue = s };
+
+            case ColumnType.Id or ColumnType.String when value is Guid g:
+                return new() { Type = columnType, StrValue = g.ToString() };
+
+            case ColumnType.Id when value is CamusObjectIdValue:
+                return new() { Type = columnType, StrValue = value.ToString() };
+
+            case ColumnType.Integer64 when value is IConvertible ci:
+                return new() { Type = columnType, LongValue = ci.ToInt64(CultureInfo.InvariantCulture) };
+
+            case ColumnType.Float64 or ColumnType.Float32 when value is IConvertible cf:
+                return new() { Type = columnType, FloatValue = cf.ToDouble(CultureInfo.InvariantCulture) };
+
+            case ColumnType.Bool when value is bool b:
+                return new() { Type = columnType, BoolValue = b };
+
+            case ColumnType.Bytes:
+                return new() { Type = columnType, BytesValue = ToBytes(name, value) };
+
+            case ColumnType.Date:
+                return new() { Type = columnType, LongValue = ToDateTimeUtc(name, value).Date.Ticks };
+
+            case ColumnType.DateTime:
+                return new() { Type = columnType, LongValue = ToDateTimeUtc(name, value).Ticks };
+
+            case ColumnType.Array:
+                return BuildArrayColumnValue(name, value, arrayElementType);
+
+            case ColumnType.String:
+                return new() { Type = ColumnType.String, StrValue = Convert.ToString(value, CultureInfo.InvariantCulture) ?? "" };
+
+            default:
+                throw new CamusException("CADB0400", $"Cannot map parameter '{name}' (ColumnType={columnType}, ValueType={value.GetType().Name})");
+        }
+    }
+
+    private static ColumnValue BuildArrayColumnValue(string name, object value, ColumnType arrayElementType)
+    {
+        if (value is string || value is not IEnumerable enumerable)
+            throw new CamusException("CADB0400", $"Array parameter '{name}' requires an IEnumerable value (got {value.GetType().Name})");
+
+        List<object?> items = [];
+        foreach (object? item in enumerable)
+            items.Add(item);
+
+        ColumnType elementType = arrayElementType;
+        if (elementType == ColumnType.Null)
+        {
+            foreach (object? item in items)
+            {
+                if (item is null or DBNull)
+                    continue;
+                elementType = InferColumnType(item.GetType());
+                break;
+            }
+
+            if (elementType == ColumnType.Null && items.Count > 0)
+                throw new CamusException("CADB0400", $"Cannot infer element type for array parameter '{name}'; set CamusParameter.ArrayElementType explicitly");
+        }
+
+        List<ColumnValue> elements = new(items.Count);
+        foreach (object? item in items)
+        {
+            elements.Add(item is null or DBNull
+                ? new() { Type = ColumnType.Null }
+                : BuildColumnValue(name, elementType, item, ColumnType.Null));
+        }
+
+        return new() { Type = ColumnType.Array, ArrayElementType = elementType, ArrayValues = elements };
+    }
+
+    private static byte[] ToBytes(string name, object value) => value switch
+    {
+        byte[] bytes => bytes,
+        ReadOnlyMemory<byte> rom => rom.ToArray(),
+        Memory<byte> mem => mem.ToArray(),
+        ArraySegment<byte> seg => seg.ToArray(),
+        IEnumerable<byte> seq => [.. seq],
+        _ => throw new CamusException("CADB0400", $"Cannot map bytes parameter '{name}' from {value.GetType().Name}")
+    };
+
+    private static DateTime ToDateTimeUtc(string name, object value) => value switch
+    {
+        DateTime dt => dt.Kind switch
+        {
+            DateTimeKind.Utc => dt,
+            DateTimeKind.Local => dt.ToUniversalTime(),
+            _ => DateTime.SpecifyKind(dt, DateTimeKind.Utc)
+        },
+        DateTimeOffset dto => dto.UtcDateTime,
+        DateOnly d => d.ToDateTime(TimeOnly.MinValue, DateTimeKind.Utc),
+        string str => DateTime.Parse(str, CultureInfo.InvariantCulture, DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal),
+        _ => throw new CamusException("CADB0400", $"Cannot map date/datetime parameter '{name}' from {value.GetType().Name}")
+    };
+
+    private static ColumnType InferColumnType(Type type) => type switch
+    {
+        _ when type == typeof(string) => ColumnType.String,
+        _ when type == typeof(bool) => ColumnType.Bool,
+        _ when type == typeof(byte) || type == typeof(sbyte)
+            || type == typeof(short) || type == typeof(ushort)
+            || type == typeof(int) || type == typeof(uint)
+            || type == typeof(long) || type == typeof(ulong) => ColumnType.Integer64,
+        _ when type == typeof(float) => ColumnType.Float32,
+        _ when type == typeof(double) || type == typeof(decimal) => ColumnType.Float64,
+        _ when type == typeof(DateTime) || type == typeof(DateTimeOffset) => ColumnType.DateTime,
+        _ when type == typeof(DateOnly) => ColumnType.Date,
+        _ when type == typeof(Guid) || type == typeof(CamusObjectIdValue) => ColumnType.Id,
+        _ when type == typeof(byte[]) => ColumnType.Bytes,
+        _ => ColumnType.Null
+    };
 
     /// <summary>
     /// Sends the command to CamusDB and builds a <see cref="CamusDBDataReader"/>.

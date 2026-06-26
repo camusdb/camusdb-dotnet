@@ -260,27 +260,42 @@ public class CamusMigrationsSqlGenerator : MigrationsSqlGenerator
         var storeType = (col.ColumnType ?? "").ToUpperInvariant();
         return storeType switch
         {
-            "ID" or "OID" => "OID",
-            "STRING" => "STRING",
-            "BOOL" => "BOOL",
-            "INT64" => "INT64",
-            "FLOAT64" => "FLOAT64",
+            "ID" or "OID"          => "OID",
+            "STRING"               => StringDdl(col),
+            "BOOL"                 => "BOOL",
+            "INT64"                => "INT64",
+            "FLOAT64"              => "FLOAT64",
+            "FLOAT32" or "REAL"    => "FLOAT32",
+            "BYTES" or "BLOB"      => "BYTES",
+            "DATE"                 => "DATE",
+            "DATETIME" or "TIMESTAMP" => "DATETIME",
             _ => col.ClrType == typeof(bool) ? "BOOL"
-                : col.ClrType == typeof(double) || col.ClrType == typeof(float) ? "FLOAT64"
+                : col.ClrType == typeof(float) ? "FLOAT32"
+                : col.ClrType == typeof(double) ? "FLOAT64"
                 : col.ClrType == typeof(int) || col.ClrType == typeof(long) || col.ClrType == typeof(short) ? "INT64"
-                : "STRING"
+                : col.ClrType == typeof(byte[]) ? "BYTES"
+                : col.ClrType == typeof(DateOnly) ? "DATE"
+                : col.ClrType == typeof(DateTime) || col.ClrType == typeof(DateTimeOffset) ? "DATETIME"
+                : StringDdl(col)
         };
     }
 
+    private static string StringDdl(ColumnOperation col)
+        => col.MaxLength is int n and > 0 ? $"STRING({n.ToString(CultureInfo.InvariantCulture)})" : "STRING";
+
     private static string FormatDefaultValue(object value) => value switch
     {
-        bool b   => b ? "true" : "false",
-        string s => $"'{s}'",
-        int i    => i.ToString(CultureInfo.InvariantCulture),
-        long l   => l.ToString(CultureInfo.InvariantCulture),
-        float f  => f.ToString(CultureInfo.InvariantCulture),
-        double d => d.ToString(CultureInfo.InvariantCulture),
-        _        => value.ToString() ?? "null"
+        bool b           => b ? "true" : "false",
+        string s         => $"'{s.Replace("'", "''")}'",
+        int i            => i.ToString(CultureInfo.InvariantCulture),
+        long l           => l.ToString(CultureInfo.InvariantCulture),
+        float f          => f.ToString(CultureInfo.InvariantCulture),
+        double d         => d.ToString(CultureInfo.InvariantCulture),
+        byte[] bytes     => ToHexLiteral(bytes),
+        DateOnly d       => $"'{d:yyyy-MM-dd}'",
+        DateTime dt      => $"'{ToIso(dt)}'",
+        DateTimeOffset o => $"'{o.UtcDateTime:yyyy-MM-ddTHH:mm:ss.fffffffZ}'",
+        _                => value.ToString() ?? "null"
     };
 
     private static string FormatLiteral(object? value) => value switch
@@ -292,8 +307,26 @@ public class CamusMigrationsSqlGenerator : MigrationsSqlGenerator
         long l         => l.ToString(CultureInfo.InvariantCulture),
         float f        => f.ToString(CultureInfo.InvariantCulture),
         double d       => d.ToString(CultureInfo.InvariantCulture),
+        byte[] bytes   => ToHexLiteral(bytes),
+        DateOnly d     => $"'{d:yyyy-MM-dd}'",
+        DateTime dt    => $"'{ToIso(dt)}'",
+        DateTimeOffset o => $"'{o.UtcDateTime:yyyy-MM-ddTHH:mm:ss.fffffffZ}'",
         Guid g         => $"'{g}'",
         string s       => $"'{s.Replace("'", "''")}'",
         _              => $"'{value.ToString()?.Replace("'", "''") ?? ""}'"
     };
+
+    // SQL bytes literals are 0x-prefixed hex (the JSON path uses base64 instead).
+    private static string ToHexLiteral(byte[] bytes) => "0x" + Convert.ToHexString(bytes);
+
+    private static string ToIso(DateTime dt)
+    {
+        DateTime utc = dt.Kind switch
+        {
+            DateTimeKind.Utc => dt,
+            DateTimeKind.Local => dt.ToUniversalTime(),
+            _ => DateTime.SpecifyKind(dt, DateTimeKind.Utc)
+        };
+        return utc.ToString("yyyy-MM-ddTHH:mm:ss.fffffffZ", CultureInfo.InvariantCulture);
+    }
 }

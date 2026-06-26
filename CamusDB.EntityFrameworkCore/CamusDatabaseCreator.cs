@@ -128,15 +128,31 @@ public class CamusDatabaseCreator : RelationalDatabaseCreator
 
     private static string GetDdlType(IProperty property, bool isPrimaryKey)
     {
-        var storeType = property.GetColumnType() ?? "";
-        return storeType.ToUpperInvariant() switch
+        var storeType = (property.GetColumnType() ?? "").ToUpperInvariant();
+        var clrType = Nullable.GetUnderlyingType(property.ClrType) ?? property.ClrType;
+
+        return storeType switch
         {
-            "ID" or "OID" => "OID",
-            "STRING" => "STRING",
-            "BOOL" => "BOOL",
-            "INT64" => "INT64",
-            "FLOAT64" => "FLOAT64",
-            _ => "STRING"
+            "ID" or "OID"             => "OID",
+            "STRING"                  => StringDdl(property),
+            "BOOL"                    => "BOOL",
+            "INT64"                   => "INT64",
+            "FLOAT64"                 => "FLOAT64",
+            "FLOAT32" or "REAL"       => "FLOAT32",
+            "BYTES" or "BLOB"         => "BYTES",
+            "DATE"                    => "DATE",
+            "DATETIME" or "TIMESTAMP" => "DATETIME",
+            _ => clrType == typeof(bool) ? "BOOL"
+                : clrType == typeof(float) ? "FLOAT32"
+                : clrType == typeof(double) ? "FLOAT64"
+                : clrType == typeof(int) || clrType == typeof(long) || clrType == typeof(short) ? "INT64"
+                : clrType == typeof(byte[]) ? "BYTES"
+                : clrType == typeof(DateOnly) ? "DATE"
+                : clrType == typeof(DateTime) || clrType == typeof(DateTimeOffset) ? "DATETIME"
+                : StringDdl(property)
         };
     }
+
+    private static string StringDdl(IProperty property)
+        => property.GetMaxLength() is int n and > 0 ? $"STRING({n})" : "STRING";
 }

@@ -5,7 +5,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <PackageId>CamusDB.EntityFrameworkCore</PackageId>
-    <Version>0.4.6</Version>
+    <Version>0.5.0</Version>
     <Description>Entity Framework Core provider scaffolding for CamusDB.</Description>
     <Authors>CamusDB</Authors>
     <Company>CamusDB</Company>

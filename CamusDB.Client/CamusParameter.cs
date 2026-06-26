@@ -35,6 +35,13 @@ public sealed class CamusParameter : DbParameter, ICloneable
         set => _camusDbType = value;
     }
 
+    /// <summary>
+    /// For a parameter whose <see cref="ColumnType"/> is <see cref="ColumnType.Array"/>, the scalar
+    /// element type of the array. When left as <see cref="ColumnType.Null"/> the element type is
+    /// inferred from the runtime element type of the value (which fails for an empty, untyped array).
+    /// </summary>
+    public ColumnType ArrayElementType { get; set; }
+
     /// <inheritdoc />
     public override ParameterDirection Direction
     {
@@ -107,7 +114,8 @@ public sealed class CamusParameter : DbParameter, ICloneable
             Direction = Direction,
             IsNullable = IsNullable,
             Size = Size,
-            SourceColumnNullMapping = SourceColumnNullMapping
+            SourceColumnNullMapping = SourceColumnNullMapping,
+            ArrayElementType = ArrayElementType
         };
     }
 
@@ -115,23 +123,41 @@ public sealed class CamusParameter : DbParameter, ICloneable
     {
         DbType.Boolean => ColumnType.Bool,
         DbType.Byte => ColumnType.Integer64,
+        DbType.SByte => ColumnType.Integer64,
         DbType.Decimal => ColumnType.Float64,
         DbType.Double => ColumnType.Float64,
         DbType.Guid => ColumnType.Id,
         DbType.Int16 => ColumnType.Integer64,
         DbType.Int32 => ColumnType.Integer64,
         DbType.Int64 => ColumnType.Integer64,
-        DbType.Single => ColumnType.Float64,
+        DbType.UInt16 => ColumnType.Integer64,
+        DbType.UInt32 => ColumnType.Integer64,
+        DbType.UInt64 => ColumnType.Integer64,
+        DbType.Single => ColumnType.Float32,
         DbType.String => ColumnType.String,
+        DbType.StringFixedLength => ColumnType.String,
+        DbType.AnsiString => ColumnType.String,
+        DbType.AnsiStringFixedLength => ColumnType.String,
+        DbType.Binary => ColumnType.Bytes,
+        DbType.Date => ColumnType.Date,
+        DbType.DateTime => ColumnType.DateTime,
+        DbType.DateTime2 => ColumnType.DateTime,
+        DbType.DateTimeOffset => ColumnType.DateTime,
+        DbType.Object => ColumnType.Array,
         _ => ColumnType.String
     };
 
     private static DbType ToDbType(ColumnType type) => type switch
     {
         ColumnType.Bool => DbType.Boolean,
+        ColumnType.Float32 => DbType.Single,
         ColumnType.Float64 => DbType.Double,
         ColumnType.Id => DbType.String,
         ColumnType.Integer64 => DbType.Int64,
+        ColumnType.Bytes => DbType.Binary,
+        ColumnType.Date => DbType.Date,
+        ColumnType.DateTime => DbType.DateTime,
+        ColumnType.Array => DbType.Object,
         ColumnType.Null => DbType.Object,
         ColumnType.String => DbType.String,
         _ => DbType.String
