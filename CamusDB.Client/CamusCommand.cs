@@ -57,6 +57,13 @@ public class CamusCommand : DbCommand, ICloneable
     /// </summary>
     public new CamusParameterCollection Parameters { get; } = new CamusParameterCollection();
 
+    /// <summary>
+    /// Query result cache metadata reported by the server for the most recent reader query executed
+    /// through this command, or <see langword="null"/> if that query carried no <c>{cache=…}</c> hint
+    /// (or no reader query has run yet). Also available on <see cref="CamusDataReader.CacheMetadata"/>.
+    /// </summary>
+    public CamusCacheMetadata? LastCacheMetadata { get; private set; }
+
     [AllowNull]
     public override string CommandText { get; set; } = "";
 
@@ -370,7 +377,9 @@ public class CamusCommand : DbCommand, ICloneable
             if (response?.Rows == null)
                 throw new CamusException("CADB0000", "Empty result returned");
 
-            return new CamusDataReader(response.Rows);
+            LastCacheMetadata = CamusCacheMetadata.FromResponse(response);
+
+            return new CamusDataReader(response.Rows, LastCacheMetadata);
         }
         catch (FlurlHttpException ex)
         {

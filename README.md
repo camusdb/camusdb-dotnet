@@ -104,6 +104,65 @@ await using CamusCommand command = connection.CreateCamusCommand("""
 bool created = await command.ExecuteDDLAsync();
 ```
 
+#### Data Types
+
+CamusDB columns are declared with these SQL types; each maps to a `ColumnType` on the wire and a CLR type the reader/parameters understand:
+
+| SQL DDL type | `ColumnType` | CLR type(s) | Notes |
+| --- | --- | --- | --- |
+| `OID` (alias `OBJECT_ID`) | `Id` | `string`, `Guid`, `CamusObjectIdValue` | Native identifier; shares string key encoding. |
+| `INT64` (aliases `INT`, `INTEGER`) | `Integer64` | `long`, `int`, `short`, `byte` | 64-bit signed. |
+| `FLOAT64` | `Float64` | `double` | IEEE-754 double. |
+| `FLOAT32` (alias `REAL`) | `Float32` | `float` | Stored at single precision. |
+| `BOOL` (alias `BOOLEAN`) | `Bool` | `bool` | |
+| `STRING` / `STRING(N)` | `String` | `string` | `N` bounds the length (UTF-16 code units); over-length is rejected. |
+| `DATE` | `Date` | `DateOnly`, `DateTime` | Calendar date; stored as UTC ticks at midnight. |
+| `DATETIME` (alias `TIMESTAMP`) | `DateTime` | `DateTime`, `DateTimeOffset` | Instant; normalized to UTC and read back as `DateTimeKind.Utc`. |
+| `BYTES` (alias `BLOB`) | `Bytes` | `byte[]` | base64 over JSON, `0x`-hex in SQL literals. Default max 10 MB. |
+| `ARRAY(T)` | `Array` | any `IEnumerable` of `T` | Homogeneous scalar list; not indexable, no inline SQL literal. |
+
+```csharp
+await using CamusCommand command = connection.CreateCamusCommand("""
+    CREATE TABLE events (
+        id        OID PRIMARY KEY NOT NULL,
+        name      STRING(64),
+        payload   BYTES,
+        score     FLOAT32,
+        happened  DATETIME,
+        day       DATE,
+        tags      ARRAY(INT64)
+    )
+    """);
+
+await command.ExecuteDDLAsync();
+```
+
+Dates/datetimes are normalized to UTC before being sent. Arrays carry a scalar element type, inferred from the values or set explicitly (required for an empty array):
+
+```csharp
+await using CamusCommand insert = connection.CreateInsertCommand("events");
+
+insert.Parameters.Add("id", ColumnType.Id, CamusObjectIdGenerator.Generate());
+insert.Parameters.Add("name", ColumnType.String, "launch");
+insert.Parameters.Add("payload", ColumnType.Bytes, new byte[] { 0xDE, 0xAD });
+insert.Parameters.Add("score", ColumnType.Float32, 9.5f);
+insert.Parameters.Add("happened", ColumnType.DateTime, DateTime.UtcNow);
+insert.Parameters.Add("day", ColumnType.Date, new DateOnly(2026, 5, 1));
+insert.Parameters.Add("tags", ColumnType.Integer64, new long[] { 1, 2, 3 }, isArray: true);
+
+await insert.ExecuteNonQueryAsync();
+```
+
+Reading them back uses the typed `CamusDataReader` accessors:
+
+```csharp
+byte[]    payload  = reader.GetFieldValue<byte[]>(reader.GetOrdinal("payload"));
+float     score    = reader.GetFloat(reader.GetOrdinal("score"));
+DateTime  happened = reader.GetDateTime(reader.GetOrdinal("happened"));
+DateOnly  day      = reader.GetFieldValue<DateOnly>(reader.GetOrdinal("day"));
+object?[] tags     = (object?[])reader.GetValue(reader.GetOrdinal("tags"));
+```
+
 #### Insert Rows
 
 ```csharp
@@ -140,6 +199,8 @@ insert.Parameters.Add("@enabled", ColumnType.Bool, true);
 int insertedRows = await insert.ExecuteNonQueryAsync();
 ```
 
+See [Data Types](#data-types) above for inserting `bytes`, `float32`, `date`, `datetime` and `array(T)` values.
+
 #### Select Rows
 
 ```csharp
@@ -157,6 +218,43 @@ while (await reader.ReadAsync())
     string type = reader.GetString(2);
     long   year = reader.GetInt64(3);
 }
+```
+
+#### Query Result Cache
+
+CamusDB has an opt-in, per-node, in-memory cache of fully materialized `SELECT` results. A query
+joins it with an inline `{cache=name}` hint placed right after a table reference; an identical later
+query (same shape, same bound values, same schema) can then be served from memory. The cache only
+serves single-table, autocommit reads — hints on joins or inside explicit transactions are inert.
+
+Add the hint directly in your SQL, optionally with a per-entry TTL or `strict` (validate every hit
+against live storage). `CamusCacheHint.Build(...)` assembles the fragment for you:
+
+```csharp
+string hint = CamusCacheHint.Build("recent_orders", ttl: TimeSpan.FromSeconds(30));
+
+await using CamusCommand select = connection.CreateSelectCommand(
+    $"SELECT id, total FROM orders {hint} WHERE status = @status ORDER BY total DESC LIMIT 20");
+
+select.Parameters.Add("@status", ColumnType.Integer64, 1);
+
+CamusDataReader reader = await select.ExecuteReaderAsync();
+
+// Inspect how the server resolved the cache for this query.
+CamusCacheMetadata? cache = reader.CacheMetadata;   // also on select.LastCacheMetadata
+if (cache is not null)
+    Console.WriteLine($"{cache.Status} ({cache.Name}), age={cache.AgeMs}ms");
+```
+
+`CamusCacheMetadata` exposes `Status` (`Hit`, `Miss`, `Bypass`, `StaleRevalidated`,
+`EvictedBeforePublish`), `BypassReason`, `Name`, `CachedAtHlc`, and `AgeMs`. It is `null` for any
+query that carried no hint, so ordinary queries are unaffected.
+
+Evict entries manually — both are scoped to the current database:
+
+```csharp
+await connection.EvictCacheAsync("recent_orders");   // one family
+await connection.EvictAllCacheAsync();               // every entry for this database
 ```
 
 #### Transactions
@@ -390,11 +488,18 @@ public class AppDbContext : DbContext
 | `string` (ID / PK) | `id` or `oid` | `OID` |
 | `Guid` (ID / PK) | `id` or `oid` | `OID` |
 | `string` | `string` | `STRING` |
+| `string` + `HasMaxLength(n)` | `string` | `STRING(n)` |
 | `bool` | `bool` | `BOOL` |
 | `short`, `int`, `long` | `int64` | `INT64` |
-| `float`, `double` | `float64` | `FLOAT64` |
+| `float` | `float32` | `FLOAT32` |
+| `double` | `float64` | `FLOAT64` |
+| `byte[]` | `bytes` (alias `blob`) | `BYTES` |
+| `DateOnly` | `date` | `DATE` |
+| `DateTime`, `DateTimeOffset` | `datetime` (alias `timestamp`) | `DATETIME` |
 
 Use `HasColumnType("id")` (or the alias `"oid"`) for primary key columns backed by CamusDB ObjectIds. The provider sends the value as an OID on the wire regardless of whether the CLR property is `string` or `Guid`.
+
+Dates and datetimes are stored as UTC ticks; the provider normalizes `DateTime` values to UTC before sending and reconstructs them as `DateTimeKind.Utc`. `byte[]` is exchanged as base64 over the JSON wire (SQL literals use `0x`-hex). A `string` property maps to `float32`/`bytes`/`date`/`datetime` etc. either by its CLR type or by an explicit `HasColumnType(...)`. Arrays (`array(T)`) are not indexable and have no inline SQL literal — they are written through the ADO.NET parameter path (see below); the EF Core provider does not map array columns.
 
 ### Database and Table Lifecycle
 
@@ -441,6 +546,33 @@ List<Robot> active = await ctx.Robots
     .Where(r => r.Enabled && r.Year > 1980)
     .ToListAsync();
 ```
+
+#### Query Result Cache
+
+Opt a LINQ query into CamusDB's [query result cache](#query-result-cache) with `WithCache(name)`.
+The provider injects the `{cache=…}` hint into the generated SQL, so an identical later query is
+served from the server's in-memory cache. As with the raw client, only single-table, autocommit
+reads are cacheable — a query with a join, or one inside an explicit transaction, reads live storage.
+
+```csharp
+using CamusDB.EntityFrameworkCore;
+
+// Cache with the server's default TTL
+List<Order> recent = await ctx.Orders
+    .Where(o => o.Status == 1)
+    .OrderByDescending(o => o.Total)
+    .Take(20)
+    .WithCache("recent_orders")
+    .ToListAsync();
+
+// Per-entry TTL override and strict per-hit validation
+List<Order> hot = await ctx.Orders
+    .Where(o => o.Status == 1)
+    .WithCache("hot_orders", ttl: TimeSpan.FromSeconds(30), strict: true)
+    .ToListAsync();
+```
+
+Evict entries through the underlying `CamusConnection` (`EvictCacheAsync` / `EvictAllCacheAsync`).
 
 ### Update
 
@@ -548,9 +680,11 @@ await ctx.SaveChangesAsync();
 - No computed columns.
 - No foreign key constraints.
 - No `ALTER COLUMN` — changing a column type requires dropping and recreating the column.
+- `array(T)` columns are not mapped by the EF Core provider (arrays are not indexable and have no SQL literal). Use the ADO.NET parameter path for array values.
 - Key CLR types must be one of: `string`, `int`, `long`, `short`, or `Guid`.
 - `[ConcurrencyCheck]` is only supported on `short`, `int`, and `long` columns; `[Timestamp]` is not supported.
 - MVCC conflict detection occurs at commit time, not during `SaveChangesAsync`. Use application-level version columns with `[ConcurrencyCheck]` for optimistic concurrency.
+- `WithCache(...)` only takes effect on single-table, autocommit reads; the hint is inert on queries with a join or run inside an explicit transaction (they read live storage).
 
 ---
 

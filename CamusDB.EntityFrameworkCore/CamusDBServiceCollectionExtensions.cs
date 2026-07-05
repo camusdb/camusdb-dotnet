@@ -34,9 +34,11 @@ public static class CamusDBServiceCollectionExtensions
         builder.TryAdd<IMigrationsSqlGenerator, CamusMigrationsSqlGenerator>();
         builder.TryAdd<IHistoryRepository, CamusHistoryRepository>();
         builder.TryAdd<IExecutionStrategyFactory, CamusExecutionStrategyFactory>();
+        builder.TryAdd<IMethodCallTranslatorPlugin, CamusMethodCallTranslatorPlugin>();
         builder.TryAddCoreServices();
 
         serviceCollection.AddSingleton<IInterceptor, CamusDbCommandInterceptor>();
+        serviceCollection.AddSingleton<IInterceptor, CamusCacheCommandInterceptor>();
 
         return serviceCollection;
     }

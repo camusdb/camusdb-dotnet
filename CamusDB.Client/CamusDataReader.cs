@@ -37,10 +37,17 @@ public class CamusDataReader : DbDataReader
 
     public override object this[int ordinal] => GetValue(ordinal);
 
-    public CamusDataReader(List<Dictionary<string, ColumnValue>> rows)
+    /// <summary>
+    /// Query result cache resolution for the <c>SELECT</c> that produced this reader, or
+    /// <see langword="null"/> when the query carried no <c>{cache=…}</c> hint.
+    /// </summary>
+    public CamusCacheMetadata? CacheMetadata { get; }
+
+    public CamusDataReader(List<Dictionary<string, ColumnValue>> rows, CamusCacheMetadata? cacheMetadata = null)
     {
         this.rows = rows;
         columnNames = rows.Count > 0 ? [.. rows[0].Keys] : [];
+        CacheMetadata = cacheMetadata;
     }
 
     public CamusDataReader(int recordsAffected)

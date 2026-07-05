@@ -187,11 +187,61 @@ public sealed class CamusConnection : DbConnection
         return new CamusPingCommand("", builder, this);
     }
 
+    /// <summary>
+    /// Evicts every query result cache entry in the given family for the current database
+    /// (<c>EVICT CACHE 'name'</c>). Family names are matched case-insensitively.
+    /// </summary>
+    public async Task EvictCacheAsync(string cacheName, CancellationToken cancellationToken = default)
+    {
+        using CamusCommand command = CreateCamusCommand(CamusCacheHint.Evict(cacheName));
+        await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Evicts every query result cache entry for the current database (<c>EVICT CACHE ALL</c>).
+    /// Never touches another database's entries.
+    /// </summary>
+    public async Task EvictAllCacheAsync(CancellationToken cancellationToken = default)
+    {
+        using CamusCommand command = CreateCamusCommand(CamusCacheHint.EvictAll());
+        await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+    }
+
     public Task CreateDatabaseAsync(bool ifNotExists = false, CancellationToken cancellationToken = default)
-        => CreateDatabaseImplAsync(Database, ifNotExists, cancellationToken);
+        => CreateDatabaseWithRetryAsync(Database, ifNotExists, cancellationToken);
 
     public Task CreateDatabaseAsync(string databaseName, bool ifNotExists = false, CancellationToken cancellationToken = default)
-        => CreateDatabaseImplAsync(databaseName, ifNotExists, cancellationToken);
+        => CreateDatabaseWithRetryAsync(databaseName, ifNotExists, cancellationToken);
+
+    // Concurrent CreateDatabaseAsync calls can transiently collide while the server allocates the
+    // shared database id sequence (e.g. many environments provisioning in parallel); the server reports
+    // this as a "MustRetry" condition. Retry with the same message-based transient markers used by
+    // CamusDB.Client.Tests/BaseTest.cs for schema-creation contention.
+    private async Task CreateDatabaseWithRetryAsync(string databaseName, bool ifNotExists, CancellationToken cancellationToken)
+    {
+        const int maxAttempts = 5;
+
+        for (int attempt = 1; ; attempt++)
+        {
+            try
+            {
+                await CreateDatabaseImplAsync(databaseName, ifNotExists, cancellationToken).ConfigureAwait(false);
+                return;
+            }
+            catch (CamusException ex) when (attempt < maxAttempts && IsTransientCreateDatabaseError(ex))
+            {
+                double baseMs = Math.Min(50d * (1 << (attempt - 1)), 800d);
+                double jitter = baseMs * 0.25 * (2d * Random.Shared.NextDouble() - 1d);
+
+                await Task.Delay(TimeSpan.FromMilliseconds(Math.Max(1d, baseMs + jitter)), cancellationToken).ConfigureAwait(false);
+            }
+        }
+    }
+
+    private static bool IsTransientCreateDatabaseError(CamusException ex)
+        => ex.Message.Contains("MustRetry", StringComparison.Ordinal) ||
+           ex.Message.Contains("AlreadyLocked", StringComparison.Ordinal) ||
+           ex.Message.Contains("commit returned Aborted", StringComparison.Ordinal);
 
     private async Task CreateDatabaseImplAsync(string databaseName, bool ifNotExists, CancellationToken cancellationToken)
     {
@@ -252,6 +302,237 @@ public sealed class CamusConnection : DbConnection
 
     public Task DropDatabaseAsync(string databaseName, CancellationToken cancellationToken = default)
         => DropDatabaseImplAsync(databaseName, cancellationToken);
+
+    /// <summary>
+    /// Creates a copy-on-write branch of <paramref name="sourceDatabaseName"/> named
+    /// <paramref name="branchName"/>. Equivalent to
+    /// <c>CREATE DATABASE branchName BRANCH FROM sourceDatabaseName</c>.
+    /// </summary>
+    public Task CreateBranchDatabaseAsync(
+        string branchName,
+        string sourceDatabaseName,
+        bool ifNotExists = false,
+        CancellationToken cancellationToken = default)
+        => CreateBranchDatabaseWithRetryAsync(branchName, sourceDatabaseName, ifNotExists, cancellationToken);
+
+    private async Task CreateBranchDatabaseWithRetryAsync(
+        string branchName,
+        string sourceDatabaseName,
+        bool ifNotExists,
+        CancellationToken cancellationToken)
+    {
+        const int maxAttempts = 5;
+
+        for (int attempt = 1; ; attempt++)
+        {
+            try
+            {
+                await CreateBranchDatabaseImplAsync(branchName, sourceDatabaseName, ifNotExists, cancellationToken).ConfigureAwait(false);
+                return;
+            }
+            catch (CamusException ex) when (attempt < maxAttempts && IsTransientCreateDatabaseError(ex))
+            {
+                double baseMs = Math.Min(50d * (1 << (attempt - 1)), 800d);
+                double jitter = baseMs * 0.25 * (2d * Random.Shared.NextDouble() - 1d);
+
+                await Task.Delay(TimeSpan.FromMilliseconds(Math.Max(1d, baseMs + jitter)), cancellationToken).ConfigureAwait(false);
+            }
+        }
+    }
+
+    private async Task CreateBranchDatabaseImplAsync(
+        string branchName,
+        string sourceDatabaseName,
+        bool ifNotExists,
+        CancellationToken cancellationToken)
+    {
+        string endpoint = "";
+
+        try
+        {
+            endpoint = builder.GetEndpoint();
+
+            CamusCreateBranchDatabaseRequest request = new()
+            {
+                BranchName = branchName,
+                SourceDatabaseName = sourceDatabaseName,
+                IfNotExists = ifNotExists
+            };
+
+            string jsonRequest = JsonSerializer.Serialize(request, CamusJsonSerializerContext.Default.CamusCreateBranchDatabaseRequest);
+
+            string responseJson = await endpoint
+                                            .WithHeader("Accept", "application/json")
+                                            .WithTimeout(builder.CommandTimeout)
+                                            .AppendPathSegments("create-branch-db")
+                                            .PostAsync(CamusJsonContent.Create(jsonRequest), cancellationToken: cancellationToken)
+                                            .ReceiveString();
+
+            CamusCreateBranchDatabaseResponse? response = JsonSerializer.Deserialize(responseJson, CamusJsonSerializerContext.Default.CamusCreateBranchDatabaseResponse);
+
+            if (response?.Status != "ok")
+                throw new CamusException(response?.Code ?? "CADB0000", response?.Message ?? "Create branch database failed");
+        }
+        catch (FlurlHttpException ex)
+        {
+            CamusEndpointHealth.MarkUnreachableIfTransportFailed(builder, endpoint, ex);
+
+            string response = await ex.GetResponseStringAsync();
+
+            if (!string.IsNullOrEmpty(response))
+            {
+                try
+                {
+                    CamusErrorResponse? errorResponse = JsonSerializer.Deserialize(response, CamusJsonSerializerContext.Default.CamusErrorResponse);
+
+                    if (errorResponse is not null)
+                        throw new CamusException(errorResponse.Code ?? "CADB0000", errorResponse.Message ?? "");
+                }
+                catch (JsonException)
+                {
+                }
+
+                throw new CamusException("CADB0000", response);
+            }
+
+            throw new CamusException("CADB0000", ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// Returns every transitive descendant of <paramref name="databaseName"/>, ordered
+    /// depth-ascending then name-ascending. Equivalent to
+    /// <c>SHOW BRANCHES FROM databaseName</c>.
+    /// A leaf database (no descendants) returns an empty list.
+    /// </summary>
+    public Task<IReadOnlyList<CamusBranchRow>> ShowBranchesAsync(
+        string databaseName,
+        CancellationToken cancellationToken = default)
+        => ShowBranchesImplAsync(databaseName, cancellationToken);
+
+    private async Task<IReadOnlyList<CamusBranchRow>> ShowBranchesImplAsync(
+        string databaseName,
+        CancellationToken cancellationToken)
+    {
+        string endpoint = "";
+
+        try
+        {
+            endpoint = builder.GetEndpoint();
+
+            CamusShowBranchesRequest request = new()
+            {
+                DatabaseName = databaseName
+            };
+
+            string jsonRequest = JsonSerializer.Serialize(request, CamusJsonSerializerContext.Default.CamusShowBranchesRequest);
+
+            string responseJson = await endpoint
+                                            .WithHeader("Accept", "application/json")
+                                            .WithTimeout(builder.CommandTimeout)
+                                            .AppendPathSegments("show-branches")
+                                            .PostAsync(CamusJsonContent.Create(jsonRequest), cancellationToken: cancellationToken)
+                                            .ReceiveString();
+
+            CamusShowBranchesResponse? response = JsonSerializer.Deserialize(responseJson, CamusJsonSerializerContext.Default.CamusShowBranchesResponse);
+
+            if (response?.Status != "ok")
+                throw new CamusException(response?.Code ?? "CADB0000", response?.Message ?? "Show branches failed");
+
+            return (IReadOnlyList<CamusBranchRow>?)response.Branches ?? [];
+        }
+        catch (FlurlHttpException ex)
+        {
+            CamusEndpointHealth.MarkUnreachableIfTransportFailed(builder, endpoint, ex);
+
+            string response = await ex.GetResponseStringAsync();
+
+            if (!string.IsNullOrEmpty(response))
+            {
+                try
+                {
+                    CamusErrorResponse? errorResponse = JsonSerializer.Deserialize(response, CamusJsonSerializerContext.Default.CamusErrorResponse);
+
+                    if (errorResponse is not null)
+                        throw new CamusException(errorResponse.Code ?? "CADB0000", errorResponse.Message ?? "");
+                }
+                catch (JsonException)
+                {
+                }
+
+                throw new CamusException("CADB0000", response);
+            }
+
+            throw new CamusException("CADB0000", ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// Returns the full ancestry chain of <paramref name="databaseName"/> from nearest parent
+    /// to root. Equivalent to <c>SHOW ANCESTORS FROM databaseName</c>.
+    /// A root database (no ancestors) returns an empty list.
+    /// </summary>
+    public Task<IReadOnlyList<CamusBranchRow>> ShowAncestorsAsync(
+        string databaseName,
+        CancellationToken cancellationToken = default)
+        => ShowAncestorsImplAsync(databaseName, cancellationToken);
+
+    private async Task<IReadOnlyList<CamusBranchRow>> ShowAncestorsImplAsync(
+        string databaseName,
+        CancellationToken cancellationToken)
+    {
+        string endpoint = "";
+
+        try
+        {
+            endpoint = builder.GetEndpoint();
+
+            CamusShowAncestorsRequest request = new()
+            {
+                DatabaseName = databaseName
+            };
+
+            string jsonRequest = JsonSerializer.Serialize(request, CamusJsonSerializerContext.Default.CamusShowAncestorsRequest);
+
+            string responseJson = await endpoint
+                                            .WithHeader("Accept", "application/json")
+                                            .WithTimeout(builder.CommandTimeout)
+                                            .AppendPathSegments("show-ancestors")
+                                            .PostAsync(CamusJsonContent.Create(jsonRequest), cancellationToken: cancellationToken)
+                                            .ReceiveString();
+
+            CamusShowAncestorsResponse? response = JsonSerializer.Deserialize(responseJson, CamusJsonSerializerContext.Default.CamusShowAncestorsResponse);
+
+            if (response?.Status != "ok")
+                throw new CamusException(response?.Code ?? "CADB0000", response?.Message ?? "Show ancestors failed");
+
+            return (IReadOnlyList<CamusBranchRow>?)response.Ancestors ?? [];
+        }
+        catch (FlurlHttpException ex)
+        {
+            CamusEndpointHealth.MarkUnreachableIfTransportFailed(builder, endpoint, ex);
+
+            string response = await ex.GetResponseStringAsync();
+
+            if (!string.IsNullOrEmpty(response))
+            {
+                try
+                {
+                    CamusErrorResponse? errorResponse = JsonSerializer.Deserialize(response, CamusJsonSerializerContext.Default.CamusErrorResponse);
+
+                    if (errorResponse is not null)
+                        throw new CamusException(errorResponse.Code ?? "CADB0000", errorResponse.Message ?? "");
+                }
+                catch (JsonException)
+                {
+                }
+
+                throw new CamusException("CADB0000", response);
+            }
+
+            throw new CamusException("CADB0000", ex.Message);
+        }
+    }
 
     private async Task DropDatabaseImplAsync(string databaseName, CancellationToken cancellationToken)
     {
