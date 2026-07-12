@@ -52,6 +52,55 @@ public class TestEntityFrameworkDataTypes
         Assert.Equal(day, loaded.Day);
     }
 
+    [Fact]
+    public async Task TestSaveAndQueryUuid()
+    {
+        var options = new DbContextOptionsBuilder<UuidContext>().UseCamusDB(ConnectionString).Options;
+
+        await using var ctx = new UuidContext(options);
+        await ctx.Database.EnsureCreatedAsync();
+
+        string id = CamusDB.Core.Util.ObjectIds.CamusObjectIdGenerator.GenerateAsString();
+        Guid reference = Guid.NewGuid();
+
+        ctx.Docs.Add(new UuidDoc { Id = id, ExternalRef = reference, Name = "doc" });
+        await ctx.SaveChangesAsync();
+
+        // Fresh context + a WHERE on the UUID column to exercise both write and parameterized read.
+        await using var readCtx = new UuidContext(options);
+        var loaded = await readCtx.Docs.AsNoTracking()
+            .FirstOrDefaultAsync(d => d.ExternalRef == reference);
+
+        Assert.NotNull(loaded);
+        Assert.Equal(id, loaded!.Id);
+        Assert.Equal(reference, loaded.ExternalRef);
+        Assert.Equal("doc", loaded.Name);
+    }
+
+    private class UuidContext(DbContextOptions options) : DbContext(options)
+    {
+        public DbSet<UuidDoc> Docs => Set<UuidDoc>();
+
+        protected override void OnModelCreating(ModelBuilder modelBuilder)
+        {
+            modelBuilder.Entity<UuidDoc>(b =>
+            {
+                b.ToTable("ef_uuid_docs_v2");
+                b.HasKey(e => e.Id);
+                b.Property(e => e.Id).HasColumnType("id").ValueGeneratedOnAdd();
+                b.Property(e => e.ExternalRef).HasColumnType("uuid");
+                b.Property(e => e.Name).HasMaxLength(64);
+            });
+        }
+    }
+
+    private class UuidDoc
+    {
+        public string Id { get; set; } = "";
+        public Guid ExternalRef { get; set; }
+        public string Name { get; set; } = "";
+    }
+
     private class EventContext(DbContextOptions options) : DbContext(options)
     {
         public DbSet<Event> Events => Set<Event>();

@@ -111,6 +111,7 @@ CamusDB columns are declared with these SQL types; each maps to a `ColumnType` o
 | SQL DDL type | `ColumnType` | CLR type(s) | Notes |
 | --- | --- | --- | --- |
 | `OID` (alias `OBJECT_ID`) | `Id` | `string`, `Guid`, `CamusObjectIdValue` | Native identifier; shares string key encoding. |
+| `UUID` (alias `GUID`) | `Uuid` | `Guid` | Native 128-bit UUID; indexable, ordered by big-endian byte order. `gen_uuid_v4()` / `gen_uuid_v7()` generate values server-side. |
 | `INT64` (aliases `INT`, `INTEGER`) | `Integer64` | `long`, `int`, `short`, `byte` | 64-bit signed. |
 | `FLOAT64` | `Float64` | `double` | IEEE-754 double. |
 | `FLOAT32` (alias `REAL`) | `Float32` | `float` | Stored at single precision. |
@@ -125,6 +126,7 @@ CamusDB columns are declared with these SQL types; each maps to a `ColumnType` o
 await using CamusCommand command = connection.CreateCamusCommand("""
     CREATE TABLE events (
         id        OID PRIMARY KEY NOT NULL,
+        ref       UUID DEFAULT gen_uuid_v7(),
         name      STRING(64),
         payload   BYTES,
         score     FLOAT32,
@@ -143,6 +145,7 @@ Dates/datetimes are normalized to UTC before being sent. Arrays carry a scalar e
 await using CamusCommand insert = connection.CreateInsertCommand("events");
 
 insert.Parameters.Add("id", ColumnType.Id, CamusObjectIdGenerator.Generate());
+insert.Parameters.Add("ref", ColumnType.Uuid, Guid.NewGuid());
 insert.Parameters.Add("name", ColumnType.String, "launch");
 insert.Parameters.Add("payload", ColumnType.Bytes, new byte[] { 0xDE, 0xAD });
 insert.Parameters.Add("score", ColumnType.Float32, 9.5f);
@@ -156,6 +159,7 @@ await insert.ExecuteNonQueryAsync();
 Reading them back uses the typed `CamusDataReader` accessors:
 
 ```csharp
+Guid      reference = reader.GetGuid(reader.GetOrdinal("ref"));
 byte[]    payload  = reader.GetFieldValue<byte[]>(reader.GetOrdinal("payload"));
 float     score    = reader.GetFloat(reader.GetOrdinal("score"));
 DateTime  happened = reader.GetDateTime(reader.GetOrdinal("happened"));
@@ -487,6 +491,7 @@ public class AppDbContext : DbContext
 | --- | --- | --- |
 | `string` (ID / PK) | `id` or `oid` | `OID` |
 | `Guid` (ID / PK) | `id` or `oid` | `OID` |
+| `Guid` + `HasColumnType("uuid")` | `uuid` (alias `guid`) | `UUID` |
 | `string` | `string` | `STRING` |
 | `string` + `HasMaxLength(n)` | `string` | `STRING(n)` |
 | `bool` | `bool` | `BOOL` |
@@ -498,6 +503,12 @@ public class AppDbContext : DbContext
 | `DateTime`, `DateTimeOffset` | `datetime` (alias `timestamp`) | `DATETIME` |
 
 Use `HasColumnType("id")` (or the alias `"oid"`) for primary key columns backed by CamusDB ObjectIds. The provider sends the value as an OID on the wire regardless of whether the CLR property is `string` or `Guid`.
+
+A plain `Guid` property defaults to the `id`/OID store type for backward compatibility. To store it as CamusDB's native `UUID` column instead — indexable and ordered by big-endian byte order — declare it explicitly with `HasColumnType("uuid")`:
+
+```csharp
+b.Property(e => e.ExternalRef).HasColumnType("uuid");
+```
 
 Dates and datetimes are stored as UTC ticks; the provider normalizes `DateTime` values to UTC before sending and reconstructs them as `DateTimeKind.Utc`. `byte[]` is exchanged as base64 over the JSON wire (SQL literals use `0x`-hex). A `string` property maps to `float32`/`bytes`/`date`/`datetime` etc. either by its CLR type or by an explicit `HasColumnType(...)`. Arrays (`array(T)`) are not indexable and have no inline SQL literal — they are written through the ADO.NET parameter path (see below); the EF Core provider does not map array columns.
 

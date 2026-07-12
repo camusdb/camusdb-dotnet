@@ -24,4 +24,5 @@ public enum ColumnType
     Date = 8,
     DateTime = 9,
     Array = 10,
+    Uuid = 11,
 }

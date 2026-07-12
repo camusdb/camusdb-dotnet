@@ -261,6 +261,7 @@ public class CamusMigrationsSqlGenerator : MigrationsSqlGenerator
         return storeType switch
         {
             "ID" or "OID"          => "OID",
+            "UUID" or "GUID"       => "UUID",
             "STRING"               => StringDdl(col),
             "BOOL"                 => "BOOL",
             "INT64"                => "INT64",

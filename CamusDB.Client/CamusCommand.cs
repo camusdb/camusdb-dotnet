@@ -195,6 +195,14 @@ public class CamusCommand : DbCommand, ICloneable
             case ColumnType.Id when value is CamusObjectIdValue:
                 return new() { Type = columnType, StrValue = value.ToString() };
 
+            // The server accepts a UUID parameter as its canonical string form and re-splits it into
+            // the big-endian halves on its side (see ColumnValue's JsonConstructor).
+            case ColumnType.Uuid when value is Guid gu:
+                return new() { Type = columnType, StrValue = gu.ToString() };
+
+            case ColumnType.Uuid when value is string us:
+                return new() { Type = columnType, StrValue = us };
+
             case ColumnType.Integer64 when value is IConvertible ci:
                 return new() { Type = columnType, LongValue = ci.ToInt64(CultureInfo.InvariantCulture) };
 
@@ -295,7 +303,8 @@ public class CamusCommand : DbCommand, ICloneable
         _ when type == typeof(double) || type == typeof(decimal) => ColumnType.Float64,
         _ when type == typeof(DateTime) || type == typeof(DateTimeOffset) => ColumnType.DateTime,
         _ when type == typeof(DateOnly) => ColumnType.Date,
-        _ when type == typeof(Guid) || type == typeof(CamusObjectIdValue) => ColumnType.Id,
+        _ when type == typeof(Guid) => ColumnType.Uuid,
+        _ when type == typeof(CamusObjectIdValue) => ColumnType.Id,
         _ when type == typeof(byte[]) => ColumnType.Bytes,
         _ => ColumnType.Null
     };

@@ -134,6 +134,7 @@ public class CamusDatabaseCreator : RelationalDatabaseCreator
         return storeType switch
         {
             "ID" or "OID"             => "OID",
+            "UUID" or "GUID"          => "UUID",
             "STRING"                  => StringDdl(property),
             "BOOL"                    => "BOOL",
             "INT64"                   => "INT64",

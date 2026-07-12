@@ -6,6 +6,7 @@
  * file that was distributed with this source code.
  */
 
+using System.Buffers.Binary;
 using System.Text.Json.Serialization;
 
 namespace CamusDB.Client;
@@ -21,6 +22,10 @@ namespace CamusDB.Client;
 ///   <item><see cref="ColumnType.Date"/> / <see cref="ColumnType.DateTime"/> — <see cref="LongValue"/> as UTC <see cref="System.DateTime.Ticks"/> (Date truncated to midnight).</item>
 ///   <item><see cref="ColumnType.Bytes"/> — <see cref="BytesValue"/> (JSON base64).</item>
 ///   <item><see cref="ColumnType.Array"/> — <see cref="ArrayValues"/> + <see cref="ArrayElementType"/>.</item>
+///   <item><see cref="ColumnType.Uuid"/> — the 128-bit value split into two big-endian 64-bit halves:
+///     the high bits in <see cref="UuidHigh"/> and the low bits in <see cref="LongValue"/>. The server
+///     also emits the canonical string form in <see cref="UuidValue"/> for readability. Use
+///     <see cref="AsGuid"/> to reconstruct the <see cref="System.Guid"/>.</item>
 /// </list>
 /// </summary>
 public sealed class ColumnValue
@@ -59,4 +64,35 @@ public sealed class ColumnValue
     /// </summary>
     [JsonPropertyName("isoValue")]
     public string? IsoValue { get; set; }
+
+    /// <summary>
+    /// High 64 bits (big-endian RFC 4122 bytes 0..7) of a <see cref="ColumnType.Uuid"/> value; the low
+    /// 64 bits live in <see cref="LongValue"/>. Zero for all other types.
+    /// </summary>
+    [JsonPropertyName("uuidHigh")]
+    public long UuidHigh { get; set; }
+
+    /// <summary>
+    /// Canonical lowercase hyphenated string form of a <see cref="ColumnType.Uuid"/> value the server
+    /// includes in responses for readability (e.g. <c>"550e8400-e29b-41d4-a716-446655440000"</c>). The
+    /// authoritative value is the <see cref="UuidHigh"/>/<see cref="LongValue"/> pair; the server ignores
+    /// this field on input (a UUID parameter is sent via <see cref="StrValue"/>).
+    /// </summary>
+    [JsonPropertyName("uuidValue")]
+    public string? UuidValue { get; set; }
+
+    /// <summary>
+    /// Reconstructs the <see cref="System.Guid"/> for a <see cref="ColumnType.Uuid"/> value. Prefers the
+    /// raw big-endian halves and falls back to parsing <see cref="UuidValue"/> when they are absent.
+    /// </summary>
+    public Guid AsGuid()
+    {
+        if (UuidHigh == 0 && LongValue == 0 && !string.IsNullOrEmpty(UuidValue))
+            return Guid.Parse(UuidValue);
+
+        Span<byte> bytes = stackalloc byte[16];
+        BinaryPrimitives.WriteUInt64BigEndian(bytes[..8], (ulong)UuidHigh);
+        BinaryPrimitives.WriteUInt64BigEndian(bytes[8..], (ulong)LongValue);
+        return new Guid(bytes, bigEndian: true);
+    }
 }

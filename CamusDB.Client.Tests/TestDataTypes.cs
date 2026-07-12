@@ -27,6 +27,7 @@ public class TestDataTypes : BaseTest
                 string sql =
                     $"CREATE TABLE {tableName} (" +
                     " id OID PRIMARY KEY NOT NULL," +
+                    " ref UUID," +
                     " name STRING(64)," +
                     " payload BYTES," +
                     " score FLOAT32," +
@@ -101,6 +102,66 @@ public class TestDataTypes : BaseTest
 
         object?[] tags = (object?[])reader.GetValue(reader.GetOrdinal("tags"));
         Assert.Equal(new object?[] { 1L, 2L, 3L }, tags);
+    }
+
+    [Fact]
+    public async Task TestRoundTripUuid()
+    {
+        CamusConnection connection = await GetConnection();
+        string tableName = await CreateTypesTableAsync(connection);
+
+        string id = CamusObjectIdGenerator.GenerateAsString();
+        Guid reference = Guid.NewGuid();
+
+        await using (CamusCommand insert = connection.CreateInsertCommand(tableName))
+        {
+            insert.Parameters.Add("id", ColumnType.Id, id);
+            insert.Parameters.Add("ref", ColumnType.Uuid, reference);
+            insert.Parameters.Add("name", ColumnType.String, "uuid");
+
+            Assert.Equal(1, await insert.ExecuteNonQueryAsync());
+        }
+
+        // Read back through GetGuid, the typed materializer, and filter by the UUID value.
+        await using CamusCommand select = connection.CreateCamusCommand(
+            $"SELECT id, ref FROM {tableName} WHERE ref = @ref");
+        select.Parameters.Add("@ref", ColumnType.Uuid, reference);
+
+        await using CamusDataReader reader = await select.ExecuteReaderAsync();
+        Assert.True(await reader.ReadAsync(default));
+
+        int refOrdinal = reader.GetOrdinal("ref");
+        Assert.Equal(ColumnType.Uuid, reader.GetColumnValue(refOrdinal).Type);
+        Assert.Equal(reference, reader.GetGuid(refOrdinal));
+        Assert.Equal(reference, reader.GetFieldValue<Guid>(refOrdinal));
+        Assert.Equal(reference.ToString("D"), reader.GetString(refOrdinal));
+    }
+
+    [Fact]
+    public async Task TestNullableUuid()
+    {
+        CamusConnection connection = await GetConnection();
+        string tableName = await CreateTypesTableAsync(connection);
+
+        string id = CamusObjectIdGenerator.GenerateAsString();
+
+        await using (CamusCommand insert = connection.CreateInsertCommand(tableName))
+        {
+            insert.Parameters.Add("id", ColumnType.Id, id);
+            insert.Parameters.Add("ref", ColumnType.Null, null);
+            insert.Parameters.Add("name", ColumnType.String, "n");
+
+            Assert.Equal(1, await insert.ExecuteNonQueryAsync());
+        }
+
+        await using CamusCommand select = connection.CreateCamusCommand(
+            $"SELECT ref FROM {tableName} WHERE id = @id");
+        select.Parameters.Add("@id", ColumnType.Id, id);
+
+        await using CamusDataReader reader = await select.ExecuteReaderAsync();
+        Assert.True(await reader.ReadAsync(default));
+
+        Assert.True(reader.IsDBNull(reader.GetOrdinal("ref")));
     }
 
     [Fact]

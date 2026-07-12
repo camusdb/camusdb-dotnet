@@ -158,6 +158,7 @@ public sealed class CamusParameter : DbParameter, ICloneable
         ColumnType.Date => DbType.Date,
         ColumnType.DateTime => DbType.DateTime,
         ColumnType.Array => DbType.Object,
+        ColumnType.Uuid => DbType.Guid,
         ColumnType.Null => DbType.Object,
         ColumnType.String => DbType.String,
         _ => DbType.String

@@ -104,6 +104,7 @@ public class CamusDataReader : DbDataReader
         ColumnType.Date => typeof(DateTime),
         ColumnType.DateTime => typeof(DateTime),
         ColumnType.Array => typeof(object[]),
+        ColumnType.Uuid => typeof(Guid),
         ColumnType.Null => typeof(DBNull),
         ColumnType.String => typeof(string),
         _ => typeof(object)
@@ -122,6 +123,7 @@ public class CamusDataReader : DbDataReader
         ColumnType.Date => new DateTime(value.LongValue, DateTimeKind.Utc),
         ColumnType.DateTime => new DateTime(value.LongValue, DateTimeKind.Utc),
         ColumnType.Array => ConvertArray(value),
+        ColumnType.Uuid => value.AsGuid(),
         ColumnType.Null => DBNull.Value,
         ColumnType.String => value.StrValue ?? "",
         _ => DBNull.Value
@@ -264,8 +266,12 @@ public class CamusDataReader : DbDataReader
 
     public override Guid GetGuid(int ordinal)
     {
-        string value = GetString(ordinal);
-        return Guid.Parse(value);
+        ColumnValue column = GetColumnValue(ordinal);
+
+        if (column.Type == ColumnType.Uuid)
+            return column.AsGuid();
+
+        return Guid.Parse(GetString(ordinal));
     }
 
     public override short GetInt16(int ordinal)
@@ -308,6 +314,7 @@ public class CamusDataReader : DbDataReader
         {
             ColumnType.Id => value.StrValue ?? "",
             ColumnType.String => value.StrValue ?? "",
+            ColumnType.Uuid => value.UuidValue ?? value.AsGuid().ToString("D"),
             _ => Convert.ToString(GetValue(ordinal), CultureInfo.InvariantCulture) ?? ""
         };
     }
