@@ -533,6 +533,7 @@ b.ToTable("robots", t => t.HasCheckConstraint("ck_robots_price", "price >= 0"));
 | `byte[]` | `bytes` (alias `blob`) | `BYTES` |
 | `DateOnly` | `date` | `DATE` |
 | `DateTime`, `DateTimeOffset` | `datetime` (alias `timestamp`) | `DATETIME` |
+| `long[]`, `string[]`, `double[]`, `bool[]` | `array(int64/string/float64/bool)` | `ARRAY(T)` |
 
 Use `HasColumnType("id")` (or the alias `"oid"`) for primary key columns backed by CamusDB ObjectIds. The provider sends the value as an OID on the wire regardless of whether the CLR property is `string` or `Guid`.
 
@@ -542,7 +543,15 @@ A plain `Guid` property defaults to the `id`/OID store type for backward compati
 b.Property(e => e.ExternalRef).HasColumnType("uuid");
 ```
 
-Dates and datetimes are stored as UTC ticks; the provider normalizes `DateTime` values to UTC before sending and reconstructs them as `DateTimeKind.Utc`. `byte[]` is exchanged as base64 over the JSON wire (SQL literals use `0x`-hex). A `string` property maps to `float32`/`bytes`/`date`/`datetime` etc. either by its CLR type or by an explicit `HasColumnType(...)`. Arrays (`array(T)`) are not indexable and have no inline SQL literal — they are written through the ADO.NET parameter path (see below); the EF Core provider does not map array columns.
+Dates and datetimes are stored as UTC ticks; the provider normalizes `DateTime` values to UTC before sending and reconstructs them as `DateTimeKind.Utc`. `byte[]` is exchanged as base64 over the JSON wire (SQL literals use `0x`-hex). A `string` property maps to `float32`/`bytes`/`date`/`datetime` etc. either by its CLR type or by an explicit `HasColumnType(...)`.
+
+`long[]`, `string[]`, `double[]`, and `bool[]` properties map to CamusDB native `ARRAY(T)` columns (not EF's JSON "primitive collection" — the provider registers a direct mapping that stores a real array). No `HasColumnType` is required; declare the property as usual:
+
+```csharp
+b.Property(e => e.Tags);   // long[]  → ARRAY(INT64)
+```
+
+Arrays are not indexable and have no inline SQL literal, so an array value can only travel as a bound parameter — it cannot appear in a `Where(...)` predicate, as a default value, or in migration seed data.
 
 ### Database and Table Lifecycle
 
@@ -589,6 +598,30 @@ List<Robot> active = await ctx.Robots
     .Where(r => r.Enabled && r.Year > 1980)
     .ToListAsync();
 ```
+
+The provider translates a broad set of LINQ shapes to server-side SQL: `Where`, `OrderBy`/`ThenBy`,
+`Skip`/`Take`, `Distinct`, scalar aggregates (`Count`, `Sum`, `Average`, `Min`, `Max`, `Any`),
+`GroupBy` + aggregate, inner `join`s, and correlated subqueries (`Where(x => x.Items.Any(...))`).
+
+The following `string` members translate to CamusDB's native scalar/predicate functions and run on
+the server (rather than forcing client-side evaluation):
+
+| LINQ | CamusDB function |
+| --- | --- |
+| `s.StartsWith(x)` / `s.EndsWith(x)` / `s.Contains(x)` | `starts_with` / `ends_with` / `contains` |
+| `s.StartsWith(x, StringComparison.OrdinalIgnoreCase)` (and the `…IgnoreCase` variants) | wrapped in `lower(...)` |
+| `s.ToUpper()` / `s.ToLower()` | `upper` / `lower` |
+| `s.Trim()` / `s.TrimStart()` / `s.TrimEnd()` | `trim` / `ltrim` / `rtrim` |
+| `s.Replace(a, b)` | `replace` |
+| `s.Length` | `length` |
+
+The `starts_with` / `ends_with` / `contains` predicates take the search term as a plain argument, so
+they work with a column or parameter (not just a literal) and need no `LIKE` wildcard escaping.
+
+> **Not translatable (server limitations):** `Include`/collection navigations and left/optional joins
+> — CamusDB supports only `INNER JOIN` (no `LEFT`/`OUTER JOIN`) — and set operators (`Union`/`Concat`)
+> — CamusDB has no `UNION`. These raise a translation or SQL error; project the shape with an explicit
+> inner `join` or issue separate queries instead.
 
 #### Query Result Cache
 
@@ -713,7 +746,29 @@ public partial class AddStockColumn : Migration
 
 ### Concurrency Tokens
 
-`[ConcurrencyCheck]` is supported on numeric columns (`short`, `int`, `long`). The application is responsible for incrementing the version column before calling `SaveChanges()` — CamusDB has no server-side auto-increment version type:
+The provider supports EF Core optimistic concurrency. When a tracked entity has a concurrency token,
+its previously-loaded value is added to the UPDATE's `WHERE` clause; a stale write matches zero rows
+on the server and the provider raises `DbUpdateConcurrencyException`.
+
+**`[Timestamp]` / `IsRowVersion()`** — a `byte[]` row version. CamusDB has no server-side auto-version,
+so the provider generates a fresh, strictly-increasing token on every insert and update and sends it
+(stored as a `BYTES` column). No manual bookkeeping is required:
+
+```csharp
+public class Doc
+{
+    public string Id      { get; set; } = "";
+    public string Body    { get; set; } = "";
+    [Timestamp]
+    public byte[] Version { get; set; } = [];   // provider-managed row version
+}
+
+doc.Body = "edited";
+await ctx.SaveChangesAsync();                    // throws DbUpdateConcurrencyException if stale
+```
+
+**`[ConcurrencyCheck]`** on a numeric column (`short`, `int`, `long`) — the application increments the
+version before `SaveChanges()`:
 
 ```csharp
 public class Order
@@ -724,26 +779,29 @@ public class Order
     public long Version   { get; set; }
 }
 
-// On update: increment Version manually so EF adds AND Version = @original_version to the WHERE
 order.Status = "shipped";
-order.Version++;
-await ctx.SaveChangesAsync();
+order.Version++;                                 // manual bump
+await ctx.SaveChangesAsync();                    // throws DbUpdateConcurrencyException if stale
 ```
 
-`[Timestamp]` (byte array row version) is not supported.
-
-> **Note on MVCC concurrency:** CamusDB uses multi-version concurrency control (MVCC). Write-write conflicts between transactions are detected at **commit time**, not during the write phase. This means `SaveChangesAsync` will succeed even when two open transactions have both updated the same row — the conflict surfaces when the second transaction calls `CommitTransactionAsync`. Application-level optimistic concurrency via `[ConcurrencyCheck]` (above) is the recommended pattern for detecting stale updates.
+> **Note on MVCC vs. optimistic concurrency:** the `WHERE`-clause check above is evaluated at write
+> time, so a stale `SaveChangesAsync` fails immediately with `DbUpdateConcurrencyException`. This is
+> distinct from CamusDB's MVCC write-write conflict detection between two *open explicit transactions*,
+> which surfaces at **commit time** (`CommitTransactionAsync`). Use a concurrency token for
+> application-level stale-update detection.
 
 ### Provider Limitations
 
 - No computed columns.
 - No foreign key constraints.
+- No `LEFT`/`OUTER JOIN` — CamusDB supports only `INNER JOIN`. `Include`/collection navigations and optional-reference joins do not translate; use an explicit inner `join` projection.
+- No `UNION`/`UNION ALL` — LINQ `Union`/`Concat` do not translate; issue separate queries.
 - `ALTER COLUMN` only supports toggling nullability (`SET`/`DROP NOT NULL`); changing a column's stored type requires dropping and recreating the column.
 - `CHECK` conditions must be deterministic single-row predicates — no subqueries, aggregates, or volatile functions (`now()`, `gen_uuid_v4/v7()`, …); a violated check surfaces as a `CamusException` with code `CADB0303` (wrapped in `DbUpdateException` under EF Core), and a NULL operand makes the predicate pass (SQL three-valued logic).
-- `array(T)` columns are not mapped by the EF Core provider (arrays are not indexable and have no SQL literal). Use the ADO.NET parameter path for array values.
+- `array(T)` columns map for `long[]`, `string[]`, `double[]`, and `bool[]`. They are not indexable and have no SQL literal, so an array can only be written/read as a whole value — it cannot appear in a `Where` predicate or as a default/seed value.
+- No `decimal`/exact-numeric store type — use `double` (`float64`), accepting binary floating-point rounding.
 - Key CLR types must be one of: `string`, `int`, `long`, `short`, or `Guid`.
-- `[ConcurrencyCheck]` is only supported on `short`, `int`, and `long` columns; `[Timestamp]` is not supported.
-- MVCC conflict detection occurs at commit time, not during `SaveChangesAsync`. Use application-level version columns with `[ConcurrencyCheck]` for optimistic concurrency.
+- `[ConcurrencyCheck]` is supported on `short`/`int`/`long`; `[Timestamp]`/`IsRowVersion()` is supported on `byte[]` (provider-managed). A stale write raises `DbUpdateConcurrencyException`.
 - `WithCache(...)` only takes effect on single-table, autocommit reads; the hint is inert on queries with a join or run inside an explicit transaction (they read live storage).
 
 ---

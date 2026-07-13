@@ -247,6 +247,30 @@ public class CamusDataReader : DbDataReader
         if (target == typeof(byte[]))
             return (T)(object)(GetColumnValue(ordinal).BytesValue ?? Array.Empty<byte>());
 
+        // Typed arrays (long[], string[], double[], bool[], ...) from a native ARRAY column: the raw
+        // value is an object?[]; project it into the requested element type.
+        if (target.IsArray && GetColumnValue(ordinal).Type == ColumnType.Array)
+        {
+            Type elementType = target.GetElementType()!;
+            object?[] source = ConvertArray(GetColumnValue(ordinal));
+            Array typed = Array.CreateInstance(elementType, source.Length);
+
+            for (int i = 0; i < source.Length; i++)
+            {
+                object? element = source[i];
+                if (element is null)
+                    typed.SetValue(null, i);
+                else
+                    typed.SetValue(
+                        elementType.IsInstanceOfType(element)
+                            ? element
+                            : Convert.ChangeType(element, elementType, CultureInfo.InvariantCulture),
+                        i);
+            }
+
+            return (T)(object)typed;
+        }
+
         if (target == typeof(float))
             return (T)(object)GetFloat(ordinal);
 

@@ -140,6 +140,10 @@ public class CamusDatabaseCreator : RelationalDatabaseCreator
         var storeType = (property.GetColumnType() ?? "").ToUpperInvariant();
         var clrType = Nullable.GetUnderlyingType(property.ClrType) ?? property.ClrType;
 
+        // Native ARRAY(T) columns arrive as "array(int64)" etc.; render as "ARRAY(INT64)".
+        if (storeType.StartsWith("ARRAY(", StringComparison.Ordinal))
+            return storeType;
+
         return storeType switch
         {
             "ID" or "OID"             => "OID",

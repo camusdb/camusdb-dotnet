@@ -35,10 +35,12 @@ public static class CamusDBServiceCollectionExtensions
         builder.TryAdd<IHistoryRepository, CamusHistoryRepository>();
         builder.TryAdd<IExecutionStrategyFactory, CamusExecutionStrategyFactory>();
         builder.TryAdd<IMethodCallTranslatorPlugin, CamusMethodCallTranslatorPlugin>();
+        builder.TryAdd<IMemberTranslatorPlugin, CamusMemberTranslatorPlugin>();
         builder.TryAddCoreServices();
 
         serviceCollection.AddSingleton<IInterceptor, CamusDbCommandInterceptor>();
         serviceCollection.AddSingleton<IInterceptor, CamusCacheCommandInterceptor>();
+        serviceCollection.AddSingleton<IInterceptor, CamusRowVersionInterceptor>();
 
         return serviceCollection;
     }

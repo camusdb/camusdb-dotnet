@@ -1,6 +1,7 @@
 using System.Data;
 using System.Data.Common;
 using CamusDB.Client;
+using Microsoft.EntityFrameworkCore.ChangeTracking;
 using Microsoft.EntityFrameworkCore.Storage;
 
 namespace CamusDB.EntityFrameworkCore;
@@ -55,6 +56,38 @@ public sealed class CamusTypeMappingSource : RelationalTypeMappingSource
     // Native CamusDB UUID column (opt-in via HasColumnType("uuid")).
     private static readonly CamusUuidTypeMapping UuidMapping = new();
 
+    // Native CamusDB ARRAY(T) columns. Each maps a CLR array type to a scalar element wire type.
+    private static ValueComparer<T[]> ArrayComparer<T>() => new(
+        (a, b) => (a == null && b == null) || (a != null && b != null && a.SequenceEqual(b)),
+        a => a == null ? 0 : a.Aggregate(0, (h, v) => HashCode.Combine(h, v == null ? 0 : v.GetHashCode())),
+        a => a == null ? null! : a.ToArray());
+
+    private static readonly CamusArrayTypeMapping Int64ArrayMapping =
+        CamusArrayTypeMapping.Create(typeof(long[]), "array(int64)", ColumnType.Integer64, ArrayComparer<long>());
+    private static readonly CamusArrayTypeMapping StringArrayMapping =
+        CamusArrayTypeMapping.Create(typeof(string[]), "array(string)", ColumnType.String, ArrayComparer<string>());
+    private static readonly CamusArrayTypeMapping Float64ArrayMapping =
+        CamusArrayTypeMapping.Create(typeof(double[]), "array(float64)", ColumnType.Float64, ArrayComparer<double>());
+    private static readonly CamusArrayTypeMapping BoolArrayMapping =
+        CamusArrayTypeMapping.Create(typeof(bool[]), "array(bool)", ColumnType.Bool, ArrayComparer<bool>());
+
+    private static readonly Dictionary<Type, RelationalTypeMapping> ArrayClrMappings = new()
+    {
+        { typeof(long[]), Int64ArrayMapping },
+        { typeof(string[]), StringArrayMapping },
+        { typeof(double[]), Float64ArrayMapping },
+        { typeof(bool[]), BoolArrayMapping },
+    };
+
+    private static readonly Dictionary<string, RelationalTypeMapping> ArrayStoreMappings
+        = new(StringComparer.OrdinalIgnoreCase)
+    {
+        { "array(int64)", Int64ArrayMapping },
+        { "array(string)", StringArrayMapping },
+        { "array(float64)", Float64ArrayMapping },
+        { "array(bool)", BoolArrayMapping },
+    };
+
     private static readonly Dictionary<Type, RelationalTypeMapping> ClrTypeMappings = new()
     {
         { typeof(string), StringMapping },
@@ -99,6 +132,15 @@ public sealed class CamusTypeMappingSource : RelationalTypeMappingSource
     {
         var storeTypeName = mappingInfo.StoreTypeName;
         var clrType = mappingInfo.ClrType;
+
+        // Native CamusDB ARRAY(T) columns: match by explicit store type first, then by CLR array type.
+        // Resolving a direct mapping here (rather than leaving arrays to EF's primitive-collection
+        // convention) is what routes them to a real ARRAY column instead of a JSON string.
+        if (storeTypeName is not null && ArrayStoreMappings.TryGetValue(storeTypeName, out var arrayByStore))
+            return arrayByStore;
+
+        if (storeTypeName is null && clrType is not null && ArrayClrMappings.TryGetValue(clrType, out var arrayByClr))
+            return arrayByClr;
 
         // "id"/"oid" store type: pick string or Guid mapping based on the CLR property type.
         // Without this check, a string-typed primary key with HasColumnType("id") would receive

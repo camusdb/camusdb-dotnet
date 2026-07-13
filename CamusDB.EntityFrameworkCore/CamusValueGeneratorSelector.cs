@@ -26,6 +26,10 @@ public class CamusValueGeneratorSelector : RelationalValueGeneratorSelector
             }
         }
 
+        // Note: byte[] row-version tokens ([Timestamp] / IsRowVersion()) are stamped by
+        // CamusRowVersionInterceptor on add and update, not by a value generator (client value
+        // generators only run on add, so they can't bump the token on update).
+
         return base.TrySelect(property, typeBase, out valueGenerator);
     }
 }

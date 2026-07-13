@@ -294,6 +294,11 @@ public class CamusMigrationsSqlGenerator : MigrationsSqlGenerator
     private static string GetDdlType(ColumnOperation col)
     {
         var storeType = (col.ColumnType ?? "").ToUpperInvariant();
+
+        // Native ARRAY(T) columns arrive as "array(int64)" etc.; render as "ARRAY(INT64)".
+        if (storeType.StartsWith("ARRAY(", StringComparison.Ordinal))
+            return storeType;
+
         return storeType switch
         {
             "ID" or "OID"          => "OID",

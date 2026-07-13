@@ -46,11 +46,25 @@ public class CamusModelValidator : RelationalModelValidator
                     continue;
 
                 var clrType = Nullable.GetUnderlyingType(property.ClrType) ?? property.ClrType;
+
+                // [Timestamp] / IsRowVersion(): a byte[] token that the provider generates client-side
+                // on add and update (see CamusRowVersionValueGenerator). Allowed as a rowversion only.
+                if (clrType == typeof(byte[]))
+                {
+                    if (property.ValueGenerated == ValueGenerated.OnAddOrUpdate)
+                        continue;
+
+                    throw new NotSupportedException(
+                        $"CamusDB supports a byte[] concurrency token only as a row version " +
+                        $"([Timestamp] / IsRowVersion()). Property '{entityType.DisplayName()}.{property.Name}' " +
+                        $"is a byte[] concurrency token that is not a row version.");
+                }
+
                 if (!SupportedConcurrencyTokenClrTypes.Contains(clrType))
                     throw new NotSupportedException(
-                        $"CamusDB only supports [ConcurrencyCheck] on numeric columns (short, int, long). " +
-                        $"Property '{entityType.DisplayName()}.{property.Name}' uses unsupported CLR type '{clrType.Name}'. " +
-                        $"Note: [Timestamp] (byte[]) is not supported.");
+                        $"CamusDB supports [ConcurrencyCheck] on numeric columns (short, int, long) and " +
+                        $"[Timestamp]/IsRowVersion() on byte[]. " +
+                        $"Property '{entityType.DisplayName()}.{property.Name}' uses unsupported CLR type '{clrType.Name}'.");
             }
         }
     }
