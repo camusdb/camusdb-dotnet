@@ -104,6 +104,30 @@ await using CamusCommand command = connection.CreateCamusCommand("""
 bool created = await command.ExecuteDDLAsync();
 ```
 
+CamusDB supports `CHECK` and named `NOT NULL` constraints, addable and droppable via `ALTER TABLE`.
+A `CHECK` is a deterministic single-row predicate evaluated on every insert and update; a row is
+rejected only when the predicate is `FALSE` (a `NULL` operand yields `UNKNOWN`, which passes). A
+violation throws a `CamusException` with code `CADB0303`; a named `NOT NULL` violation throws
+`CADB0301`. Both kinds are dropped by name with `DROP CONSTRAINT`:
+
+```csharp
+await connection.CreateCamusCommand("""
+    CREATE TABLE products (
+        id       OID PRIMARY KEY NOT NULL,
+        name     STRING CONSTRAINT products_name_required NOT NULL,
+        price    INT64 CHECK (price > 0),
+        discount INT64,
+        CONSTRAINT valid_discount CHECK (price >= discount)
+    )
+    """).ExecuteDDLAsync();
+
+// Add / drop after the fact (ADD CHECK scans existing rows and rejects if any violate it)
+await connection.CreateCamusCommand(
+    "ALTER TABLE products ADD CONSTRAINT positive_price CHECK (price > 0)").ExecuteDDLAsync();
+await connection.CreateCamusCommand(
+    "ALTER TABLE products DROP CONSTRAINT positive_price").ExecuteDDLAsync();
+```
+
 #### Data Types
 
 CamusDB columns are declared with these SQL types; each maps to a `ColumnType` on the wire and a CLR type the reader/parameters understand:
@@ -485,6 +509,14 @@ public class AppDbContext : DbContext
 }
 ```
 
+Add a `CHECK` constraint with `ToTable(t => t.HasCheckConstraint(...))`. It is enforced server-side on
+every insert and update, and rejected rows surface as a `DbUpdateException` whose inner `CamusException`
+carries code `CADB0303`:
+
+```csharp
+b.ToTable("robots", t => t.HasCheckConstraint("ck_robots_price", "price >= 0"));
+```
+
 ### CamusDB Type Mapping
 
 | CLR type | CamusDB store type | DDL type |
@@ -621,11 +653,21 @@ The provider supports EF Core migrations for the following DDL operations:
 | Add column | `ALTER TABLE t ADD COLUMN col TYPE [NOT NULL] [DEFAULT (value)]` |
 | Drop column | `ALTER TABLE t DROP COLUMN col` |
 | Rename column | `ALTER TABLE t RENAME COLUMN old TO new` |
+| Alter column nullability | `ALTER TABLE t ALTER COLUMN col SET NOT NULL` / `DROP NOT NULL` |
+| Add check constraint | `ALTER TABLE t ADD CONSTRAINT name CHECK (expr)` |
+| Drop check constraint | `ALTER TABLE t DROP CONSTRAINT name` |
 | Create index | `CREATE INDEX name ON t (col1, col2)` |
 | Create unique index | `CREATE UNIQUE INDEX name ON t (col1, col2)` |
 | Drop index | `ALTER TABLE t DROP INDEX name` |
 | Rename index | `ALTER TABLE t RENAME INDEX old TO new` |
 | Raw SQL | passed through as-is |
+
+A `CHECK` constraint declared with `ToTable(t => t.HasCheckConstraint(...))` is emitted as a
+table-level `CONSTRAINT name CHECK (expr)` inside `CREATE TABLE` (both via migrations and
+`EnsureCreated`), and can be added or dropped later with `migrationBuilder.AddCheckConstraint` /
+`DropCheckConstraint`. Changing a property's nullability (with the column type unchanged) maps to
+CamusDB's `ALTER COLUMN … SET/DROP NOT NULL`; `DropCheckConstraint` also drops a named `NOT NULL`
+constraint by name, since CamusDB resolves `DROP CONSTRAINT` against both.
 
 The provider ships design-time services so the EF tooling can discover the provider automatically. No extra flags are needed:
 
@@ -653,10 +695,16 @@ public partial class AddStockColumn : Migration
             table: "products",
             column: "Name",
             unique: true);
+
+        migrationBuilder.AddCheckConstraint(
+            name: "ck_products_stock",
+            table: "products",
+            sql: "Stock >= 0");
     }
 
     protected override void Down(MigrationBuilder migrationBuilder)
     {
+        migrationBuilder.DropCheckConstraint(name: "ck_products_stock", table: "products");
         migrationBuilder.DropIndex(name: "idx_products_name", table: "products");
         migrationBuilder.DropColumn(name: "Stock", table: "products");
     }
@@ -690,7 +738,8 @@ await ctx.SaveChangesAsync();
 
 - No computed columns.
 - No foreign key constraints.
-- No `ALTER COLUMN` — changing a column type requires dropping and recreating the column.
+- `ALTER COLUMN` only supports toggling nullability (`SET`/`DROP NOT NULL`); changing a column's stored type requires dropping and recreating the column.
+- `CHECK` conditions must be deterministic single-row predicates — no subqueries, aggregates, or volatile functions (`now()`, `gen_uuid_v4/v7()`, …); a violated check surfaces as a `CamusException` with code `CADB0303` (wrapped in `DbUpdateException` under EF Core), and a NULL operand makes the predicate pass (SQL three-valued logic).
 - `array(T)` columns are not mapped by the EF Core provider (arrays are not indexable and have no SQL literal). Use the ADO.NET parameter path for array values.
 - Key CLR types must be one of: `string`, `int`, `long`, `short`, or `Guid`.
 - `[ConcurrencyCheck]` is only supported on `short`, `int`, and `long` columns; `[Timestamp]` is not supported.

@@ -77,6 +77,58 @@ public class TestEntityFrameworkDataTypes
         Assert.Equal("doc", loaded.Name);
     }
 
+    [Fact]
+    public async Task TestCheckConstraintEnforcedOnSave()
+    {
+        var options = new DbContextOptionsBuilder<CheckContext>().UseCamusDB(ConnectionString).Options;
+
+        await using var ctx = new CheckContext(options);
+        await ctx.Database.EnsureCreatedAsync();
+
+        // A valid row (price > 0) is accepted.
+        string okId = CamusDB.Core.Util.ObjectIds.CamusObjectIdGenerator.GenerateAsString();
+        ctx.Products.Add(new CheckProduct { Id = okId, Name = "ok", Price = 10 });
+        await ctx.SaveChangesAsync();
+
+        // A row that violates the check (price <= 0) is rejected with CADB0303.
+        await using var badCtx = new CheckContext(options);
+        badCtx.Products.Add(new CheckProduct { Id = CamusDB.Core.Util.ObjectIds.CamusObjectIdGenerator.GenerateAsString(), Name = "bad", Price = -5 });
+        // EF wraps the provider exception in a DbUpdateException; the CADB0303 CamusException is the inner cause.
+        var ex = await Assert.ThrowsAsync<DbUpdateException>(() => badCtx.SaveChangesAsync());
+        var camusEx = Assert.IsType<CamusException>(ex.InnerException);
+        Assert.Equal("CADB0303", camusEx.Code);
+
+        // The valid row is readable.
+        await using var readCtx = new CheckContext(options);
+        var loaded = await readCtx.Products.AsNoTracking().FirstOrDefaultAsync(p => p.Id == okId);
+        Assert.NotNull(loaded);
+        Assert.Equal(10, loaded!.Price);
+    }
+
+    private class CheckContext(DbContextOptions options) : DbContext(options)
+    {
+        public DbSet<CheckProduct> Products => Set<CheckProduct>();
+
+        protected override void OnModelCreating(ModelBuilder modelBuilder)
+        {
+            modelBuilder.Entity<CheckProduct>(b =>
+            {
+                b.ToTable("ef_check_products", t => t.HasCheckConstraint("ck_ef_check_products_price", "price > 0"));
+                b.HasKey(e => e.Id);
+                b.Property(e => e.Id).HasColumnType("id").ValueGeneratedOnAdd();
+                b.Property(e => e.Name).HasColumnName("name").HasMaxLength(64);
+                b.Property(e => e.Price).HasColumnName("price");
+            });
+        }
+    }
+
+    private class CheckProduct
+    {
+        public string Id { get; set; } = "";
+        public string Name { get; set; } = "";
+        public long Price { get; set; }
+    }
+
     private class UuidContext(DbContextOptions options) : DbContext(options)
     {
         public DbSet<UuidDoc> Docs => Set<UuidDoc>();

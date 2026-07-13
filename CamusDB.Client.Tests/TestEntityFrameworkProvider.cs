@@ -476,6 +476,132 @@ public class TestEntityFrameworkProvider
     }
 
     [Fact]
+    public void TestMigrationsSqlGeneratorCreateTableWithCheckConstraint()
+    {
+        var options = new DbContextOptionsBuilder<SimpleProductContext>()
+            .UseCamusDB("Endpoint=http://localhost:5095;Database=test")
+            .Options;
+
+        using var ctx = new SimpleProductContext(options);
+        var generator = ctx.GetService<IMigrationsSqlGenerator>();
+
+        var operation = new CreateTableOperation
+        {
+            Name = "products",
+            Columns =
+            {
+                new AddColumnOperation { Name = "Id", ClrType = typeof(string), ColumnType = "id", IsNullable = false },
+                new AddColumnOperation { Name = "Price", ClrType = typeof(double), ColumnType = "float64", IsNullable = true },
+            },
+            PrimaryKey = new AddPrimaryKeyOperation { Columns = ["Id"] },
+            CheckConstraints =
+            {
+                new AddCheckConstraintOperation { Name = "CK_products_price", Table = "products", Sql = "Price > 0" }
+            }
+        };
+
+        var commands = generator.Generate([operation], null);
+
+        Assert.Single(commands);
+        Assert.Contains("CONSTRAINT `CK_products_price` CHECK (Price > 0)", commands[0].CommandText);
+    }
+
+    [Fact]
+    public void TestMigrationsSqlGeneratorAddCheckConstraint()
+    {
+        var options = new DbContextOptionsBuilder<SimpleProductContext>()
+            .UseCamusDB("Endpoint=http://localhost:5095;Database=test")
+            .Options;
+
+        using var ctx = new SimpleProductContext(options);
+        var generator = ctx.GetService<IMigrationsSqlGenerator>();
+
+        var operation = new AddCheckConstraintOperation
+        {
+            Name = "CK_products_price",
+            Table = "products",
+            Sql = "Price > 0"
+        };
+
+        var commands = generator.Generate([operation], null);
+
+        Assert.Single(commands);
+        Assert.Contains("ALTER TABLE `products` ADD CONSTRAINT `CK_products_price` CHECK (Price > 0)", commands[0].CommandText);
+    }
+
+    [Fact]
+    public void TestMigrationsSqlGeneratorDropCheckConstraint()
+    {
+        var options = new DbContextOptionsBuilder<SimpleProductContext>()
+            .UseCamusDB("Endpoint=http://localhost:5095;Database=test")
+            .Options;
+
+        using var ctx = new SimpleProductContext(options);
+        var generator = ctx.GetService<IMigrationsSqlGenerator>();
+
+        var operation = new DropCheckConstraintOperation { Name = "CK_products_price", Table = "products" };
+
+        var commands = generator.Generate([operation], null);
+
+        Assert.Single(commands);
+        Assert.Contains("ALTER TABLE `products` DROP CONSTRAINT `CK_products_price`", commands[0].CommandText);
+    }
+
+    [Fact]
+    public void TestMigrationsSqlGeneratorAlterColumnSetNotNull()
+    {
+        var options = new DbContextOptionsBuilder<SimpleProductContext>()
+            .UseCamusDB("Endpoint=http://localhost:5095;Database=test")
+            .Options;
+
+        using var ctx = new SimpleProductContext(options);
+        var generator = ctx.GetService<IMigrationsSqlGenerator>();
+
+        // Same stored type, nullable -> non-nullable => SET NOT NULL
+        var operation = new AlterColumnOperation
+        {
+            Name = "Name",
+            Table = "products",
+            ClrType = typeof(string),
+            ColumnType = "string",
+            IsNullable = false,
+            OldColumn = new AddColumnOperation { Name = "Name", ClrType = typeof(string), ColumnType = "string", IsNullable = true }
+        };
+
+        var commands = generator.Generate([operation], null);
+
+        Assert.Single(commands);
+        Assert.Contains("ALTER TABLE `products` ALTER COLUMN `Name` SET NOT NULL", commands[0].CommandText);
+    }
+
+    [Fact]
+    public void TestMigrationsSqlGeneratorAlterColumnDropNotNull()
+    {
+        var options = new DbContextOptionsBuilder<SimpleProductContext>()
+            .UseCamusDB("Endpoint=http://localhost:5095;Database=test")
+            .Options;
+
+        using var ctx = new SimpleProductContext(options);
+        var generator = ctx.GetService<IMigrationsSqlGenerator>();
+
+        // Same stored type, non-nullable -> nullable => DROP NOT NULL
+        var operation = new AlterColumnOperation
+        {
+            Name = "Name",
+            Table = "products",
+            ClrType = typeof(string),
+            ColumnType = "string",
+            IsNullable = true,
+            OldColumn = new AddColumnOperation { Name = "Name", ClrType = typeof(string), ColumnType = "string", IsNullable = false }
+        };
+
+        var commands = generator.Generate([operation], null);
+
+        Assert.Single(commands);
+        Assert.Contains("ALTER TABLE `products` ALTER COLUMN `Name` DROP NOT NULL", commands[0].CommandText);
+    }
+
+    [Fact]
     public void TestHistoryRepositoryRegistered()
     {
         var options = new DbContextOptionsBuilder<SimpleProductContext>()

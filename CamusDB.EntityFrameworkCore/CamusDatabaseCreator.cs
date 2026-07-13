@@ -62,7 +62,9 @@ public class CamusDatabaseCreator : RelationalDatabaseCreator
         var camusConn = _connection.DbConnection;
         await camusConn.OpenAsync(cancellationToken).ConfigureAwait(false);
 
-        var model = _currentContext.Context.Model;
+        // The runtime-optimized model omits CHECK constraints (GetCheckConstraints throws on it);
+        // the design-time model carries them, so use it for DDL generation.
+        var model = _currentContext.Context.GetService<IDesignTimeModel>().Model;
 
         foreach (var entityType in model.GetEntityTypes())
         {
@@ -120,6 +122,13 @@ public class CamusDatabaseCreator : RelationalDatabaseCreator
             sb.Append(", PRIMARY KEY (");
             sb.Append(string.Join(", ", pkColumns));
             sb.Append(')');
+        }
+
+        // Named CHECK constraints declared via ToTable(t => t.HasCheckConstraint(...)).
+        foreach (var check in entityType.GetCheckConstraints())
+        {
+            sb.Append(", CONSTRAINT ").Append(check.Name)
+              .Append(" CHECK (").Append(check.Sql).Append(')');
         }
 
         sb.Append(')');

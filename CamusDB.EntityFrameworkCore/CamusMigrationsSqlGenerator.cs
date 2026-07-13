@@ -43,6 +43,15 @@ public class CamusMigrationsSqlGenerator : MigrationsSqlGenerator
                    .Append(")");
         }
 
+        // Table-level, named CHECK constraints. CamusDB desugars column-level checks into named
+        // table-level constraints internally, so emitting them all at the table level is faithful.
+        foreach (var check in operation.CheckConstraints)
+        {
+            builder.AppendLine(",")
+                   .Append("CONSTRAINT ").Append(helper.DelimitIdentifier(check.Name))
+                   .Append(" CHECK (").Append(check.Sql).Append(")");
+        }
+
         builder.AppendLine().Append(")");
 
         if (terminate)
@@ -184,9 +193,24 @@ public class CamusMigrationsSqlGenerator : MigrationsSqlGenerator
     protected override void Generate(AlterDatabaseOperation operation, IModel? model, MigrationCommandListBuilder builder) { }
     protected override void Generate(AlterTableOperation operation, IModel? model, MigrationCommandListBuilder builder) { }
 
-    // Unsupported operations
+    // CamusDB cannot change a column's stored type in place, but it does support toggling a column's
+    // NOT NULL constraint (ALTER COLUMN ... SET/DROP NOT NULL). Map a nullability-only change to that;
+    // reject anything that would require rewriting the column's type.
     protected override void Generate(AlterColumnOperation operation, IModel? model, MigrationCommandListBuilder builder)
-        => throw new NotSupportedException("CamusDB does not support altering an existing column type.");
+    {
+        var helper = Dependencies.SqlGenerationHelper;
+
+        if (!string.Equals(GetDdlType(operation), GetDdlType(operation.OldColumn), StringComparison.Ordinal))
+            throw new NotSupportedException("CamusDB does not support altering an existing column type.");
+
+        if (operation.IsNullable == operation.OldColumn.IsNullable)
+            throw new NotSupportedException("CamusDB only supports altering a column's nullability.");
+
+        builder.Append("ALTER TABLE ").Append(helper.DelimitIdentifier(operation.Table))
+               .Append(" ALTER COLUMN ").Append(helper.DelimitIdentifier(operation.Name))
+               .Append(operation.IsNullable ? " DROP NOT NULL" : " SET NOT NULL");
+        builder.EndCommand();
+    }
 
     protected override void Generate(RenameColumnOperation operation, IModel? model, MigrationCommandListBuilder builder)
     {
@@ -235,10 +259,22 @@ public class CamusMigrationsSqlGenerator : MigrationsSqlGenerator
         => throw new NotSupportedException("CamusDB does not support inline UNIQUE constraints.");
 
     protected override void Generate(AddCheckConstraintOperation operation, IModel? model, MigrationCommandListBuilder builder)
-        => throw new NotSupportedException("CamusDB does not support CHECK constraints.");
+    {
+        var helper = Dependencies.SqlGenerationHelper;
+        builder.Append("ALTER TABLE ").Append(helper.DelimitIdentifier(operation.Table))
+               .Append(" ADD CONSTRAINT ").Append(helper.DelimitIdentifier(operation.Name))
+               .Append(" CHECK (").Append(operation.Sql).Append(")");
+        builder.EndCommand();
+    }
 
+    // CamusDB resolves DROP CONSTRAINT against both CHECK and named NOT NULL constraints by name.
     protected override void Generate(DropCheckConstraintOperation operation, IModel? model, MigrationCommandListBuilder builder)
-        => throw new NotSupportedException("CamusDB does not support CHECK constraints.");
+    {
+        var helper = Dependencies.SqlGenerationHelper;
+        builder.Append("ALTER TABLE ").Append(helper.DelimitIdentifier(operation.Table))
+               .Append(" DROP CONSTRAINT ").Append(helper.DelimitIdentifier(operation.Name));
+        builder.EndCommand();
+    }
 
     protected override void Generate(CreateSequenceOperation operation, IModel? model, MigrationCommandListBuilder builder)
         => throw new NotSupportedException("CamusDB does not support sequences.");
