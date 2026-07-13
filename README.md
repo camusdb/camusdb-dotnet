@@ -618,6 +618,40 @@ the server (rather than forcing client-side evaluation):
 The `starts_with` / `ends_with` / `contains` predicates take the search term as a plain argument, so
 they work with a column or parameter (not just a literal) and need no `LIKE` wildcard escaping.
 
+##### Regular expressions
+
+`System.Text.RegularExpressions.Regex` static calls and the `EF.Functions.Regexp*` helpers map onto
+CamusDB's native regex operators and `regexp_*` scalar functions (PostgreSQL semantics):
+
+| LINQ | CamusDB |
+| --- | --- |
+| `Regex.IsMatch(s, pattern)` | `regexp_like(s, pattern)` (the `~` operator) |
+| `Regex.IsMatch(s, pattern, RegexOptions.IgnoreCase)` | `regexp_like(s, pattern, 'i')` (the `~*` operator) |
+| `Regex.Replace(s, pattern, repl)` | `regexp_replace(s, pattern, repl, 'g')` (replaces every match, like .NET) |
+| `EF.Functions.RegexpLike(s, pattern[, flags])` | `regexp_like` |
+| `EF.Functions.RegexpReplace(s, pattern, repl[, flags])` | `regexp_replace` (first match; pass `"g"` to replace all) |
+| `EF.Functions.RegexpCount(s, pattern[, flags])` | `regexp_count` |
+| `EF.Functions.RegexpSubstr(s, pattern[, flags])` | `regexp_substr` |
+| `EF.Functions.RegexpInstr(s, pattern[, flags])` | `regexp_instr` |
+
+```csharp
+using System.Text.RegularExpressions;
+
+var valid = await ctx.People
+    .Where(p => Regex.IsMatch(p.Name, "^[A-Z]"))                                   // name ~ '^[A-Z]'
+    .Where(p => EF.Functions.RegexpLike(p.Email, "^[^@]+@[^@]+\\.[a-z]+$", "i"))   // email ~* '…'
+    .ToListAsync();
+```
+
+The `flags` string uses PostgreSQL option characters: `i` case-insensitive, `c` case-sensitive,
+`m`/`n` multiline, `s` single-line (dot matches newline), `x` extended, and `g` replace-all (for
+`RegexpReplace`). A `RegexOptions` argument to a `Regex` call is honored only when it is a compile-time
+constant made of flags CamusDB can express (`IgnoreCase`, `Multiline`, `Singleline`,
+`IgnorePatternWhitespace`); anything else leaves the call untranslated. Because these are equivalent to
+CHECK-constraint predicates, the same patterns work in `HasCheckConstraint` (e.g.
+`t.HasCheckConstraint("ck_email", "email ~* '^[^@]+@[^@]+$'")`). The set-returning functions
+`regexp_matches` / `regexp_split_to_table` are not supported by the server.
+
 > **Not translatable (server limitations):** `Include`/collection navigations and left/optional joins
 > — CamusDB supports only `INNER JOIN` (no `LEFT`/`OUTER JOIN`) — and set operators (`Union`/`Concat`)
 > — CamusDB has no `UNION`. These raise a translation or SQL error; project the shape with an explicit

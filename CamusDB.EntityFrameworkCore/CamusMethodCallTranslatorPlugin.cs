@@ -14,7 +14,11 @@ public sealed class CamusMethodCallTranslatorPlugin : IMethodCallTranslatorPlugi
 {
     public CamusMethodCallTranslatorPlugin(ISqlExpressionFactory sqlExpressionFactory)
     {
-        Translators = [new CamusStringMethodTranslator(sqlExpressionFactory)];
+        Translators =
+        [
+            new CamusStringMethodTranslator(sqlExpressionFactory),
+            new CamusRegexMethodTranslator(sqlExpressionFactory),
+        ];
     }
 
     public IEnumerable<IMethodCallTranslator> Translators { get; }

@@ -16,7 +16,7 @@ internal sealed class CamusExecuteSqlQueryResponse
     public string? Status { get; set; }
 
     [JsonPropertyName("rows")]
-    public List<Dictionary<string, ColumnValue>>? Rows { get; set; }
+    public CamusResultSet? Rows { get; set; }
 
     /// <summary>Query result cache resolution: <c>hit</c>, <c>miss</c>, <c>bypass</c>, etc. Null when the query carried no cache hint.</summary>
     [JsonPropertyName("cacheStatus")]

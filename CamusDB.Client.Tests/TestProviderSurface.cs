@@ -123,7 +123,7 @@ public class TestProviderSurface
             }
         ];
 
-        using CamusDataReader reader = new(rows);
+        using CamusDataReader reader = new(CamusResultSet.FromRows(rows));
 
         Assert.True(reader.HasRows);
         Assert.Equal(5, reader.FieldCount);
@@ -156,7 +156,7 @@ public class TestProviderSurface
             }
         ];
 
-        using CamusDataReader reader = new(rows);
+        using CamusDataReader reader = new(CamusResultSet.FromRows(rows));
 
         Assert.True(await reader.ReadAsync());
         Assert.Equal("robot", reader.GetString(reader.GetOrdinal("name")));
@@ -316,14 +316,14 @@ public class TestProviderSurface
         }
 
         protected override DbDataReader ExecuteDbDataReader(CommandBehavior behavior) =>
-            new CamusDataReader(
+            new CamusDataReader(CamusResultSet.FromRows(
             [
-                new()
+                new Dictionary<string, ColumnValue>
                 {
                     ["value"] = new() { Type = ColumnType.String, StrValue = "first" },
                     ["other"] = new() { Type = ColumnType.Integer64, LongValue = 2 }
                 }
-            ]);
+            ]));
 
         protected override Task<DbDataReader> ExecuteDbDataReaderAsync(CommandBehavior behavior, CancellationToken cancellationToken) =>
             Task.FromResult<DbDataReader>(ExecuteDbDataReader(behavior));

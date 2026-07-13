@@ -41,16 +41,14 @@ public class CamusInsertCommand : CamusCommand
                 request.TxnIdCounter = transaction.TxnIdCounter;
             }
 
-            string jsonRequest = JsonSerializer.Serialize(request, CamusJsonSerializerContext.Default.CamusInsertRequest);
-
-            string responseJson = await endpoint
+            byte[] responseBytes = await endpoint
                                                         .WithHeader("Accept", "application/json")
                                                         .WithTimeout(CommandTimeout)
                                                         .AppendPathSegments("insert")
-                                                        .PostAsync(CamusJsonContent.Create(jsonRequest), cancellationToken: cancellationToken)
-                                                        .ReceiveString();
+                                                        .PostAsync(CamusJsonContent.Create(request, CamusJsonSerializerContext.Default.CamusInsertRequest), cancellationToken: cancellationToken)
+                                                        .ReceiveBytes();
 
-            CamusExecuteSqlNonQueryResponse? response = JsonSerializer.Deserialize(responseJson, CamusJsonSerializerContext.Default.CamusExecuteSqlNonQueryResponse);
+            CamusExecuteSqlNonQueryResponse? response = JsonSerializer.Deserialize(responseBytes, CamusJsonSerializerContext.Default.CamusExecuteSqlNonQueryResponse);
 
             if (response is null)
                 throw new CamusException("CADB0000", "Empty result returned");

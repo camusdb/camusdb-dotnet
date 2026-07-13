@@ -119,16 +119,14 @@ public sealed class CamusConnection : DbConnection
                 DatabaseName = database
             };
 
-            string jsonRequest = JsonSerializer.Serialize(request, CamusJsonSerializerContext.Default.CamusStartTransactionRequest);
-
-            string responseJson = await endpoint
+            byte[] responseBytes = await endpoint
                                                         .WithHeader("Accept", "application/json")
                                                         .WithTimeout(builder.CommandTimeout)
                                                         .AppendPathSegments("start-transaction")
-                                                        .PostAsync(CamusJsonContent.Create(jsonRequest), cancellationToken: cancellationToken)
-                                                        .ReceiveString();
+                                                        .PostAsync(CamusJsonContent.Create(request, CamusJsonSerializerContext.Default.CamusStartTransactionRequest), cancellationToken: cancellationToken)
+                                                        .ReceiveBytes();
 
-            CamusStartTransactionResponse? response = JsonSerializer.Deserialize(responseJson, CamusJsonSerializerContext.Default.CamusStartTransactionResponse);
+            CamusStartTransactionResponse? response = JsonSerializer.Deserialize(responseBytes, CamusJsonSerializerContext.Default.CamusStartTransactionResponse);
 
             if (response?.Status != "ok")
                 throw new CamusException("CADB0000", "Empty result returned");
@@ -257,16 +255,14 @@ public sealed class CamusConnection : DbConnection
                 IfNotExists = ifNotExists
             };
 
-            string jsonRequest = JsonSerializer.Serialize(request, CamusJsonSerializerContext.Default.CamusCreateDatabaseRequest);
-
-            string responseJson = await endpoint
+            byte[] responseBytes = await endpoint
                                             .WithHeader("Accept", "application/json")
                                             .WithTimeout(builder.CommandTimeout)
                                             .AppendPathSegments("create-db")
-                                            .PostAsync(CamusJsonContent.Create(jsonRequest), cancellationToken: cancellationToken)
-                                            .ReceiveString();
+                                            .PostAsync(CamusJsonContent.Create(request, CamusJsonSerializerContext.Default.CamusCreateDatabaseRequest), cancellationToken: cancellationToken)
+                                            .ReceiveBytes();
 
-            CamusCreateDatabaseResponse? response = JsonSerializer.Deserialize(responseJson, CamusJsonSerializerContext.Default.CamusCreateDatabaseResponse);
+            CamusCreateDatabaseResponse? response = JsonSerializer.Deserialize(responseBytes, CamusJsonSerializerContext.Default.CamusCreateDatabaseResponse);
 
             if (response?.Status != "ok")
                 throw new CamusException(response?.Code ?? "CADB0000", response?.Message ?? "Create database failed");
@@ -359,16 +355,14 @@ public sealed class CamusConnection : DbConnection
                 IfNotExists = ifNotExists
             };
 
-            string jsonRequest = JsonSerializer.Serialize(request, CamusJsonSerializerContext.Default.CamusCreateBranchDatabaseRequest);
-
-            string responseJson = await endpoint
+            byte[] responseBytes = await endpoint
                                             .WithHeader("Accept", "application/json")
                                             .WithTimeout(builder.CommandTimeout)
                                             .AppendPathSegments("create-branch-db")
-                                            .PostAsync(CamusJsonContent.Create(jsonRequest), cancellationToken: cancellationToken)
-                                            .ReceiveString();
+                                            .PostAsync(CamusJsonContent.Create(request, CamusJsonSerializerContext.Default.CamusCreateBranchDatabaseRequest), cancellationToken: cancellationToken)
+                                            .ReceiveBytes();
 
-            CamusCreateBranchDatabaseResponse? response = JsonSerializer.Deserialize(responseJson, CamusJsonSerializerContext.Default.CamusCreateBranchDatabaseResponse);
+            CamusCreateBranchDatabaseResponse? response = JsonSerializer.Deserialize(responseBytes, CamusJsonSerializerContext.Default.CamusCreateBranchDatabaseResponse);
 
             if (response?.Status != "ok")
                 throw new CamusException(response?.Code ?? "CADB0000", response?.Message ?? "Create branch database failed");
@@ -425,16 +419,14 @@ public sealed class CamusConnection : DbConnection
                 DatabaseName = databaseName
             };
 
-            string jsonRequest = JsonSerializer.Serialize(request, CamusJsonSerializerContext.Default.CamusShowBranchesRequest);
-
-            string responseJson = await endpoint
+            byte[] responseBytes = await endpoint
                                             .WithHeader("Accept", "application/json")
                                             .WithTimeout(builder.CommandTimeout)
                                             .AppendPathSegments("show-branches")
-                                            .PostAsync(CamusJsonContent.Create(jsonRequest), cancellationToken: cancellationToken)
-                                            .ReceiveString();
+                                            .PostAsync(CamusJsonContent.Create(request, CamusJsonSerializerContext.Default.CamusShowBranchesRequest), cancellationToken: cancellationToken)
+                                            .ReceiveBytes();
 
-            CamusShowBranchesResponse? response = JsonSerializer.Deserialize(responseJson, CamusJsonSerializerContext.Default.CamusShowBranchesResponse);
+            CamusShowBranchesResponse? response = JsonSerializer.Deserialize(responseBytes, CamusJsonSerializerContext.Default.CamusShowBranchesResponse);
 
             if (response?.Status != "ok")
                 throw new CamusException(response?.Code ?? "CADB0000", response?.Message ?? "Show branches failed");
@@ -492,16 +484,14 @@ public sealed class CamusConnection : DbConnection
                 DatabaseName = databaseName
             };
 
-            string jsonRequest = JsonSerializer.Serialize(request, CamusJsonSerializerContext.Default.CamusShowAncestorsRequest);
-
-            string responseJson = await endpoint
+            byte[] responseBytes = await endpoint
                                             .WithHeader("Accept", "application/json")
                                             .WithTimeout(builder.CommandTimeout)
                                             .AppendPathSegments("show-ancestors")
-                                            .PostAsync(CamusJsonContent.Create(jsonRequest), cancellationToken: cancellationToken)
-                                            .ReceiveString();
+                                            .PostAsync(CamusJsonContent.Create(request, CamusJsonSerializerContext.Default.CamusShowAncestorsRequest), cancellationToken: cancellationToken)
+                                            .ReceiveBytes();
 
-            CamusShowAncestorsResponse? response = JsonSerializer.Deserialize(responseJson, CamusJsonSerializerContext.Default.CamusShowAncestorsResponse);
+            CamusShowAncestorsResponse? response = JsonSerializer.Deserialize(responseBytes, CamusJsonSerializerContext.Default.CamusShowAncestorsResponse);
 
             if (response?.Status != "ok")
                 throw new CamusException(response?.Code ?? "CADB0000", response?.Message ?? "Show ancestors failed");
@@ -547,16 +537,14 @@ public sealed class CamusConnection : DbConnection
                 DatabaseName = databaseName
             };
 
-            string jsonRequest = JsonSerializer.Serialize(request, CamusJsonSerializerContext.Default.CamusDropDatabaseRequest);
-
-            string responseJson = await endpoint
+            byte[] responseBytes = await endpoint
                                             .WithHeader("Accept", "application/json")
                                             .WithTimeout(builder.CommandTimeout)
                                             .AppendPathSegments("drop-db")
-                                            .PostAsync(CamusJsonContent.Create(jsonRequest), cancellationToken: cancellationToken)
-                                            .ReceiveString();
+                                            .PostAsync(CamusJsonContent.Create(request, CamusJsonSerializerContext.Default.CamusDropDatabaseRequest), cancellationToken: cancellationToken)
+                                            .ReceiveBytes();
 
-            CamusDropDatabaseResponse? response = JsonSerializer.Deserialize(responseJson, CamusJsonSerializerContext.Default.CamusDropDatabaseResponse);
+            CamusDropDatabaseResponse? response = JsonSerializer.Deserialize(responseBytes, CamusJsonSerializerContext.Default.CamusDropDatabaseResponse);
 
             if (response?.Status != "ok")
                 throw new CamusException(response?.Code ?? "CADB0000", response?.Message ?? "Drop database failed");

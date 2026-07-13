@@ -73,36 +73,26 @@ public record struct CamusObjectIdValue : IComparable<CamusObjectIdValue>
 
     public static string ToString(int _a, int _b, int _c)
     {
-        char[] c = new char[24];
+        // Write the 24 hex chars straight into the string's backing buffer — no intermediate char[].
+        return string.Create(24, (_a, _b, _c), static (span, state) =>
+        {
+            (int a, int b, int c) = state;
+            WriteHex(span[..8], a);
+            WriteHex(span.Slice(8, 8), b);
+            WriteHex(span.Slice(16, 8), c);
+        });
+    }
 
-        c[0] = ToHexChar((_a >> 28) & 0x0f);
-        c[1] = ToHexChar((_a >> 24) & 0x0f);
-        c[2] = ToHexChar((_a >> 20) & 0x0f);
-        c[3] = ToHexChar((_a >> 16) & 0x0f);
-        c[4] = ToHexChar((_a >> 12) & 0x0f);
-        c[5] = ToHexChar((_a >> 8) & 0x0f);
-        c[6] = ToHexChar((_a >> 4) & 0x0f);
-        c[7] = ToHexChar(_a & 0x0f);
-
-        c[8] = ToHexChar((_b >> 28) & 0x0f);
-        c[9] = ToHexChar((_b >> 24) & 0x0f);
-        c[10] = ToHexChar((_b >> 20) & 0x0f);
-        c[11] = ToHexChar((_b >> 16) & 0x0f);
-        c[12] = ToHexChar((_b >> 12) & 0x0f);
-        c[13] = ToHexChar((_b >> 8) & 0x0f);
-        c[14] = ToHexChar((_b >> 4) & 0x0f);
-        c[15] = ToHexChar(_b & 0x0f);
-
-        c[16] = ToHexChar((_c >> 28) & 0x0f);
-        c[17] = ToHexChar((_c >> 24) & 0x0f);
-        c[18] = ToHexChar((_c >> 20) & 0x0f);
-        c[19] = ToHexChar((_c >> 16) & 0x0f);
-        c[20] = ToHexChar((_c >> 12) & 0x0f);
-        c[21] = ToHexChar((_c >> 8) & 0x0f);
-        c[22] = ToHexChar((_c >> 4) & 0x0f);
-        c[23] = ToHexChar(_c & 0x0f);
-
-        return new string(c);
+    private static void WriteHex(Span<char> span, int value)
+    {
+        span[0] = ToHexChar((value >> 28) & 0x0f);
+        span[1] = ToHexChar((value >> 24) & 0x0f);
+        span[2] = ToHexChar((value >> 20) & 0x0f);
+        span[3] = ToHexChar((value >> 16) & 0x0f);
+        span[4] = ToHexChar((value >> 12) & 0x0f);
+        span[5] = ToHexChar((value >> 8) & 0x0f);
+        span[6] = ToHexChar((value >> 4) & 0x0f);
+        span[7] = ToHexChar(value & 0x0f);
     }
 
     private static bool TryParseHexChar(char c, out int value)

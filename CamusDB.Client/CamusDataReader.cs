@@ -17,7 +17,7 @@ public class CamusDataReader : DbDataReader
 
     private bool isClosed;
 
-    private readonly List<Dictionary<string, ColumnValue>> rows;
+    private readonly CamusResultSet resultSet;
 
     private readonly string[] columnNames;
 
@@ -25,7 +25,7 @@ public class CamusDataReader : DbDataReader
 
     public override int FieldCount => columnNames.Length;
 
-    public override bool HasRows => rows.Count > 0;
+    public override bool HasRows => resultSet.RowCount > 0;
 
     public override bool IsClosed => isClosed;
 
@@ -43,16 +43,16 @@ public class CamusDataReader : DbDataReader
     /// </summary>
     public CamusCacheMetadata? CacheMetadata { get; }
 
-    public CamusDataReader(List<Dictionary<string, ColumnValue>> rows, CamusCacheMetadata? cacheMetadata = null)
+    public CamusDataReader(CamusResultSet resultSet, CamusCacheMetadata? cacheMetadata = null)
     {
-        this.rows = rows;
-        columnNames = rows.Count > 0 ? [.. rows[0].Keys] : [];
+        this.resultSet = resultSet;
+        columnNames = resultSet.ColumnNames;
         CacheMetadata = cacheMetadata;
     }
 
     public CamusDataReader(int recordsAffected)
     {
-        this.rows = [];
+        this.resultSet = CamusResultSet.Empty;
         this.columnNames = [];
         this.recordsAffected = recordsAffected;
     }
@@ -67,7 +67,7 @@ public class CamusDataReader : DbDataReader
         ThrowIfClosed();
 
         position++;
-        return position < rows.Count;
+        return position < resultSet.RowCount;
     }
 
     public override Task<bool> ReadAsync(CancellationToken cancellationToken)
@@ -112,7 +112,8 @@ public class CamusDataReader : DbDataReader
 
     public override object GetValue(int ordinal) => ConvertToClr(GetColumnValue(ordinal));
 
-    private static object ConvertToClr(ColumnValue value) => value.Type switch
+    // ColumnValue is a sizeable struct; take it by 'in' to avoid copying it on the per-cell path.
+    private static object ConvertToClr(in ColumnValue value) => value.Type switch
     {
         ColumnType.Bool => value.BoolValue,
         ColumnType.Float64 => value.FloatValue,
@@ -122,14 +123,14 @@ public class CamusDataReader : DbDataReader
         ColumnType.Bytes => value.BytesValue ?? Array.Empty<byte>(),
         ColumnType.Date => new DateTime(value.LongValue, DateTimeKind.Utc),
         ColumnType.DateTime => new DateTime(value.LongValue, DateTimeKind.Utc),
-        ColumnType.Array => ConvertArray(value),
+        ColumnType.Array => ConvertArray(in value),
         ColumnType.Uuid => value.AsGuid(),
         ColumnType.Null => DBNull.Value,
         ColumnType.String => value.StrValue ?? "",
         _ => DBNull.Value
     };
 
-    private static object?[] ConvertArray(ColumnValue value)
+    private static object?[] ConvertArray(in ColumnValue value)
     {
         List<ColumnValue> elements = value.ArrayValues ?? [];
         object?[] result = new object?[elements.Count];
@@ -152,12 +153,17 @@ public class CamusDataReader : DbDataReader
 
     public override bool IsDBNull(int ordinal) => GetColumnValue(ordinal).Type == ColumnType.Null;
 
-    public override bool GetBoolean(int ordinal) => GetColumnValue(ordinal).Type switch
+    public override bool GetBoolean(int ordinal)
     {
-        ColumnType.Bool => GetColumnValue(ordinal).BoolValue,
-        ColumnType.Integer64 => GetColumnValue(ordinal).LongValue != 0,
-        _ => throw new InvalidCastException()
-    };
+        ColumnValue value = GetColumnValue(ordinal);
+
+        return value.Type switch
+        {
+            ColumnType.Bool => value.BoolValue,
+            ColumnType.Integer64 => value.LongValue != 0,
+            _ => throw new InvalidCastException()
+        };
+    }
 
     public override byte GetByte(int ordinal)
     {
@@ -214,13 +220,18 @@ public class CamusDataReader : DbDataReader
 
     public override decimal GetDecimal(int ordinal) => Convert.ToDecimal(GetValue(ordinal), CultureInfo.InvariantCulture);
 
-    public override double GetDouble(int ordinal) => GetColumnValue(ordinal).Type switch
+    public override double GetDouble(int ordinal)
     {
-        ColumnType.Float64 => GetColumnValue(ordinal).FloatValue,
-        ColumnType.Float32 => (float)GetColumnValue(ordinal).FloatValue,
-        ColumnType.Integer64 => GetColumnValue(ordinal).LongValue,
-        _ => throw new InvalidCastException()
-    };
+        ColumnValue value = GetColumnValue(ordinal);
+
+        return value.Type switch
+        {
+            ColumnType.Float64 => value.FloatValue,
+            ColumnType.Float32 => (float)value.FloatValue,
+            ColumnType.Integer64 => value.LongValue,
+            _ => throw new InvalidCastException()
+        };
+    }
 
     /// <summary>
     /// Returns the value of the specified column reconstructed as <typeparamref name="T"/>. Adds
@@ -249,10 +260,10 @@ public class CamusDataReader : DbDataReader
 
         // Typed arrays (long[], string[], double[], bool[], ...) from a native ARRAY column: the raw
         // value is an object?[]; project it into the requested element type.
-        if (target.IsArray && GetColumnValue(ordinal).Type == ColumnType.Array)
+        if (target.IsArray && GetColumnValue(ordinal) is { Type: ColumnType.Array } arrayColumn)
         {
             Type elementType = target.GetElementType()!;
-            object?[] source = ConvertArray(GetColumnValue(ordinal));
+            object?[] source = ConvertArray(in arrayColumn);
             Array typed = Array.CreateInstance(elementType, source.Length);
 
             for (int i = 0; i < source.Length; i++)
@@ -351,28 +362,17 @@ public class CamusDataReader : DbDataReader
         base.Dispose(disposing);
     }
 
-    private Dictionary<string, ColumnValue> GetCurrent()
-    {
-        ThrowIfClosed();
-
-        if (position < 0 || position >= rows.Count)
-            throw new InvalidOperationException("No current row is available.");
-
-        return rows[position];
-    }
-
     public ColumnValue GetColumnValue(int ordinal)
     {
-        if (ordinal < 0 || ordinal >= FieldCount)
+        if (ordinal < 0 || ordinal >= columnNames.Length)
             throw new IndexOutOfRangeException();
 
-        string columnName = columnNames[ordinal];
-        Dictionary<string, ColumnValue> current = GetCurrent();
+        ThrowIfClosed();
 
-        if (!current.TryGetValue(columnName, out ColumnValue? value))
-            throw new IndexOutOfRangeException($"Column '{columnName}' was not found in the current row.");
+        if (position < 0 || position >= resultSet.RowCount)
+            throw new InvalidOperationException("No current row is available.");
 
-        return value;
+        return resultSet.GetCell(position, ordinal);
     }
 
     private void ThrowIfClosed()

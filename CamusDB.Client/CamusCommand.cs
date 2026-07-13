@@ -371,17 +371,14 @@ public class CamusCommand : DbCommand, ICloneable
                 request.TxnIdCounter = transaction.TxnIdCounter;
             }
 
-            string jsonRequest = JsonSerializer.Serialize(request, CamusJsonSerializerContext.Default.CamusExecuteSqlQueryRequest);
-
-
-            string responseJson = await endpoint
+            byte[] responseBytes = await endpoint
                                         .WithHeader("Accept", "application/json")
                                         .WithTimeout(CommandTimeout)
                                         .AppendPathSegments("execute-sql-query")
-                                        .PostAsync(CamusJsonContent.Create(jsonRequest), cancellationToken: cancellationToken)
-                                        .ReceiveString();
+                                        .PostAsync(CamusJsonContent.Create(request, CamusJsonSerializerContext.Default.CamusExecuteSqlQueryRequest), cancellationToken: cancellationToken)
+                                        .ReceiveBytes();
 
-            CamusExecuteSqlQueryResponse? response = JsonSerializer.Deserialize(responseJson, CamusJsonSerializerContext.Default.CamusExecuteSqlQueryResponse);
+            CamusExecuteSqlQueryResponse? response = JsonSerializer.Deserialize(responseBytes, CamusJsonSerializerContext.Default.CamusExecuteSqlQueryResponse);
 
             if (response?.Rows == null)
                 throw new CamusException("CADB0000", "Empty result returned");
@@ -439,16 +436,14 @@ public class CamusCommand : DbCommand, ICloneable
                 request.TxnIdCounter = transaction.TxnIdCounter;
             }
 
-            string jsonRequest = JsonSerializer.Serialize(request, CamusJsonSerializerContext.Default.CamusExecuteSqlNonQueryRequest);
-
-            string responseJson = await endpoint
+            byte[] responseBytes = await endpoint
                                         .WithHeader("Accept", "application/json")
                                         .WithTimeout(CommandTimeout)
                                         .AppendPathSegments("execute-sql-non-query")
-                                        .PostAsync(CamusJsonContent.Create(jsonRequest), cancellationToken: cancellationToken)
-                                        .ReceiveString();
+                                        .PostAsync(CamusJsonContent.Create(request, CamusJsonSerializerContext.Default.CamusExecuteSqlNonQueryRequest), cancellationToken: cancellationToken)
+                                        .ReceiveBytes();
 
-            CamusExecuteSqlNonQueryResponse? response = JsonSerializer.Deserialize(responseJson, CamusJsonSerializerContext.Default.CamusExecuteSqlNonQueryResponse);
+            CamusExecuteSqlNonQueryResponse? response = JsonSerializer.Deserialize(responseBytes, CamusJsonSerializerContext.Default.CamusExecuteSqlNonQueryResponse);
 
             if (response is null)
                 throw new CamusException("CADB0000", "Empty result returned");
@@ -520,16 +515,14 @@ public class CamusCommand : DbCommand, ICloneable
                 request.TxnIdCounter = transaction.TxnIdCounter;
             }
 
-            string jsonRequest = JsonSerializer.Serialize(request, CamusJsonSerializerContext.Default.CamusExecuteSqlNonQueryRequest);
-
-            string responseJson = await endpoint
+            byte[] responseBytes = await endpoint
                                         .WithHeader("Accept", "application/json")
                                         .WithTimeout(CommandTimeout)
                                         .AppendPathSegments("execute-sql-non-query")
-                                        .PostAsync(CamusJsonContent.Create(jsonRequest), cancellationToken: cancellationToken)
-                                        .ReceiveString();
+                                        .PostAsync(CamusJsonContent.Create(request, CamusJsonSerializerContext.Default.CamusExecuteSqlNonQueryRequest), cancellationToken: cancellationToken)
+                                        .ReceiveBytes();
 
-            CamusExecuteSqlNonQueryResponse? response = JsonSerializer.Deserialize(responseJson, CamusJsonSerializerContext.Default.CamusExecuteSqlNonQueryResponse);
+            CamusExecuteSqlNonQueryResponse? response = JsonSerializer.Deserialize(responseBytes, CamusJsonSerializerContext.Default.CamusExecuteSqlNonQueryResponse);
 
             if (response is null)
                 throw new CamusException("CADB0000", "Empty result returned");
@@ -601,16 +594,14 @@ public class CamusCommand : DbCommand, ICloneable
                 request.TxnIdCounter = transaction.TxnIdCounter;
             }
 
-            string jsonRequest = JsonSerializer.Serialize(request, CamusJsonSerializerContext.Default.CamusExecuteDDLRequest);
-
-            string responseJson = await endpoint
+            byte[] responseBytes = await endpoint
                                     .WithHeader("Accept", "application/json")
                                     .WithTimeout(CommandTimeout)
                                     .AppendPathSegments("execute-sql-ddl")
-                                    .PostAsync(CamusJsonContent.Create(jsonRequest), cancellationToken: cancellationToken)
-                                    .ReceiveString();
+                                    .PostAsync(CamusJsonContent.Create(request, CamusJsonSerializerContext.Default.CamusExecuteDDLRequest), cancellationToken: cancellationToken)
+                                    .ReceiveBytes();
 
-            CamusExecuteDDLResponse? response = JsonSerializer.Deserialize(responseJson, CamusJsonSerializerContext.Default.CamusExecuteDDLResponse);
+            CamusExecuteDDLResponse? response = JsonSerializer.Deserialize(responseBytes, CamusJsonSerializerContext.Default.CamusExecuteDDLResponse);
 
             return response?.Status == "ok";
         }

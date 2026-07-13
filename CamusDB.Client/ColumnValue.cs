@@ -28,8 +28,20 @@ namespace CamusDB.Client;
 ///     <see cref="AsGuid"/> to reconstruct the <see cref="System.Guid"/>.</item>
 /// </list>
 /// </summary>
-public sealed class ColumnValue
+/// <remarks>
+/// This is a mutable <see langword="struct"/>: a query result holds one <see cref="ColumnValue"/> per cell
+/// in a flat array (see <see cref="CamusResultSet"/>), so making it a value type removes one heap allocation
+/// per cell. It is populated by object initializer (parameter building) or by the JSON deserializer and then
+/// only read, so the mutable-struct caveats do not bite in practice.
+/// </remarks>
+public struct ColumnValue
 {
+    /// <summary>
+    /// A <see cref="ColumnType.Null"/> value, used as a placeholder (e.g. for a row that omits a column).
+    /// Equivalent to <c>default(ColumnValue)</c> since <see cref="ColumnType.Null"/> is <c>0</c>.
+    /// </summary>
+    public static readonly ColumnValue Null = default;
+
     [JsonPropertyName("type")]
     public ColumnType Type { get; set; }
 
@@ -85,7 +97,7 @@ public sealed class ColumnValue
     /// Reconstructs the <see cref="System.Guid"/> for a <see cref="ColumnType.Uuid"/> value. Prefers the
     /// raw big-endian halves and falls back to parsing <see cref="UuidValue"/> when they are absent.
     /// </summary>
-    public Guid AsGuid()
+    public readonly Guid AsGuid()
     {
         if (UuidHigh == 0 && LongValue == 0 && !string.IsNullOrEmpty(UuidValue))
             return Guid.Parse(UuidValue);

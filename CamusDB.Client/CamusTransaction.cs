@@ -72,16 +72,14 @@ public class CamusTransaction : DbTransaction
                 TxnIdCounter = txnIdCounter
             };
 
-            string jsonRequest = JsonSerializer.Serialize(request, CamusJsonSerializerContext.Default.CamusTransactionRequest);
-
-            string responseJson = await this.endpoint
+            byte[] responseBytes = await this.endpoint
                                                         .WithHeader("Accept", "application/json")
                                                         .WithTimeout(builder.CommandTimeout)
                                                         .AppendPathSegments("commit-transaction")
-                                                        .PostAsync(CamusJsonContent.Create(jsonRequest), cancellationToken: cancellationToken)
-                                                        .ReceiveString();
+                                                        .PostAsync(CamusJsonContent.Create(request, CamusJsonSerializerContext.Default.CamusTransactionRequest), cancellationToken: cancellationToken)
+                                                        .ReceiveBytes();
 
-            CamusExecuteDDLResponse? response = JsonSerializer.Deserialize(responseJson, CamusJsonSerializerContext.Default.CamusExecuteDDLResponse);
+            CamusExecuteDDLResponse? response = JsonSerializer.Deserialize(responseBytes, CamusJsonSerializerContext.Default.CamusExecuteDDLResponse);
 
             if (response?.Status != "ok")
                 throw new CamusException("CADB0000", "Commit failed");
@@ -130,16 +128,14 @@ public class CamusTransaction : DbTransaction
                 TxnIdCounter = txnIdCounter
             };
 
-            string jsonRequest = JsonSerializer.Serialize(request, CamusJsonSerializerContext.Default.CamusTransactionRequest);
-
-            string responseJson = await this.endpoint
+            byte[] responseBytes = await this.endpoint
                                                         .WithHeader("Accept", "application/json")
                                                         .WithTimeout(builder.CommandTimeout)
                                                         .AppendPathSegments("rollback-transaction")
-                                                        .PostAsync(CamusJsonContent.Create(jsonRequest), cancellationToken: cancellationToken)
-                                                        .ReceiveString();
+                                                        .PostAsync(CamusJsonContent.Create(request, CamusJsonSerializerContext.Default.CamusTransactionRequest), cancellationToken: cancellationToken)
+                                                        .ReceiveBytes();
 
-            CamusExecuteDDLResponse? response = JsonSerializer.Deserialize(responseJson, CamusJsonSerializerContext.Default.CamusExecuteDDLResponse);
+            CamusExecuteDDLResponse? response = JsonSerializer.Deserialize(responseBytes, CamusJsonSerializerContext.Default.CamusExecuteDDLResponse);
 
             if (response?.Status != "ok")
                 throw new CamusException("CADB0000", "Rollback failed");

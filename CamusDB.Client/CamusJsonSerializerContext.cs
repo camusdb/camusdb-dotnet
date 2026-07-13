@@ -3,6 +3,8 @@ using System.Text.Json.Serialization;
 namespace CamusDB.Client;
 
 [JsonSourceGenerationOptions]
+[JsonSerializable(typeof(ColumnValue))]
+[JsonSerializable(typeof(CamusResultSet))]
 [JsonSerializable(typeof(CamusErrorResponse))]
 [JsonSerializable(typeof(CamusCreateDatabaseRequest))]
 [JsonSerializable(typeof(CamusCreateDatabaseResponse))]
