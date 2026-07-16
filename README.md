@@ -316,10 +316,21 @@ A transaction has three independent concurrency knobs, passed as `CamusTransacti
 | `Mode` | `ReadWrite`, `ReadOnly` | `ReadWrite` |
 | `Locking` | `Pessimistic`, `Optimistic` | server default (Pessimistic) |
 
-**Optimistic** transactions take no locks; write–write and read–write conflicts are detected at
-**commit**, where the loser throws a `CamusException` you replay (see *Serializable Isolation & Retries*).
-Good for low-contention, read-mostly workloads. Optimistic validation is based on the rows a transaction
-read, not on predicates, so it does **not** protect against phantoms — use pessimistic `Serializable` for that.
+**Optimistic** locking skips the explicit write lock: writes are staged and the rows read are
+version-recorded, and write–write / read–write conflicts are validated at **commit**, where the loser
+throws a `CamusException` you replay (see *Serializable Isolation & Retries*). It trades write-time
+blocking for commit-time validation — good for low-contention, read-mostly workloads.
+
+Optimistic is orthogonal to the isolation level, and it does **not** mean "lock-free" at both levels:
+
+- **Read Committed + Optimistic** is fully lock-free, but phantom-vulnerable — its validation covers only
+  the specific rows it read, not predicates.
+- **Serializable + Optimistic** is a *hybrid*: it still takes the shared range/point (predicate) locks, so
+  it stays phantom-free, while validating its write/read set at commit.
+
+Phantom protection is gated on the isolation level (`Serializable`), not on the locking mode — so use
+`Serializable` (pessimistic **or** optimistic) when you need it; either locking mode under `ReadCommitted`
+is phantom-vulnerable.
 
 ```csharp
 // Optimistic transaction
@@ -337,10 +348,11 @@ CamusTransaction snap = await connection.BeginTransactionAsync(CamusTransactionO
 ```
 
 Any knob left unset defers to the connection-string defaults, then the server default. Set connection-wide
-defaults (which also apply to autocommit statements) via the connection string:
+defaults (which also apply to autocommit statements) via the `IsolationLevel=`, `TransactionMode=`, and
+`Locking=` connection-string keys (values are case-insensitive):
 
 ```
-Endpoint=http://localhost:5095;Database=test;Locking=Optimistic;IsolationLevel=ReadCommitted
+Endpoint=http://localhost:5095;Database=test;Locking=Optimistic;IsolationLevel=ReadCommitted;TransactionMode=ReadWrite
 ```
 
 Precedence: **per-transaction options › connection-string defaults › server default**. The equivalent

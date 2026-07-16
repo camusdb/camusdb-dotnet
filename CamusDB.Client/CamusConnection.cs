@@ -265,6 +265,16 @@ public sealed class CamusConnection : DbConnection
                 await CreateDatabaseImplAsync(databaseName, ifNotExists, cancellationToken).ConfigureAwait(false);
                 return;
             }
+            catch (CamusException ex) when (ifNotExists && IsDatabaseAlreadyExistsError(ex))
+            {
+                // IF NOT EXISTS means "ensure it exists" — and it now does. The server's idempotent
+                // existence check has a TOCTOU gap versus concurrent registration: two racing
+                // CREATE ... IF NOT EXISTS for the same name can both pass the check, and the one that
+                // loses the registration race is rejected with DatabaseAlreadyExists ("is already
+                // registered"). Since the caller asked for IF NOT EXISTS and the database is registered,
+                // treat that as success rather than surfacing the race.
+                return;
+            }
             catch (CamusException ex) when (attempt < maxAttempts && IsTransientCreateDatabaseError(ex))
             {
                 double baseMs = Math.Min(50d * (1 << (attempt - 1)), 800d);
@@ -277,6 +287,11 @@ public sealed class CamusConnection : DbConnection
 
     private static bool IsTransientCreateDatabaseError(CamusException ex)
         => SerializableRetryHelper.IsRetryable(ex);
+
+    // CADB0012 DatabaseAlreadyExists — raised by the server both on the direct "already exists" check and
+    // when a CREATE ... IF NOT EXISTS loses a concurrent registration race ("is already registered").
+    private static bool IsDatabaseAlreadyExistsError(CamusException ex)
+        => ex.Code == "CADB0012";
 
     private async Task CreateDatabaseImplAsync(string databaseName, bool ifNotExists, CancellationToken cancellationToken)
     {
