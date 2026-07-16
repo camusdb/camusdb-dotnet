@@ -241,8 +241,10 @@ public class TestEntityFrameworkProvider
     }
 
     [Fact]
-    public void TestDatabaseCreatorExistsAlwaysReturnsTrue()
+    public void TestDatabaseCreatorExistsAlwaysReturnsFalse()
     {
+        // CamusDatabaseCreator.Exists() intentionally reports false so EnsureCreated always calls the
+        // idempotent Create() (which issues CREATE DATABASE ... IF NOT EXISTS).
         var options = new DbContextOptionsBuilder<SimpleProductContext>()
             .UseCamusDB("Endpoint=http://localhost:5095;Database=test")
             .Options;
@@ -250,7 +252,7 @@ public class TestEntityFrameworkProvider
         using var ctx = new SimpleProductContext(options);
         var creator = ctx.GetService<IRelationalDatabaseCreator>();
 
-        Assert.True(creator.Exists());
+        Assert.False(creator.Exists());
     }
 
     // ── Milestone 4 ──────────────────────────────────────────────────────────
