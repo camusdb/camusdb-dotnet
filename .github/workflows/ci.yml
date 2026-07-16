@@ -1,0 +1,78 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build-and-test:
+    name: Build & test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET (8, 9, 10)
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            8.0.x
+            9.0.x
+            10.0.x
+
+      - name: Start CamusDB
+        run: docker run -d -p 5095:5095 -v camus-data:/data --name camusdb camusdb/camusdb:latest
+
+      - name: Wait for CamusDB to be ready
+        run: |
+          for i in $(seq 1 60); do
+            if curl --fail --silent http://localhost:5095/ping >/dev/null 2>&1; then
+              echo "CamusDB is up after ${i}s."
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "CamusDB did not become ready in time." >&2
+          docker logs camusdb || true
+          exit 1
+
+      - name: Create test database
+        run: |
+          curl --fail --silent -X POST http://localhost:5095/create-db \
+            -H "Content-Type: application/json" \
+            -d '{"databaseName":"test","ifNotExists":true}'
+
+      - name: Restore
+        run: dotnet restore CamusDB.Client/CamusDB.Client.sln
+
+      - name: Build
+        run: dotnet build CamusDB.Client/CamusDB.Client.sln --no-restore -c Release
+
+      - name: Test
+        # The suite talks to a single shared CamusDB instance; running test collections
+        # serially avoids transient DDL/sequence contention between concurrent classes.
+        run: >
+          dotnet test CamusDB.Client/CamusDB.Client.sln
+          --no-build -c Release
+          --logger "trx;LogFileName=test-results.trx"
+          --results-directory TestResults
+          -- xUnit.ParallelizeTestCollections=false
+
+      - name: Dump CamusDB logs on failure
+        if: failure()
+        run: docker logs camusdb || true
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: TestResults/**/*.trx
+          if-no-files-found: ignore
+
+      - name: Stop CamusDB
+        if: always()
+        run: docker rm -f camusdb || true
