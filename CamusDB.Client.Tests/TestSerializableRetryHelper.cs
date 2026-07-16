@@ -45,6 +45,29 @@ public class TestSerializableRetryHelper
     }
 
     [Fact]
+    public void FinalizeUnresolvedIsNotReplayRetryable()
+    {
+        // CADB0509 (TransactionFinalizeUnresolved) must be resolved by re-issuing the SAME commit/
+        // rollback (CamusTransaction handles that), never by a replay-from-BEGIN loop — replaying a
+        // commit that may already have durably applied would double-apply it.
+        CamusException ex = new("CADB0509",
+            "Transaction 12:3 commit outcome is not yet resolved after 8 retries; retry COMMIT on the same transaction");
+
+        Assert.False(SerializableRetryHelper.IsRetryable(ex));
+        Assert.False(SerializableRetryHelper.IsRetryable((Exception)ex));
+    }
+
+    [Fact]
+    public void FinalizeUnresolvedIsNotReplayableEvenWithATransientMarkerInMessage()
+    {
+        // Defensive: even if a finalize-unresolved error's text happened to contain a transient marker,
+        // the CADB0509 code short-circuits it to non-replayable.
+        CamusException ex = new("CADB0509", "finalize unresolved: MustRetry");
+
+        Assert.False(SerializableRetryHelper.IsRetryable(ex));
+    }
+
+    [Fact]
     public void MarkerMatchIsCaseSensitiveAndOrdinal()
     {
         // The markers mirror the exact server wording; a lower-cased variant is not a match.

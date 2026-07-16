@@ -20,12 +20,25 @@ public static class SerializableRetryHelper
     // CADB0502 — lock conflict; Kahuna aborted at lock-acquire time, no 2PC attempted.
     // CADB0504 — routing retry budget exhausted; no data written.
     // CADB0505 — transaction held open past MaxSerializableTransactionLifetimeMs; range locks released.
+    // These three are "replay from BEGIN" transients: the transaction is dead and nothing it wrote
+    // survived, so recovery re-runs the whole operation on a fresh transaction.
     private static readonly HashSet<string> RetryableCodes =
     [
         "CADB0502",
         "CADB0504",
         "CADB0505",
     ];
+
+    /// <summary>
+    /// CADB0509 <c>TransactionFinalizeUnresolved</c>: a <c>COMMIT</c>/<c>ROLLBACK</c> whose outcome is not
+    /// yet known (the coordinator returned its non-terminal <c>MustRetry</c> past the bounded finalize
+    /// retries). This is a fundamentally different kind of retry — the transaction is <b>not</b> dead and
+    /// the finalize must be re-issued on the <b>same</b> handle (see
+    /// <see cref="CamusTransaction.CommitAsync"/> / <see cref="CamusTransaction.RollbackAsync"/>). It must
+    /// therefore <b>never</b> be treated as replay-from-<c>BEGIN</c> retryable — replaying a commit that
+    /// may already have durably applied would double-apply it.
+    /// </summary>
+    internal const string FinalizeUnresolvedCode = "CADB0509";
 
     // Transient contention conditions the server surfaces in the message text rather than through a
     // distinct CADB05xx code. These fire when many operations race on shared schema/sequence state
@@ -44,6 +57,11 @@ public static class SerializableRetryHelper
     /// </summary>
     public static bool IsRetryable(CamusException exception)
     {
+        // CADB0509 is resolved by re-issuing the same finalize, never by a replay-from-BEGIN loop.
+        // Exclude it up front so neither a code nor a message marker can classify it as replay-safe.
+        if (exception.Code == FinalizeUnresolvedCode)
+            return false;
+
         if (RetryableCodes.Contains(exception.Code))
             return true;
 

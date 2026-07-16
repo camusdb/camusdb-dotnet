@@ -359,6 +359,13 @@ Three error codes indicate a transient conflict that a full retry can resolve:
 | `CADB0504` | `TransactionMustRetry` | Routing retry budget exhausted; no data written |
 | `CADB0505` | `TransactionLifetimeExceeded` | Transaction held open past the server lifetime limit |
 
+A fourth code, `CADB0509` (`TransactionFinalizeUnresolved`), is a **different** kind of retry and is
+**not** replay-retryable: it means a `COMMIT`/`ROLLBACK` outcome is not yet resolved, and the fix is to
+re-issue the *same* finalize on the *same* transaction — never to replay the operation (the commit may
+already have durably applied). `CamusTransaction.CommitAsync`/`RollbackAsync` handle this transparently
+(bounded re-issue with back-off), and `SerializableRetryHelper.IsRetryable` returns `false` for it so it
+never enters a replay-from-`BEGIN` loop.
+
 Use `SerializableRetryHelper.IsRetryable(ex)` to test any exception, and `SerializableRetryHelper.ExecuteAutocommitAsync` for bounded automatic retry of single-statement (autocommit) operations:
 
 ```csharp

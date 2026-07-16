@@ -76,66 +76,51 @@ public class CamusTransaction : DbTransaction
     public override void Rollback() => RollbackAsync(default).GetAwaiter().GetResult();    
 
     /// <summary>
-    /// Commits the database transaction asynchronously, returning the commit timestamp.
+    /// Bound on how many times a <c>COMMIT</c>/<c>ROLLBACK</c> that comes back as CADB0509
+    /// (<c>TransactionFinalizeUnresolved</c>) is re-issued on the same handle before the error is
+    /// surfaced. The Kahuna session timeout is the ultimate server-side backstop.
     /// </summary>
-    /// <param name="cancellationToken">A cancellation token used for this task.</param>    
-    public override async Task CommitAsync(CancellationToken cancellationToken = default)
-    {        
-        string database = builder.Config["Database"];
+    private const int MaxFinalizeAttempts = 10;
 
-        try
+    /// <summary>
+    /// Commits the database transaction asynchronously.
+    /// </summary>
+    /// <param name="cancellationToken">A cancellation token used for this task.</param>
+    public override Task CommitAsync(CancellationToken cancellationToken = default)
+        => FinalizeAsync("commit-transaction", "Commit failed", cancellationToken);
+
+    /// <summary>
+    /// Rolls back the database transaction asynchronously.
+    /// </summary>
+    /// <param name="cancellationToken">A cancellation token used for this task.</param>
+    public override Task RollbackAsync(CancellationToken cancellationToken = default)
+        => FinalizeAsync("rollback-transaction", "Rollback failed", cancellationToken);
+
+    /// <summary>
+    /// Issues a finalize (<c>commit-transaction</c> / <c>rollback-transaction</c>) and resolves the
+    /// non-terminal CADB0509 outcome by re-issuing the <b>same</b> finalize on the <b>same</b>
+    /// transaction handle, bounded and backing off. CADB0509 means the commit/rollback outcome is not
+    /// yet known — the transaction is not dead — so the operation must never be replayed from
+    /// <c>BEGIN</c> (that could double-apply an already-durable commit). All other errors propagate.
+    /// </summary>
+    private async Task FinalizeAsync(string pathSegment, string failureMessage, CancellationToken cancellationToken)
+    {
+        for (int attempt = 0; ; attempt++)
         {
-            CamusTransactionRequest request = new()
+            try
             {
-                DatabaseName = database,
-                TxnIdPT = txnIdPT,
-                TxnIdCounter = txnIdCounter
-            };
-
-            byte[] responseBytes = await this.endpoint
-                                                        .WithHeader("Accept", "application/json")
-                                                        .WithTimeout(builder.CommandTimeout)
-                                                        .AppendPathSegments("commit-transaction")
-                                                        .PostAsync(CamusJsonContent.Create(request, CamusJsonSerializerContext.Default.CamusTransactionRequest), cancellationToken: cancellationToken)
-                                                        .ReceiveBytes();
-
-            CamusExecuteDDLResponse? response = JsonSerializer.Deserialize(responseBytes, CamusJsonSerializerContext.Default.CamusExecuteDDLResponse);
-
-            if (response?.Status != "ok")
-                throw new CamusException("CADB0000", "Commit failed");
-        }
-        catch (FlurlHttpException ex)
-        {
-            CamusEndpointHealth.MarkUnreachableIfTransportFailed(builder, endpoint, ex);
-
-            string response = await ex.GetResponseStringAsync();
-
-            if (!string.IsNullOrEmpty(response))
-            {
-                try
-                {
-                    CamusErrorResponse? errorResponse = JsonSerializer.Deserialize(response, CamusJsonSerializerContext.Default.CamusErrorResponse);
-
-                    if (errorResponse is not null)
-                        throw new CamusException(errorResponse.Code ?? "CADB0000", errorResponse.Message ?? "");
-                }
-                catch (JsonException)
-                {
-
-                }
-
-                throw new CamusException("CADB0000", response);
+                await PostFinalizeAsync(pathSegment, failureMessage, cancellationToken).ConfigureAwait(false);
+                return;
             }
-
-            throw new CamusException("CADB0000", ex.Message);
+            catch (CamusException ex)
+                when (ex.Code == SerializableRetryHelper.FinalizeUnresolvedCode && attempt < MaxFinalizeAttempts)
+            {
+                await Task.Delay(ComputeFinalizeDelay(attempt), cancellationToken).ConfigureAwait(false);
+            }
         }
     }
 
-    /// <summary>
-    /// Rollbacks the database transaction asynchronously, returning the commit timestamp.
-    /// </summary>
-    /// <param name="cancellationToken">A cancellation token used for this task.</param>
-    public override async Task RollbackAsync(CancellationToken cancellationToken = default)
+    private async Task PostFinalizeAsync(string pathSegment, string failureMessage, CancellationToken cancellationToken)
     {
         string database = builder.Config["Database"];
 
@@ -151,14 +136,14 @@ public class CamusTransaction : DbTransaction
             byte[] responseBytes = await this.endpoint
                                                         .WithHeader("Accept", "application/json")
                                                         .WithTimeout(builder.CommandTimeout)
-                                                        .AppendPathSegments("rollback-transaction")
+                                                        .AppendPathSegments(pathSegment)
                                                         .PostAsync(CamusJsonContent.Create(request, CamusJsonSerializerContext.Default.CamusTransactionRequest), cancellationToken: cancellationToken)
                                                         .ReceiveBytes();
 
             CamusExecuteDDLResponse? response = JsonSerializer.Deserialize(responseBytes, CamusJsonSerializerContext.Default.CamusExecuteDDLResponse);
 
             if (response?.Status != "ok")
-                throw new CamusException("CADB0000", "Rollback failed");
+                throw new CamusException("CADB0000", failureMessage);
         }
         catch (FlurlHttpException ex)
         {
@@ -186,4 +171,9 @@ public class CamusTransaction : DbTransaction
             throw new CamusException("CADB0000", ex.Message);
         }
     }
+
+    // Finalize back-off: 50 ms × 2^min(attempt, 6) (caps at ~3.2 s), matching the server's finalize
+    // retry contract for an unresolved commit/rollback outcome.
+    private static TimeSpan ComputeFinalizeDelay(int attempt)
+        => TimeSpan.FromMilliseconds(50d * (1 << Math.Min(attempt, 6)));
 }
