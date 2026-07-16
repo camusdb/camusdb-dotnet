@@ -7,22 +7,19 @@
  */
 
 using System.Text.Json;
-using System.Text.Json.Serialization;
-using System.Text.Json.Serialization.Metadata;
 
 namespace CamusDB.Client;
 
 /// <summary>
 /// Columnar, positional storage for a query result. Rows are held in a single flat
-/// <see cref="ColumnValue"/>[] (row-major: cell <c>(row, col)</c> lives at <c>row * ColumnCount + col</c>)
-/// with the column names captured once from the first row.
+/// <see cref="ColumnValue"/>[] (row-major: cell <c>(row, col)</c> lives at <c>row * ColumnCount + col</c>).
+/// The column names and declared types come from the response's authoritative <c>columns</c> schema, so
+/// the shape is known even when there are no rows.
 ///
-/// <para>This replaces the previous <c>List&lt;Dictionary&lt;string, ColumnValue&gt;&gt;</c> shape: it
-/// removes one <see cref="System.Collections.Generic.Dictionary{TKey,TValue}"/> allocation per row and
-/// turns every per-cell access in <see cref="CamusDataReader"/> from a string-hashed dictionary lookup
-/// into a direct array index.</para>
+/// <para>The wire format is an ordered <c>columns</c> array plus positional <c>rows</c> (each row a JSON
+/// array aligned to <c>columns</c>). <see cref="FromWire"/> decodes each positional cell against its
+/// declared <see cref="ColumnType"/>.</para>
 /// </summary>
-[JsonConverter(typeof(CamusResultSetConverter))]
 public sealed class CamusResultSet
 {
     /// <summary>An empty result (zero rows, zero columns), shared to avoid allocating for count-only readers.</summary>
@@ -32,23 +29,100 @@ public sealed class CamusResultSet
 
     public string[] ColumnNames { get; }
 
+    /// <summary>
+    /// Declared type of each column, positionally aligned with <see cref="ColumnNames"/>, when the
+    /// server supplied an explicit output schema. Null only for results materialized by name via
+    /// <see cref="FromRows"/> (test helpers), in which case field types are read from the current row.
+    /// </summary>
+    public ColumnType[]? ColumnTypes { get; }
+
     public int RowCount { get; }
 
     public int ColumnCount => ColumnNames.Length;
 
     public CamusResultSet(string[] columnNames, ColumnValue[] cells, int rowCount)
+        : this(columnNames, cells, rowCount, columnTypes: null)
+    {
+    }
+
+    public CamusResultSet(string[] columnNames, ColumnValue[] cells, int rowCount, ColumnType[]? columnTypes)
     {
         ColumnNames = columnNames;
         this.cells = cells;
         RowCount = rowCount;
+        ColumnTypes = columnTypes;
+    }
+
+    /// <summary>
+    /// Builds a result from the server's authoritative <c>columns</c> schema and positional <c>rows</c>
+    /// payload. Each <c>rows[r][c]</c> value is decoded against <c>columns[c]</c>'s declared type. Works
+    /// for zero rows (the schema still yields the full column list), which is what lets the reader report
+    /// field count / names / types before the first row is read.
+    /// </summary>
+    public static CamusResultSet FromWire(IReadOnlyList<CamusColumnSchema> columns, JsonElement rows)
+    {
+        int columnCount = columns.Count;
+        string[] names = new string[columnCount];
+        ColumnType[] types = new ColumnType[columnCount];
+
+        for (int i = 0; i < columnCount; i++)
+        {
+            names[i] = columns[i].Name;
+            types[i] = columns[i].Type;
+        }
+
+        if (rows.ValueKind != JsonValueKind.Array || columnCount == 0)
+            return new CamusResultSet(names, [], 0, types);
+
+        int rowCount = rows.GetArrayLength();
+        ColumnValue[] cells = new ColumnValue[rowCount * columnCount];
+
+        int r = 0;
+        foreach (JsonElement row in rows.EnumerateArray())
+        {
+            int rowBase = r * columnCount;
+            int c = 0;
+
+            foreach (JsonElement cell in row.EnumerateArray())
+            {
+                if (c >= columnCount)
+                    break;
+
+                cells[rowBase + c] = DecodeCell(cell, types[c]);
+                c++;
+            }
+
+            // Any positions the row omitted stay ColumnValue.Null (the array default).
+            r++;
+        }
+
+        return new CamusResultSet(names, cells, rowCount, types);
     }
 
     public ColumnValue GetCell(int row, int column) => cells[row * ColumnCount + column];
 
     /// <summary>
+    /// Builds a zero-row result that still carries the query's output schema (column names + declared
+    /// types). Retained for callers/tests that construct a schema-only reader directly.
+    /// </summary>
+    public static CamusResultSet EmptyWithSchema(IReadOnlyList<CamusColumnSchema> columns)
+    {
+        string[] names = new string[columns.Count];
+        ColumnType[] types = new ColumnType[columns.Count];
+
+        for (int i = 0; i < columns.Count; i++)
+        {
+            names[i] = columns[i].Name;
+            types[i] = columns[i].Type;
+        }
+
+        return new CamusResultSet(names, [], 0, types);
+    }
+
+    /// <summary>
     /// Builds a result set from a list of row dictionaries (column name → value). The column schema is
-    /// taken from the first row. Provided for callers that materialize rows by name — the wire path uses
-    /// <see cref="CamusResultSetConverter"/> to populate the flat storage directly.
+    /// taken from the first row. Provided for callers/tests that materialize rows by name; the wire path
+    /// uses <see cref="FromWire"/>.
     /// </summary>
     public static CamusResultSet FromRows(IReadOnlyList<IReadOnlyDictionary<string, ColumnValue>> rows)
     {
@@ -69,84 +143,106 @@ public sealed class CamusResultSet
 
         return new CamusResultSet(columnNames, cells, rows.Count);
     }
-}
 
-/// <summary>
-/// Reads the server's <c>"rows"</c> payload — a JSON array of row objects keyed by column name — directly
-/// into <see cref="CamusResultSet"/>'s flat backing array, without materializing a dictionary per row.
-/// The column schema is established from the first row (a SQL result set has the same columns in every
-/// row); later rows are placed by resolved ordinal, so a server that reordered a row's keys still maps
-/// correctly.
-/// </summary>
-internal sealed class CamusResultSetConverter : JsonConverter<CamusResultSet>
-{
-    public override CamusResultSet? Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+    /// <summary>
+    /// Decodes one compact-raw positional cell into a <see cref="ColumnValue"/> using its declared type.
+    /// A JSON <c>null</c> is <see cref="ColumnValue.Null"/> for any column type. String/array-encoded
+    /// types (Id, Bytes, Date, DateTime, Uuid, Array) rely on the declared type being exact — it always
+    /// is for real column references. JSON-native scalars are read by token so an over-broad inferred
+    /// type on an expression column (e.g. a numeric projection reported as String) still round-trips.
+    /// </summary>
+    private static ColumnValue DecodeCell(JsonElement cell, ColumnType declared)
     {
-        if (reader.TokenType == JsonTokenType.Null)
-            return null;
+        if (cell.ValueKind == JsonValueKind.Null || cell.ValueKind == JsonValueKind.Undefined)
+            return ColumnValue.Null;
 
-        if (reader.TokenType != JsonTokenType.StartArray)
-            throw new JsonException("Expected the start of the rows array.");
-
-        JsonTypeInfo<ColumnValue> columnInfo = CamusJsonSerializerContext.Default.ColumnValue;
-
-        List<string> names = [];
-        Dictionary<string, int> ordinals = new(StringComparer.Ordinal);
-        List<ColumnValue> cells = [];
-        int columnCount = -1;
-        int rowCount = 0;
-
-        while (reader.Read())
+        switch (declared)
         {
-            if (reader.TokenType == JsonTokenType.EndArray)
-                break;
+            case ColumnType.Id:
+                return new ColumnValue { Type = ColumnType.Id, StrValue = cell.GetString() };
 
-            if (reader.TokenType != JsonTokenType.StartObject)
-                throw new JsonException("Expected a row object.");
+            case ColumnType.Bytes:
+                return new ColumnValue { Type = ColumnType.Bytes, BytesValue = cell.GetBytesFromBase64() };
 
-            if (columnCount < 0)
-            {
-                // First row: encounter order defines the ordinals; append each cell as discovered.
-                while (reader.Read() && reader.TokenType == JsonTokenType.PropertyName)
-                {
-                    string name = reader.GetString()!;
-                    reader.Read();
-                    ColumnValue value = JsonSerializer.Deserialize(ref reader, columnInfo);
+            case ColumnType.Date:
+                return new ColumnValue { Type = ColumnType.Date, LongValue = cell.GetInt64() };
 
-                    ordinals[name] = names.Count;
-                    names.Add(name);
-                    cells.Add(value);
-                }
+            case ColumnType.DateTime:
+                return new ColumnValue { Type = ColumnType.DateTime, LongValue = cell.GetInt64() };
 
-                columnCount = names.Count;
-            }
-            else
-            {
-                // Reserve this row's slots so out-of-order properties still land at the right ordinal.
-                int rowBase = cells.Count;
-                for (int i = 0; i < columnCount; i++)
-                    cells.Add(ColumnValue.Null);
+            case ColumnType.Uuid:
+                return DecodeUuid(cell);
 
-                while (reader.Read() && reader.TokenType == JsonTokenType.PropertyName)
-                {
-                    string name = reader.GetString()!;
-                    reader.Read();
-                    ColumnValue value = JsonSerializer.Deserialize(ref reader, columnInfo);
+            case ColumnType.Array:
+                return DecodeArray(cell);
 
-                    if (ordinals.TryGetValue(name, out int ordinal))
-                        cells[rowBase + ordinal] = value;
-                }
-            }
-
-            rowCount++;
+            default:
+                return DecodeScalarByToken(cell, declared);
         }
-
-        if (rowCount == 0)
-            return CamusResultSet.Empty;
-
-        return new CamusResultSet([.. names], [.. cells], rowCount);
     }
 
-    public override void Write(Utf8JsonWriter writer, CamusResultSet value, JsonSerializerOptions options)
-        => throw new NotSupportedException("CamusResultSet is a read-only response type and is never serialized.");
+    // Uuid is wired as [high, low] — two big-endian 64-bit halves (see ColumnValue.AsGuid). A canonical
+    // string form is accepted as a fallback.
+    private static ColumnValue DecodeUuid(JsonElement cell)
+    {
+        if (cell.ValueKind == JsonValueKind.Array && cell.GetArrayLength() == 2)
+            return new ColumnValue
+            {
+                Type = ColumnType.Uuid,
+                UuidHigh = cell[0].GetInt64(),
+                LongValue = cell[1].GetInt64(),
+            };
+
+        if (cell.ValueKind == JsonValueKind.String)
+            return new ColumnValue { Type = ColumnType.Uuid, UuidValue = cell.GetString() };
+
+        return ColumnValue.Null;
+    }
+
+    // The wire schema carries no per-element type for arrays, so element types are inferred from the JSON
+    // token. Fully faithful for JSON-native element types; string/array-encoded element types (uuid/date/
+    // bytes inside an array) are not reconstructed — arrays are not part of the EF workload.
+    private static ColumnValue DecodeArray(JsonElement cell)
+    {
+        if (cell.ValueKind != JsonValueKind.Array)
+            return ColumnValue.Null;
+
+        List<ColumnValue> values = new(cell.GetArrayLength());
+        ColumnType elementType = ColumnType.Null;
+
+        foreach (JsonElement item in cell.EnumerateArray())
+        {
+            ColumnValue decoded = DecodeScalarByToken(item, ColumnType.Null);
+            if (decoded.Type != ColumnType.Null)
+                elementType = decoded.Type;
+            values.Add(decoded);
+        }
+
+        return new ColumnValue { Type = ColumnType.Array, ArrayValues = values, ArrayElementType = elementType };
+    }
+
+    private static ColumnValue DecodeScalarByToken(JsonElement cell, ColumnType declared)
+    {
+        switch (cell.ValueKind)
+        {
+            case JsonValueKind.String:
+                return new ColumnValue { Type = ColumnType.String, StrValue = cell.GetString() };
+
+            case JsonValueKind.True:
+            case JsonValueKind.False:
+                return new ColumnValue { Type = ColumnType.Bool, BoolValue = cell.GetBoolean() };
+
+            case JsonValueKind.Number:
+                if (declared is ColumnType.Float64 or ColumnType.Float32)
+                    return new ColumnValue { Type = declared, FloatValue = cell.GetDouble() };
+
+                if (cell.TryGetInt64(out long l))
+                    return new ColumnValue { Type = ColumnType.Integer64, LongValue = l };
+
+                return new ColumnValue { Type = ColumnType.Float64, FloatValue = cell.GetDouble() };
+
+            default:
+                return ColumnValue.Null;
+        }
+    }
 }

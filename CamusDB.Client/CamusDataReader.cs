@@ -91,9 +91,29 @@ public class CamusDataReader : DbDataReader
 
     public override string GetName(int ordinal) => columnNames[ordinal];
 
-    public override string GetDataTypeName(int ordinal) => GetColumnValue(ordinal).Type.ToString();
+    public override string GetDataTypeName(int ordinal) => ColumnTypeAt(ordinal).ToString();
 
-    public override Type GetFieldType(int ordinal) => GetColumnValue(ordinal).Type switch
+    /// <summary>
+    /// Resolves a column's declared type. Prefers the server-supplied schema (available even with zero
+    /// rows) and otherwise falls back to the type of the cell in the current row — the only source when
+    /// an older server inferred the schema from rows.
+    /// </summary>
+    private ColumnType ColumnTypeAt(int ordinal)
+    {
+        ColumnType[]? types = resultSet.ColumnTypes;
+
+        if (types is not null)
+        {
+            if (ordinal < 0 || ordinal >= types.Length)
+                throw new IndexOutOfRangeException();
+
+            return types[ordinal];
+        }
+
+        return GetColumnValue(ordinal).Type;
+    }
+
+    public override Type GetFieldType(int ordinal) => ColumnTypeAt(ordinal) switch
     {
         ColumnType.Bool => typeof(bool),
         ColumnType.Float64 => typeof(double),

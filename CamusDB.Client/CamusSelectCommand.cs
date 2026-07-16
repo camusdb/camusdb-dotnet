@@ -6,6 +6,7 @@
  * file that was distributed with this source code.
  */
 
+using System.Text.Json;
 using System.Text.Json.Serialization;
 
 namespace CamusDB.Client;
@@ -15,8 +16,22 @@ internal sealed class CamusExecuteSqlQueryResponse
     [JsonPropertyName("status")]
     public string? Status { get; set; }
 
+    /// <summary>
+    /// Positional result rows: a JSON array of row arrays, where <c>rows[r][c]</c> is the compact-raw
+    /// value for <see cref="Columns"/><c>[c]</c>. Decoded against the declared column types by
+    /// <see cref="CamusResultSet.FromWire"/>. Held as a raw <see cref="JsonElement"/> so cells are
+    /// decoded once, positionally, without a per-cell object.
+    /// </summary>
     [JsonPropertyName("rows")]
-    public CamusResultSet? Rows { get; set; }
+    public JsonElement Rows { get; set; }
+
+    /// <summary>
+    /// Ordered output column schema (name + declared <see cref="ColumnType"/>) for this query. Always
+    /// present on row-producing responses, even when <see cref="Rows"/> is empty — this is what lets the
+    /// client report the full result schema (field count, names, types) before the first row.
+    /// </summary>
+    [JsonPropertyName("columns")]
+    public List<CamusColumnSchema>? Columns { get; set; }
 
     /// <summary>Query result cache resolution: <c>hit</c>, <c>miss</c>, <c>bypass</c>, etc. Null when the query carried no cache hint.</summary>
     [JsonPropertyName("cacheStatus")]

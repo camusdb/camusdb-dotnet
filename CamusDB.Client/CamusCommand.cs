@@ -388,12 +388,18 @@ public class CamusCommand : DbCommand, ICloneable
 
             CamusExecuteSqlQueryResponse? response = JsonSerializer.Deserialize(responseBytes, CamusJsonSerializerContext.Default.CamusExecuteSqlQueryResponse);
 
-            if (response?.Rows == null)
+            if (response is null)
                 throw new CamusException("CADB0000", "Empty result returned");
 
             LastCacheMetadata = CamusCacheMetadata.FromResponse(response);
 
-            return new CamusDataReader(response.Rows, LastCacheMetadata);
+            // The response carries an authoritative `columns` schema plus positional `rows`. Decoding
+            // from the schema (not by peeking at the first row) means the reader reports field count,
+            // names and types even for an empty result — required by consumers that inspect the schema
+            // before reading a row (e.g. EF Core's buffered reader under EnableRetryOnFailure).
+            CamusResultSet rows = CamusResultSet.FromWire(response.Columns ?? [], response.Rows);
+
+            return new CamusDataReader(rows, LastCacheMetadata);
         }
         catch (FlurlHttpException ex)
         {
