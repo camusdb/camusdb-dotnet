@@ -10,8 +10,10 @@ namespace CamusDB.Client;
 
 /// <summary>
 /// Helpers for serializable-isolation retry logic.
-/// Only three error codes indicate a transient serialization failure that a full
-/// replay-from-BEGIN can resolve; all others are permanent and must propagate.
+/// A failure is transient — resolvable by a full replay-from-BEGIN — when it carries one of the
+/// retryable serialization-failure codes, or when its message contains one of the transient
+/// contention markers the server emits without a distinct code (e.g. schema/sequence allocation
+/// contention reported as "MustRetry"). All other failures are permanent and must propagate.
 /// </summary>
 public static class SerializableRetryHelper
 {
@@ -25,9 +27,36 @@ public static class SerializableRetryHelper
         "CADB0505",
     ];
 
-    /// <summary>Returns true when <paramref name="exception"/> carries a retryable serialization-failure code.</summary>
+    // Transient contention conditions the server surfaces in the message text rather than through a
+    // distinct CADB05xx code. These fire when many operations race on shared schema/sequence state
+    // (e.g. parallel environment provisioning colliding on the table-id sequence: "...: MustRetry").
+    // Kept in sync with CamusConnection's CREATE DATABASE retry and BaseTest's DDL retry.
+    private static readonly string[] RetryableMessageMarkers =
+    [
+        "MustRetry",
+        "AlreadyLocked",
+        "commit returned Aborted",
+    ];
+
+    /// <summary>
+    /// Returns true when <paramref name="exception"/> is a transient serialization/contention failure —
+    /// either by its <see cref="CamusException.Code"/> or by a transient marker in its message.
+    /// </summary>
     public static bool IsRetryable(CamusException exception)
-        => RetryableCodes.Contains(exception.Code);
+    {
+        if (RetryableCodes.Contains(exception.Code))
+            return true;
+
+        string message = exception.Message;
+
+        foreach (string marker in RetryableMessageMarkers)
+        {
+            if (message.Contains(marker, StringComparison.Ordinal))
+                return true;
+        }
+
+        return false;
+    }
 
     /// <summary>
     /// Walks the exception chain and returns true if any <see cref="CamusException"/> in it is retryable.
@@ -45,7 +74,7 @@ public static class SerializableRetryHelper
 
     /// <summary>
     /// Executes <paramref name="operation"/> with bounded automatic retry on transient serialization
-    /// failures (CADB0502 / CADB0504 / CADB0505). Any other exception propagates immediately.
+    /// failures (see <see cref="IsRetryable(CamusException)"/>). Any other exception propagates immediately.
     /// Back-off schedule: min(20 ms × 2^attempt, 400 ms) ± 25 % jitter.
     /// </summary>
     public static async Task ExecuteAutocommitAsync(

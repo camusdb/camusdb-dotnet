@@ -213,8 +213,8 @@ public sealed class CamusConnection : DbConnection
 
     // Concurrent CreateDatabaseAsync calls can transiently collide while the server allocates the
     // shared database id sequence (e.g. many environments provisioning in parallel); the server reports
-    // this as a "MustRetry" condition. Retry with the same message-based transient markers used by
-    // CamusDB.Client.Tests/BaseTest.cs for schema-creation contention.
+    // this as a "MustRetry" condition. Retry using the shared transient-failure classification in
+    // SerializableRetryHelper (which the EF execution strategy also uses).
     private async Task CreateDatabaseWithRetryAsync(string databaseName, bool ifNotExists, CancellationToken cancellationToken)
     {
         const int maxAttempts = 5;
@@ -237,9 +237,7 @@ public sealed class CamusConnection : DbConnection
     }
 
     private static bool IsTransientCreateDatabaseError(CamusException ex)
-        => ex.Message.Contains("MustRetry", StringComparison.Ordinal) ||
-           ex.Message.Contains("AlreadyLocked", StringComparison.Ordinal) ||
-           ex.Message.Contains("commit returned Aborted", StringComparison.Ordinal);
+        => SerializableRetryHelper.IsRetryable(ex);
 
     private async Task CreateDatabaseImplAsync(string databaseName, bool ifNotExists, CancellationToken cancellationToken)
     {
