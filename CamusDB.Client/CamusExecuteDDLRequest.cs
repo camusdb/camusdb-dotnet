@@ -15,4 +15,19 @@ internal sealed class CamusExecuteDDLRequest
 
     [JsonPropertyName("sql")]
     public string? Sql { get; set; }
+
+    /// <summary>Isolation level for the autocommit transaction begun by this DDL request.</summary>
+    [JsonPropertyName("isolationLevel")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? IsolationLevel { get; set; }
+
+    /// <summary>Transaction mode for the autocommit transaction begun by this DDL request.</summary>
+    [JsonPropertyName("transactionMode")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? TransactionMode { get; set; }
+
+    /// <summary>Locking mode for the autocommit transaction begun by this DDL request.</summary>
+    [JsonPropertyName("locking")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? Locking { get; set; }
 }

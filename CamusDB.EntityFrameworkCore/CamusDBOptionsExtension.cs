@@ -1,3 +1,4 @@
+using CamusDB.Client;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.Extensions.DependencyInjection;
 
@@ -16,7 +17,17 @@ public sealed class CamusDBOptionsExtension : RelationalOptionsExtension
         RetryMaxDelay = copyFrom.RetryMaxDelay;
         RetryDeadline = copyFrom.RetryDeadline;
         RetryMedianFirstDelay = copyFrom.RetryMedianFirstDelay;
+        DefaultTransactionOptions = copyFrom.DefaultTransactionOptions;
     }
+
+    /// <summary>
+    /// Connection-wide default concurrency options (isolation / mode / locking) applied to every
+    /// transaction and autocommit statement on contexts using this provider, unless the caller specifies
+    /// its own. Set via <see cref="CamusDBDbContextOptionsBuilder.UseOptimisticLocking"/> /
+    /// <see cref="CamusDBDbContextOptionsBuilder.UseTransactionDefaults"/>. <see langword="null"/> means
+    /// the connection-string / server defaults apply.
+    /// </summary>
+    public CamusTransactionOptions? DefaultTransactionOptions { get; private set; }
 
     public bool RetryOnFailureEnabled { get; private set; }
 
@@ -62,6 +73,15 @@ public sealed class CamusDBOptionsExtension : RelationalOptionsExtension
         return clone;
     }
 
+    public CamusDBOptionsExtension WithTransactionDefaults(CamusTransactionOptions options)
+    {
+        ArgumentNullException.ThrowIfNull(options);
+
+        var clone = (CamusDBOptionsExtension)Clone();
+        clone.DefaultTransactionOptions = options;
+        return clone;
+    }
+
     private sealed class ExtensionInfo(IDbContextOptionsExtension extension)
         : RelationalOptionsExtension.RelationalExtensionInfo(extension)
     {
@@ -86,6 +106,11 @@ public sealed class CamusDBOptionsExtension : RelationalOptionsExtension
             debugInfo["CamusDB:RetryMaxDelayMs"] = Extension.RetryMaxDelay.TotalMilliseconds.ToString("F0");
             debugInfo["CamusDB:RetryDeadlineMs"] = Extension.RetryDeadline.TotalMilliseconds.ToString("F0");
             debugInfo["CamusDB:RetryMedianFirstDelayMs"] = Extension.RetryMedianFirstDelay.TotalMilliseconds.ToString("F0");
+
+            CamusTransactionOptions? txOptions = Extension.DefaultTransactionOptions;
+            debugInfo["CamusDB:DefaultLocking"] = txOptions?.Locking?.ToString() ?? "(default)";
+            debugInfo["CamusDB:DefaultIsolationLevel"] = txOptions?.IsolationLevel?.ToString() ?? "(default)";
+            debugInfo["CamusDB:DefaultTransactionMode"] = txOptions?.Mode?.ToString() ?? "(default)";
         }
 
         public override bool ShouldUseSameServiceProvider(DbContextOptionsExtensionInfo other)

@@ -91,6 +91,14 @@ public class CamusCommand : DbCommand, ICloneable
 
     protected override DbTransaction? DbTransaction { get => transaction; set => transaction = (CamusTransaction?) value; }
 
+    /// <summary>
+    /// The effective concurrency options for an autocommit statement (no explicit <see cref="Transaction"/>):
+    /// the connection's resolved defaults, or the connection-string defaults when this command has no
+    /// connection. Applied to the writable autocommit paths; the read-only query path has no locking mode.
+    /// </summary>
+    private CamusTransactionOptions ResolveAutocommitOptions()
+        => connection is not null ? connection.ResolveTransactionOptions(null) : builder.DefaultTransactionOptions;
+
     public override void Cancel()
     {
         // CamusDB uses HTTP requests, so cancellation is cooperative via CancellationToken.
@@ -435,6 +443,13 @@ public class CamusCommand : DbCommand, ICloneable
                 request.TxnIdPT = transaction.TxnIdPT;
                 request.TxnIdCounter = transaction.TxnIdCounter;
             }
+            else
+            {
+                CamusTransactionOptions options = ResolveAutocommitOptions();
+                request.IsolationLevel = options.IsolationLevelWire;
+                request.TransactionMode = options.ModeWire;
+                request.Locking = options.LockingWire;
+            }
 
             byte[] responseBytes = await endpoint
                                         .WithHeader("Accept", "application/json")
@@ -514,6 +529,13 @@ public class CamusCommand : DbCommand, ICloneable
                 request.TxnIdPT = transaction.TxnIdPT;
                 request.TxnIdCounter = transaction.TxnIdCounter;
             }
+            else
+            {
+                CamusTransactionOptions options = ResolveAutocommitOptions();
+                request.IsolationLevel = options.IsolationLevelWire;
+                request.TransactionMode = options.ModeWire;
+                request.Locking = options.LockingWire;
+            }
 
             byte[] responseBytes = await endpoint
                                         .WithHeader("Accept", "application/json")
@@ -592,6 +614,13 @@ public class CamusCommand : DbCommand, ICloneable
             {
                 request.TxnIdPT = transaction.TxnIdPT;
                 request.TxnIdCounter = transaction.TxnIdCounter;
+            }
+            else
+            {
+                CamusTransactionOptions options = ResolveAutocommitOptions();
+                request.IsolationLevel = options.IsolationLevelWire;
+                request.TransactionMode = options.ModeWire;
+                request.Locking = options.LockingWire;
             }
 
             byte[] responseBytes = await endpoint

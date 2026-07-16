@@ -47,11 +47,31 @@ public sealed class CamusConnection : DbConnection
 
     public override ConnectionState State => state;
 
+    /// <summary>
+    /// Connection-wide default concurrency options applied to transactions (and autocommit statements)
+    /// begun on this connection when the caller does not specify their own. Overrides the
+    /// connection-string defaults and is itself overridden by a per-transaction
+    /// <see cref="CamusTransactionOptions"/>. The EF provider sets this from
+    /// <c>UseOptimisticLocking()</c>; a plain client caller can set it directly.
+    /// </summary>
+    public CamusTransactionOptions? DefaultTransactionOptions { get; set; }
+
     public CamusConnection(CamusConnectionStringBuilder builder)
     {
         ConnectionString = builder.ToString();
         this.builder = builder;
     }
+
+    /// <summary>
+    /// Resolves the effective options for a transaction/statement: the caller's explicit
+    /// <paramref name="requested"/> knobs win, falling back to this connection's
+    /// <see cref="DefaultTransactionOptions"/>, then the connection-string defaults, then (for any knob
+    /// still unset) the server default.
+    /// </summary>
+    internal CamusTransactionOptions ResolveTransactionOptions(CamusTransactionOptions? requested)
+        => (requested ?? CamusTransactionOptions.Default)
+            .WithDefaults(DefaultTransactionOptions)
+            .WithDefaults(builder.DefaultTransactionOptions);
 
     public override void ChangeDatabase(string databaseName)
     {
@@ -87,28 +107,44 @@ public sealed class CamusConnection : DbConnection
     }
 
     protected override DbTransaction BeginDbTransaction(IsolationLevel isolationLevel)
-    {
-        if (isolationLevel != IsolationLevel.Unspecified && isolationLevel != IsolationLevel.Serializable)
-            throw new NotSupportedException($"CamusDB only supports isolation levels {IsolationLevel.Serializable} and {IsolationLevel.Unspecified}.");
-
-        return BeginTransactionAsync().GetAwaiter().GetResult();
-    }
+        => BeginTransactionAsync(MapIsolationLevel(isolationLevel)).GetAwaiter().GetResult();
 
     protected override async ValueTask<DbTransaction> BeginDbTransactionAsync(IsolationLevel isolationLevel, CancellationToken cancellationToken)
+        => await BeginTransactionAsync(MapIsolationLevel(isolationLevel), cancellationToken).ConfigureAwait(false);
+
+    /// <summary>
+    /// Maps an ADO.NET <see cref="IsolationLevel"/> to CamusDB's options. <see cref="IsolationLevel.Unspecified"/>
+    /// leaves the isolation knob unset (server / connection default); <see cref="IsolationLevel.ReadCommitted"/>
+    /// and <see cref="IsolationLevel.Serializable"/> map through; <see cref="IsolationLevel.Snapshot"/> maps to a
+    /// Serializable read-only snapshot. Other levels are rejected.
+    /// </summary>
+    private static CamusTransactionOptions? MapIsolationLevel(IsolationLevel isolationLevel) => isolationLevel switch
     {
-        if (isolationLevel != IsolationLevel.Unspecified && isolationLevel != IsolationLevel.Serializable)
-            throw new NotSupportedException($"CamusDB only supports isolation levels {IsolationLevel.Serializable} and {IsolationLevel.Unspecified}.");
+        IsolationLevel.Unspecified => null,
+        IsolationLevel.ReadCommitted => new CamusTransactionOptions { IsolationLevel = CamusIsolationLevel.ReadCommitted },
+        IsolationLevel.Serializable => new CamusTransactionOptions { IsolationLevel = CamusIsolationLevel.Serializable },
+        IsolationLevel.Snapshot => CamusTransactionOptions.Snapshot,
+        _ => throw new NotSupportedException(
+            $"CamusDB supports isolation levels {IsolationLevel.ReadCommitted}, {IsolationLevel.Serializable}, {IsolationLevel.Snapshot} and {IsolationLevel.Unspecified}."),
+    };
 
-        return await BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
-    }
+    public new Task<CamusTransaction> BeginTransactionAsync(CancellationToken cancellationToken = default) =>
+        BeginTransactionImplAsync(null, cancellationToken);
 
-    public new Task<CamusTransaction> BeginTransactionAsync(CancellationToken cancellationToken = default) =>    
-        BeginTransactionImplAsync(cancellationToken);
+    /// <summary>
+    /// Begins a transaction with explicit concurrency <paramref name="options"/> (isolation level,
+    /// read/write mode, and pessimistic/optimistic locking). Any knob left <see langword="null"/> falls
+    /// back to this connection's <see cref="DefaultTransactionOptions"/>, then the connection-string
+    /// defaults, then the server default.
+    /// </summary>
+    public Task<CamusTransaction> BeginTransactionAsync(CamusTransactionOptions? options, CancellationToken cancellationToken = default) =>
+        BeginTransactionImplAsync(options, cancellationToken);
 
-    private async Task<CamusTransaction> BeginTransactionImplAsync(CancellationToken cancellationToken)
+    private async Task<CamusTransaction> BeginTransactionImplAsync(CamusTransactionOptions? options, CancellationToken cancellationToken)
     {
         string endpoint = "";
         string database = builder.Config["Database"];
+        CamusTransactionOptions effective = ResolveTransactionOptions(options);
 
         try
         {
@@ -116,7 +152,10 @@ public sealed class CamusConnection : DbConnection
 
             CamusStartTransactionRequest request = new()
             {
-                DatabaseName = database
+                DatabaseName = database,
+                IsolationLevel = effective.IsolationLevelWire,
+                TransactionMode = effective.ModeWire,
+                Locking = effective.LockingWire
             };
 
             byte[] responseBytes = await endpoint
@@ -131,7 +170,7 @@ public sealed class CamusConnection : DbConnection
             if (response?.Status != "ok")
                 throw new CamusException("CADB0000", "Empty result returned");
 
-            return new CamusTransaction(response.TxnIdPT, response.TxnIdCounter, endpoint, this, builder);
+            return new CamusTransaction(response.TxnIdPT, response.TxnIdCounter, endpoint, this, builder, effective);
         }
         catch (FlurlHttpException ex)
         {

@@ -25,6 +25,22 @@ public sealed class CamusExecuteSqlNonQueryRequest
     public string? Sql { get; set; }
 
     [JsonPropertyName("parameters")]
-    public Dictionary<string, ColumnValue>? Parameters { get; set; }    
+    public Dictionary<string, ColumnValue>? Parameters { get; set; }
+
+    /// <summary>Isolation level for the autocommit transaction begun by this request. Ignored when it
+    /// resumes an existing transaction (a non-zero <see cref="TxnIdPT"/>).</summary>
+    [JsonPropertyName("isolationLevel")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? IsolationLevel { get; set; }
+
+    /// <summary>Transaction mode for the autocommit transaction begun by this request.</summary>
+    [JsonPropertyName("transactionMode")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? TransactionMode { get; set; }
+
+    /// <summary>Locking mode for the autocommit transaction begun by this request.</summary>
+    [JsonPropertyName("locking")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? Locking { get; set; }
 }
 

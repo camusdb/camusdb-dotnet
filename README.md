@@ -306,6 +306,47 @@ await transaction.CommitAsync();
 
 Use `await transaction.RollbackAsync()` to roll back instead.
 
+#### Isolation level, mode, and optimistic locking
+
+A transaction has three independent concurrency knobs, passed as `CamusTransactionOptions`:
+
+| Knob | Values | Default |
+| --- | --- | --- |
+| `IsolationLevel` | `Serializable`, `ReadCommitted` | server default (Serializable) |
+| `Mode` | `ReadWrite`, `ReadOnly` | `ReadWrite` |
+| `Locking` | `Pessimistic`, `Optimistic` | server default (Pessimistic) |
+
+**Optimistic** transactions take no locks; write–write and read–write conflicts are detected at
+**commit**, where the loser throws a `CamusException` you replay (see *Serializable Isolation & Retries*).
+Good for low-contention, read-mostly workloads. Optimistic validation is based on the rows a transaction
+read, not on predicates, so it does **not** protect against phantoms — use pessimistic `Serializable` for that.
+
+```csharp
+// Optimistic transaction
+CamusTransaction tx = await connection.BeginTransactionAsync(CamusTransactionOptions.Optimistic);
+
+// Or select knobs explicitly
+CamusTransaction rc = await connection.BeginTransactionAsync(new CamusTransactionOptions
+{
+    IsolationLevel = CamusIsolationLevel.ReadCommitted,
+    Locking = CamusLocking.Optimistic,
+});
+
+// A lock-free consistent snapshot (Serializable read-only), resumable across requests
+CamusTransaction snap = await connection.BeginTransactionAsync(CamusTransactionOptions.Snapshot);
+```
+
+Any knob left unset defers to the connection-string defaults, then the server default. Set connection-wide
+defaults (which also apply to autocommit statements) via the connection string:
+
+```
+Endpoint=http://localhost:5095;Database=test;Locking=Optimistic;IsolationLevel=ReadCommitted
+```
+
+Precedence: **per-transaction options › connection-string defaults › server default**. The equivalent
+SQL passthrough — `SET TRANSACTION LOCKING { PESSIMISTIC | OPTIMISTIC }` and
+`SET TRANSACTION ISOLATION LEVEL …`, issued as the first statement of an explicit transaction — also works.
+
 #### Serializable Isolation & Retries
 
 Serializable is the default isolation level in CamusDB. When two serializable transactions conflict, one is aborted immediately and must be **replayed from `BEGIN`** — retrying a single statement is not safe.
@@ -421,7 +462,7 @@ The same connection string keys are supported as in `CamusDB.Client` — see the
 
 #### Retry on failure
 
-Call `EnableRetryOnFailure` on the `CamusDBDbContextOptionsBuilder` to let EF Core automatically retry `SaveChangesAsync` (and query execution) when a transient serialization conflict is detected. Only the three retryable CamusDB error codes (`CADB0502`, `CADB0504`, `CADB0505`) trigger a retry — all other exceptions propagate immediately.
+Call `EnableRetryOnFailure` on the `CamusDBDbContextOptionsBuilder` to let EF Core automatically retry `SaveChangesAsync` (and query execution) when a transient serialization conflict is detected. A retry fires on the three retryable CamusDB error codes (`CADB0502`, `CADB0504`, `CADB0505`) as well as the transient contention markers the server reports in the message (`MustRetry`, `AlreadyLocked`, `commit returned Aborted`) — all other exceptions propagate immediately.
 
 ```csharp
 var options = new DbContextOptionsBuilder<AppDbContext>()
@@ -450,6 +491,26 @@ o.EnableRetryOnFailure(
     retryDeadline: TimeSpan.FromSeconds(3),
     medianFirstRetryDelay: TimeSpan.FromMilliseconds(20));
 ```
+
+#### Optimistic locking & isolation defaults
+
+Make every transaction and autocommit statement on a context use **optimistic** locking (no locks; conflicts
+detected at commit). Pair it with `EnableRetryOnFailure()` so EF replays a losing unit of work:
+
+```csharp
+var options = new DbContextOptionsBuilder<AppDbContext>()
+    .UseCamusDB("Endpoint=http://localhost:8082;Database=mydb", o =>
+    {
+        o.UseOptimisticLocking();   // or o.UsePessimisticLocking()
+        o.EnableRetryOnFailure();
+    })
+    .Options;
+```
+
+For finer control, `UseTransactionDefaults(new CamusTransactionOptions { … })` sets the default isolation
+level, mode, and locking together. Any knob left unset defers to the connection-string / server default,
+and a per-transaction selection (e.g. `Database.BeginTransaction(IsolationLevel.ReadCommitted)`) overrides
+these. `IsolationLevel.ReadCommitted`, `Serializable`, and `Snapshot` all map through to CamusDB.
 
 > EF Core's execution strategy retries the **entire unit of work** — never only the failing statement. If you manage transactions manually with `BeginTransactionAsync` / `CommitTransactionAsync`, use `SerializableRetryHelper` in `CamusDB.Client` instead.
 

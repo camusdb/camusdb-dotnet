@@ -32,16 +32,36 @@ public class CamusTransaction : DbTransaction
 
     public string TransactionId => string.Concat(txnIdPT, ":", txnIdCounter);
 
+    /// <summary>
+    /// The effective concurrency options this transaction was begun with (isolation, mode, locking), after
+    /// merging the caller's request with the connection and connection-string defaults. A knob the caller
+    /// left unset (deferred to the server default) reads back as <see langword="null"/> here.
+    /// </summary>
+    public CamusTransactionOptions Options { get; }
+
     public CamusTransaction(long txnIdPT, uint txnIdCounter, string endpoint, CamusConnection connection, CamusConnectionStringBuilder builder)
+        : this(txnIdPT, txnIdCounter, endpoint, connection, builder, CamusTransactionOptions.Default) { }
+
+    public CamusTransaction(long txnIdPT, uint txnIdCounter, string endpoint, CamusConnection connection, CamusConnectionStringBuilder builder, CamusTransactionOptions options)
     {
         this.txnIdPT = txnIdPT;
         this.txnIdCounter = txnIdCounter;
         this.endpoint = endpoint;
         this.connection = connection;
         this.builder = builder;
+        Options = options;
     }
 
-    public override IsolationLevel IsolationLevel => IsolationLevel.Serializable;
+    /// <summary>
+    /// The ADO.NET view of this transaction's isolation level. CamusDB's default is Serializable, so an
+    /// unspecified isolation reports <see cref="IsolationLevel.Serializable"/>; an explicit Read Committed
+    /// reports <see cref="IsolationLevel.ReadCommitted"/>.
+    /// </summary>
+    public override IsolationLevel IsolationLevel => Options.IsolationLevel switch
+    {
+        CamusIsolationLevel.ReadCommitted => IsolationLevel.ReadCommitted,
+        _ => IsolationLevel.Serializable,
+    };
 
     protected override DbConnection? DbConnection => connection;
     

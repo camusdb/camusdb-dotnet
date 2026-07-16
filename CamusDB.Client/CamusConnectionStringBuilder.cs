@@ -54,6 +54,24 @@ public class CamusConnectionStringBuilder
         }
     }
 
+    /// <summary>
+    /// Connection-wide default concurrency options parsed from the <c>IsolationLevel=</c>,
+    /// <c>TransactionMode=</c> and <c>Locking=</c> connection-string keys (case-insensitive values). Any
+    /// key that is absent or unrecognized leaves the corresponding knob <see langword="null"/> (server
+    /// default). A per-transaction <see cref="CamusTransactionOptions"/> overrides these.
+    /// </summary>
+    public CamusTransactionOptions DefaultTransactionOptions => new()
+    {
+        IsolationLevel = ParseEnum<CamusIsolationLevel>("IsolationLevel"),
+        Mode = ParseEnum<CamusTransactionMode>("TransactionMode"),
+        Locking = ParseEnum<CamusLocking>("Locking"),
+    };
+
+    private T? ParseEnum<T>(string key) where T : struct, Enum
+        => Config.TryGetValue(key, out string? raw) && Enum.TryParse(raw, ignoreCase: true, out T value)
+            ? value
+            : null;
+
     internal string GetEndpoint()
     {
         if (!Config.TryGetValue("Endpoint", out string? endpoint) || string.IsNullOrWhiteSpace(endpoint))

@@ -1,5 +1,6 @@
 using System.Data.Common;
 using CamusDB.Client;
+using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Storage;
 
 namespace CamusDB.EntityFrameworkCore;
@@ -23,7 +24,15 @@ public sealed class CamusRelationalConnection : RelationalConnection
         var cs = ConnectionString
             ?? throw new InvalidOperationException("A CamusDB connection string must be configured via UseCamusDB(...).");
 
-        return new CamusConnection(new CamusConnectionStringBuilder(cs));
+        var connection = new CamusConnection(new CamusConnectionStringBuilder(cs));
+
+        // Apply the context's default concurrency options (e.g. UseOptimisticLocking()) so every
+        // transaction and autocommit statement EF runs on this connection inherits them.
+        var extension = Dependencies.ContextOptions.FindExtension<CamusDBOptionsExtension>();
+        if (extension?.DefaultTransactionOptions is { } defaults)
+            connection.DefaultTransactionOptions = defaults;
+
+        return connection;
     }
 
     /// <summary>
