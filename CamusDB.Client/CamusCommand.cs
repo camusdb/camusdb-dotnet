@@ -11,9 +11,8 @@ using System.Data;
 using System.Data.Common;
 using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
-using System.Text.Json;
+using CamusDB.Client.Transport;
 using CamusDB.Core.Util.ObjectIds;
-using Flurl.Http;
 
 namespace CamusDB.Client;
 
@@ -359,143 +358,52 @@ public class CamusCommand : DbCommand, ICloneable
         if (IsDmlStatement(CommandText))
             return await ExecuteDmlAsReaderAsync(cancellationToken).ConfigureAwait(false);
 
-        string endpoint = "";
-        string database = builder.Config["Database"];
-
-        try
+        TransportSqlRequest request = new()
         {
-            endpoint = GetEndpoint();
+            Endpoint = GetEndpoint(),
+            Database = builder.Config["Database"],
+            Sql = GetRequestTarget(),
+            Parameters = GetCommandParameters(),
+            TxnIdPT = transaction?.TxnIdPT,
+            TxnIdCounter = transaction?.TxnIdCounter,
+            StreamSlot = transaction?.StreamSlot,
+            TimeoutSeconds = CommandTimeout,
+        };
 
-            CamusExecuteSqlQueryRequest request = new()
-            {
-                DatabaseName = database,
-                Sql = GetRequestTarget(),
-                Parameters = GetCommandParameters()
-            };
+        QueryTransportResult result = await builder.GetTransport().ExecuteQueryAsync(request, cancellationToken).ConfigureAwait(false);
 
-            if (transaction is not null)
-            {
-                request.TxnIdPT = transaction.TxnIdPT;
-                request.TxnIdCounter = transaction.TxnIdCounter;
-            }
+        LastCacheMetadata = result.CacheMetadata;
 
-            byte[] responseBytes = await endpoint
-                                        .WithHeader("Accept", "application/json")
-                                        .WithTimeout(CommandTimeout)
-                                        .AppendPathSegments("execute-sql-query")
-                                        .PostAsync(CamusJsonContent.Create(request, CamusJsonSerializerContext.Default.CamusExecuteSqlQueryRequest), cancellationToken: cancellationToken)
-                                        .ReceiveBytes();
-
-            CamusExecuteSqlQueryResponse? response = JsonSerializer.Deserialize(responseBytes, CamusJsonSerializerContext.Default.CamusExecuteSqlQueryResponse);
-
-            if (response is null)
-                throw new CamusException("CADB0000", "Empty result returned");
-
-            LastCacheMetadata = CamusCacheMetadata.FromResponse(response);
-
-            // The response carries an authoritative `columns` schema plus positional `rows`. Decoding
-            // from the schema (not by peeking at the first row) means the reader reports field count,
-            // names and types even for an empty result — required by consumers that inspect the schema
-            // before reading a row (e.g. EF Core's buffered reader under EnableRetryOnFailure).
-            CamusResultSet rows = CamusResultSet.FromWire(response.Columns ?? [], response.Rows);
-
-            return new CamusDataReader(rows, LastCacheMetadata);
-        }
-        catch (FlurlHttpException ex)
-        {
-            CamusEndpointHealth.MarkUnreachableIfTransportFailed(builder, endpoint, ex);
-
-            string response = await ex.GetResponseStringAsync();
-
-            if (!string.IsNullOrEmpty(response))
-            {
-                try
-                {
-                    CamusErrorResponse? errorResponse = JsonSerializer.Deserialize(response, CamusJsonSerializerContext.Default.CamusErrorResponse);
-
-                    if (errorResponse is not null)
-                        throw new CamusException(errorResponse.Code ?? "CADB0000", errorResponse.Message ?? "");
-                }
-                catch (JsonException)
-                {
-
-                }
-
-                throw new CamusException("CADB0000", response);
-            }
-
-            throw new CamusException("CADB0000", ex.Message);
-        }
+        return new CamusDataReader(result.ResultSet, LastCacheMetadata);
     }
 
     private async Task<CamusDataReader> ExecuteDmlAsReaderAsync(CancellationToken cancellationToken)
     {
-        string endpoint = "";
+        int affectedRows = await ExecuteNonQueryCoreAsync(cancellationToken).ConfigureAwait(false);
 
-        try
-        {
-            endpoint = GetEndpoint();
-            string database = builder.Config["Database"];
-
-            CamusExecuteSqlNonQueryRequest request = new()
-            {
-                DatabaseName = database,
-                Sql = GetRequestTarget(),
-                Parameters = GetCommandParameters()
-            };
-
-            if (transaction is not null)
-            {
-                request.TxnIdPT = transaction.TxnIdPT;
-                request.TxnIdCounter = transaction.TxnIdCounter;
-            }
-            else
-            {
-                CamusTransactionOptions options = ResolveAutocommitOptions();
-                request.IsolationLevel = options.IsolationLevelWire;
-                request.TransactionMode = options.ModeWire;
-                request.Locking = options.LockingWire;
-            }
-
-            byte[] responseBytes = await endpoint
-                                        .WithHeader("Accept", "application/json")
-                                        .WithTimeout(CommandTimeout)
-                                        .AppendPathSegments("execute-sql-non-query")
-                                        .PostAsync(CamusJsonContent.Create(request, CamusJsonSerializerContext.Default.CamusExecuteSqlNonQueryRequest), cancellationToken: cancellationToken)
-                                        .ReceiveBytes();
-
-            CamusExecuteSqlNonQueryResponse? response = JsonSerializer.Deserialize(responseBytes, CamusJsonSerializerContext.Default.CamusExecuteSqlNonQueryResponse);
-
-            if (response is null)
-                throw new CamusException("CADB0000", "Empty result returned");
-
-            return new CamusDataReader(response.Rows);
-        }
-        catch (FlurlHttpException ex)
-        {
-            CamusEndpointHealth.MarkUnreachableIfTransportFailed(builder, endpoint, ex);
-
-            string response = await ex.GetResponseStringAsync();
-
-            if (!string.IsNullOrEmpty(response))
-            {
-                try
-                {
-                    CamusErrorResponse? errorResponse = JsonSerializer.Deserialize(response, CamusJsonSerializerContext.Default.CamusErrorResponse);
-
-                    if (errorResponse is not null)
-                        throw new CamusException(errorResponse.Code ?? "CADB0000", errorResponse.Message ?? "");
-                }
-                catch (JsonException)
-                {
-                }
-
-                throw new CamusException("CADB0000", response);
-            }
-
-            throw new CamusException("CADB0000", ex.Message);
-        }
+        return new CamusDataReader(affectedRows);
     }
+
+    /// <summary>
+    /// Builds the protocol-neutral request for a DML/non-query statement: joins the explicit
+    /// <see cref="Transaction"/> when present, otherwise carries the resolved autocommit concurrency
+    /// options for the short transaction the server begins for this statement.
+    /// </summary>
+    private TransportSqlRequest BuildNonQueryTransportRequest() => new()
+    {
+        Endpoint = GetEndpoint(),
+        Database = builder.Config["Database"],
+        Sql = GetRequestTarget(),
+        Parameters = GetCommandParameters(),
+        TxnIdPT = transaction?.TxnIdPT,
+        TxnIdCounter = transaction?.TxnIdCounter,
+        StreamSlot = transaction?.StreamSlot,
+        AutocommitOptions = transaction is null ? ResolveAutocommitOptions() : null,
+        TimeoutSeconds = CommandTimeout,
+    };
+
+    private Task<int> ExecuteNonQueryCoreAsync(CancellationToken cancellationToken)
+        => builder.GetTransport().ExecuteNonQueryAsync(BuildNonQueryTransportRequest(), cancellationToken);
 
     /// <summary>
     /// Executes the command and returns the number of rows affected.
@@ -516,72 +424,7 @@ public class CamusCommand : DbCommand, ICloneable
             return 0;
         }
 
-        string endpoint = "";
-
-        try
-        {
-            endpoint = GetEndpoint();
-            string database = builder.Config["Database"];
-
-            CamusExecuteSqlNonQueryRequest request = new()
-            {
-                DatabaseName = database,
-                Sql = GetRequestTarget(),
-                Parameters = GetCommandParameters()
-            };
-
-            if (transaction is not null)
-            {
-                request.TxnIdPT = transaction.TxnIdPT;
-                request.TxnIdCounter = transaction.TxnIdCounter;
-            }
-            else
-            {
-                CamusTransactionOptions options = ResolveAutocommitOptions();
-                request.IsolationLevel = options.IsolationLevelWire;
-                request.TransactionMode = options.ModeWire;
-                request.Locking = options.LockingWire;
-            }
-
-            byte[] responseBytes = await endpoint
-                                        .WithHeader("Accept", "application/json")
-                                        .WithTimeout(CommandTimeout)
-                                        .AppendPathSegments("execute-sql-non-query")
-                                        .PostAsync(CamusJsonContent.Create(request, CamusJsonSerializerContext.Default.CamusExecuteSqlNonQueryRequest), cancellationToken: cancellationToken)
-                                        .ReceiveBytes();
-
-            CamusExecuteSqlNonQueryResponse? response = JsonSerializer.Deserialize(responseBytes, CamusJsonSerializerContext.Default.CamusExecuteSqlNonQueryResponse);
-
-            if (response is null)
-                throw new CamusException("CADB0000", "Empty result returned");
-
-            return response.Rows;
-        }
-        catch (FlurlHttpException ex)
-        {
-            CamusEndpointHealth.MarkUnreachableIfTransportFailed(builder, endpoint, ex);
-
-            string response = await ex.GetResponseStringAsync();
-
-            if (!string.IsNullOrEmpty(response))
-            {
-                try
-                {
-                    CamusErrorResponse? errorResponse = JsonSerializer.Deserialize(response, CamusJsonSerializerContext.Default.CamusErrorResponse);
-
-                    if (errorResponse is not null)
-                        throw new CamusException(errorResponse.Code ?? "CADB0000", errorResponse.Message ?? "");
-                }
-                catch (JsonException)
-                {
-
-                }
-
-                throw new CamusException("CADB0000", response);
-            }
-
-            throw new CamusException("CADB0000", ex.Message);
-        }
+        return await ExecuteNonQueryCoreAsync(cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -603,68 +446,19 @@ public class CamusCommand : DbCommand, ICloneable
     /// <inheritdoc />
     public async Task<bool> ExecuteDDLAsync(CancellationToken cancellationToken)
     {
-        string endpoint = "";
-
-        try
+        TransportSqlRequest request = new()
         {
-            endpoint = GetEndpoint();
-            string database = builder.Config["Database"];            
+            Endpoint = GetEndpoint(),
+            Database = builder.Config["Database"],
+            Sql = GetRequestTarget(),
+            TxnIdPT = transaction?.TxnIdPT,
+            TxnIdCounter = transaction?.TxnIdCounter,
+            StreamSlot = transaction?.StreamSlot,
+            AutocommitOptions = transaction is null ? ResolveAutocommitOptions() : null,
+            TimeoutSeconds = CommandTimeout,
+        };
 
-            CamusExecuteDDLRequest request = new()
-            {
-                DatabaseName = database,
-                Sql = GetRequestTarget()
-            };
-
-            if (transaction is not null)
-            {
-                request.TxnIdPT = transaction.TxnIdPT;
-                request.TxnIdCounter = transaction.TxnIdCounter;
-            }
-            else
-            {
-                CamusTransactionOptions options = ResolveAutocommitOptions();
-                request.IsolationLevel = options.IsolationLevelWire;
-                request.TransactionMode = options.ModeWire;
-                request.Locking = options.LockingWire;
-            }
-
-            byte[] responseBytes = await endpoint
-                                    .WithHeader("Accept", "application/json")
-                                    .WithTimeout(CommandTimeout)
-                                    .AppendPathSegments("execute-sql-ddl")
-                                    .PostAsync(CamusJsonContent.Create(request, CamusJsonSerializerContext.Default.CamusExecuteDDLRequest), cancellationToken: cancellationToken)
-                                    .ReceiveBytes();
-
-            CamusExecuteDDLResponse? response = JsonSerializer.Deserialize(responseBytes, CamusJsonSerializerContext.Default.CamusExecuteDDLResponse);
-
-            return response?.Status == "ok";
-        }
-        catch (FlurlHttpException ex)
-        {
-            CamusEndpointHealth.MarkUnreachableIfTransportFailed(builder, endpoint, ex);
-
-            string response = await ex.GetResponseStringAsync();
-
-            if (!string.IsNullOrEmpty(response))
-            {
-                try
-                {
-                    CamusErrorResponse? errorResponse = JsonSerializer.Deserialize(response, CamusJsonSerializerContext.Default.CamusErrorResponse);
-
-                    if (errorResponse is not null)
-                        throw new CamusException(errorResponse.Code ?? "CADB0000", errorResponse.Message ?? "");
-                }
-                catch (JsonException)
-                {
-
-                }
-
-                throw new CamusException("CADB0000", response);
-            }
-
-            throw new CamusException("CADB0000", ex.Message);
-        }
+        return await builder.GetTransport().ExecuteDdlAsync(request, cancellationToken).ConfigureAwait(false);
     }
 
     public override object? ExecuteScalar()

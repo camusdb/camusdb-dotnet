@@ -1,8 +1,6 @@
 ﻿
 using System.Data;
 using System.Data.Common;
-using System.Text.Json;
-using Flurl.Http;
 
 namespace CamusDB.Client;
 
@@ -31,6 +29,13 @@ public class CamusTransaction : DbTransaction
     public uint TxnIdCounter => txnIdCounter;
 
     public string TransactionId => string.Concat(txnIdPT, ":", txnIdCounter);
+
+    /// <summary>
+    /// Opaque transport routing hint set by the connection at BEGIN. For the gRPC batching transport it is
+    /// the reserved <c>BatchExecute</c> stream slot this transaction's statements and finalize pin to (so
+    /// the server orders them on one stream); null under REST, which does not pin.
+    /// </summary>
+    internal int? StreamSlot { get; set; }
 
     /// <summary>
     /// The effective concurrency options this transaction was begun with (isolation, mode, locking), after
@@ -87,29 +92,31 @@ public class CamusTransaction : DbTransaction
     /// </summary>
     /// <param name="cancellationToken">A cancellation token used for this task.</param>
     public override Task CommitAsync(CancellationToken cancellationToken = default)
-        => FinalizeAsync("commit-transaction", "Commit failed", cancellationToken);
+        => FinalizeAsync(commit: true, cancellationToken);
 
     /// <summary>
     /// Rolls back the database transaction asynchronously.
     /// </summary>
     /// <param name="cancellationToken">A cancellation token used for this task.</param>
     public override Task RollbackAsync(CancellationToken cancellationToken = default)
-        => FinalizeAsync("rollback-transaction", "Rollback failed", cancellationToken);
+        => FinalizeAsync(commit: false, cancellationToken);
 
     /// <summary>
-    /// Issues a finalize (<c>commit-transaction</c> / <c>rollback-transaction</c>) and resolves the
-    /// non-terminal CADB0509 outcome by re-issuing the <b>same</b> finalize on the <b>same</b>
-    /// transaction handle, bounded and backing off. CADB0509 means the commit/rollback outcome is not
-    /// yet known — the transaction is not dead — so the operation must never be replayed from
-    /// <c>BEGIN</c> (that could double-apply an already-durable commit). All other errors propagate.
+    /// Issues a finalize (commit / rollback) and resolves the non-terminal CADB0509 outcome by re-issuing
+    /// the <b>same</b> finalize on the <b>same</b> transaction handle, bounded and backing off. CADB0509
+    /// means the commit/rollback outcome is not yet known — the transaction is not dead — so the operation
+    /// must never be replayed from <c>BEGIN</c> (that could double-apply an already-durable commit). All
+    /// other errors propagate. Transport-agnostic: the same loop covers REST and gRPC.
     /// </summary>
-    private async Task FinalizeAsync(string pathSegment, string failureMessage, CancellationToken cancellationToken)
+    private async Task FinalizeAsync(bool commit, CancellationToken cancellationToken)
     {
         for (int attempt = 0; ; attempt++)
         {
             try
             {
-                await PostFinalizeAsync(pathSegment, failureMessage, cancellationToken).ConfigureAwait(false);
+                await builder.GetTransport()
+                    .FinalizeTransactionAsync(commit, endpoint, builder.Config["Database"], txnIdPT, txnIdCounter, StreamSlot, builder.CommandTimeout, cancellationToken)
+                    .ConfigureAwait(false);
                 return;
             }
             catch (CamusException ex)
@@ -117,58 +124,6 @@ public class CamusTransaction : DbTransaction
             {
                 await Task.Delay(ComputeFinalizeDelay(attempt), cancellationToken).ConfigureAwait(false);
             }
-        }
-    }
-
-    private async Task PostFinalizeAsync(string pathSegment, string failureMessage, CancellationToken cancellationToken)
-    {
-        string database = builder.Config["Database"];
-
-        try
-        {
-            CamusTransactionRequest request = new()
-            {
-                DatabaseName = database,
-                TxnIdPT = txnIdPT,
-                TxnIdCounter = txnIdCounter
-            };
-
-            byte[] responseBytes = await this.endpoint
-                                                        .WithHeader("Accept", "application/json")
-                                                        .WithTimeout(builder.CommandTimeout)
-                                                        .AppendPathSegments(pathSegment)
-                                                        .PostAsync(CamusJsonContent.Create(request, CamusJsonSerializerContext.Default.CamusTransactionRequest), cancellationToken: cancellationToken)
-                                                        .ReceiveBytes();
-
-            CamusExecuteDDLResponse? response = JsonSerializer.Deserialize(responseBytes, CamusJsonSerializerContext.Default.CamusExecuteDDLResponse);
-
-            if (response?.Status != "ok")
-                throw new CamusException("CADB0000", failureMessage);
-        }
-        catch (FlurlHttpException ex)
-        {
-            CamusEndpointHealth.MarkUnreachableIfTransportFailed(builder, endpoint, ex);
-
-            string response = await ex.GetResponseStringAsync();
-
-            if (!string.IsNullOrEmpty(response))
-            {
-                try
-                {
-                    CamusErrorResponse? errorResponse = JsonSerializer.Deserialize(response, CamusJsonSerializerContext.Default.CamusErrorResponse);
-
-                    if (errorResponse is not null)
-                        throw new CamusException(errorResponse.Code ?? "CADB0000", errorResponse.Message ?? "");
-                }
-                catch (JsonException)
-                {
-
-                }
-
-                throw new CamusException("CADB0000", response);
-            }
-
-            throw new CamusException("CADB0000", ex.Message);
         }
     }
 

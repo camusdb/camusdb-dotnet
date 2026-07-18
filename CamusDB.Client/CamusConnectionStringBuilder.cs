@@ -6,6 +6,8 @@
  * file that was distributed with this source code.
  */
 
+using CamusDB.Client.Transport;
+
 namespace CamusDB.Client;
 
 /// <summary>
@@ -20,6 +22,10 @@ public class CamusConnectionStringBuilder
     public Dictionary<string, string> Config { get; } = new();
 
     private CamusEndpointPool? endpointPool;
+
+    private ICamusTransport? transport;
+
+    private readonly object transportLock = new();
 
     public CamusConnectionStringBuilder(string connectionString)
     {
@@ -71,6 +77,28 @@ public class CamusConnectionStringBuilder
         => Config.TryGetValue(key, out string? raw) && Enum.TryParse(raw, ignoreCase: true, out T value)
             ? value
             : null;
+
+    /// <summary>
+    /// The wire protocol this connection speaks, from the <c>Protocol=</c> connection-string key
+    /// (case-insensitive: <c>rest</c> or <c>grpc</c>). Absent or unrecognized values default to
+    /// <see cref="CamusProtocol.Rest"/>. When <see cref="CamusProtocol.Grpc"/> is selected, the
+    /// <c>Endpoint=</c> must address the server's gRPC port.
+    /// </summary>
+    public CamusProtocol Protocol => ParseEnum<CamusProtocol>("Protocol") ?? CamusProtocol.Rest;
+
+    /// <summary>
+    /// The transport this builder's connections use, chosen once from <see cref="Protocol"/> and cached
+    /// for the builder's lifetime (a gRPC transport pools long-lived channels, so it must be shared, not
+    /// recreated per call).
+    /// </summary>
+    internal ICamusTransport GetTransport()
+    {
+        if (transport is not null)
+            return transport;
+
+        lock (transportLock)
+            return transport ??= Protocol == CamusProtocol.Grpc ? new GrpcTransport() : new RestTransport(this);
+    }
 
     internal string GetEndpoint()
     {

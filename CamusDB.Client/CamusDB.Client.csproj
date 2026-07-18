@@ -5,7 +5,7 @@
         <ImplicitUsings>enable</ImplicitUsings>
         <Nullable>enable</Nullable>
         <PackageId>CamusDB.Client</PackageId>
-        <Version>0.6.5</Version>
+        <Version>0.7.0</Version>
         <Description>CamusDB.Client is the ADO.NET provider for CamusDB. It is the recommended package for regular CamusDB database access from .NET.</Description>
         <Authors>CamusDB</Authors>
         <Company>CamusDB</Company>    
@@ -22,6 +22,22 @@
         <PackageReference Include="Flurl" Version="4.0.0" />
         <PackageReference Include="Flurl.Http" Version="4.0.2" />
         <PackageReference Include="Polly" Version="8.7.0" />
+    </ItemGroup>
+
+    <!-- gRPC transport. The client stub + Value/ColumnType message types are generated from the same
+         camus_sql.proto that is the server's source of truth, so the REST and gRPC surfaces can never
+         drift. Only the client stub is generated here (GrpcServices=Client). -->
+    <ItemGroup>
+        <PackageReference Include="Google.Protobuf" Version="3.29.6" />
+        <PackageReference Include="Grpc.Net.Client" Version="2.67.0" />
+        <PackageReference Include="Grpc.Tools" Version="2.67.0">
+            <PrivateAssets>all</PrivateAssets>
+            <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+        </PackageReference>
+    </ItemGroup>
+
+    <ItemGroup>
+        <Protobuf Include="Protos\camus_sql.proto" GrpcServices="Client" />
     </ItemGroup>
 
     <ItemGroup>

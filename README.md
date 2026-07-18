@@ -42,9 +42,10 @@ Supported connection string keys:
 
 | Key | Required | Description |
 | --- | --- | --- |
-| `Endpoint` | Yes | Base URL for the CamusDB HTTP endpoint. |
+| `Endpoint` | Yes | Base URL for the CamusDB endpoint (REST or gRPC — see [Transport](#transport-rest--grpc)). |
 | `Database` | Yes | Database name sent with requests. |
-| `Timeout` | No | HTTP request timeout in seconds (default: `10`). |
+| `Timeout` | No | Request timeout in seconds (default: `10`). |
+| `Protocol` | No | Wire protocol: `rest` (default) or `grpc`. See [Transport](#transport-rest--grpc). |
 
 `Endpoint` also supports a comma-separated pool. The client selects endpoints with round-robin routing:
 
@@ -54,6 +55,29 @@ CamusConnectionStringBuilder builder = new(
 ```
 
 When a request fails because an endpoint is unreachable, that endpoint is marked unavailable and skipped by later requests made through the same `CamusConnectionStringBuilder`.
+
+### Transport (REST / gRPC)
+
+`CamusDB.Client` can talk to the server over either the REST/JSON API or the gRPC API. The transport is chosen per connection with the `Protocol` connection-string key and defaults to REST, so existing connection strings are unaffected. The whole ADO.NET surface — `CamusConnection`, `CamusCommand`, `CamusTransaction`, the data reader, parameters, and the EF Core provider — is identical on both; only the wire protocol changes.
+
+```csharp
+// REST (default) — no change needed
+CamusConnectionStringBuilder rest = new("Endpoint=http://localhost:5095;Database=test");
+
+// gRPC — set Protocol=grpc and point Endpoint at the gRPC port
+CamusConnectionStringBuilder grpc = new("Endpoint=http://localhost:5096;Database=test;Protocol=grpc");
+```
+
+`Protocol` accepts `rest` or `grpc` (case-insensitive); any other value falls back to REST.
+
+The server exposes REST and gRPC on **separate ports** (for example `5095` for REST and `5096` for gRPC), so when selecting `Protocol=grpc` the `Endpoint` must address the gRPC port. Use `http://` for plaintext HTTP/2 (h2c) in local development, or `https://` against a TLS-terminated deployment. The comma-separated endpoint pool works with either protocol.
+
+Under gRPC the data plane — queries, non-queries, and the transaction lifecycle — is multiplexed over a small pool of long-lived `BatchExecute` duplex streams, so concurrent operations coalesce onto shared streams instead of each paying a unary round-trip. Autocommit statements fan out across the pool; a transaction's `BEGIN`/statements/`COMMIT` are pinned to one stream so the server orders them. DDL and ping stay on the unary RPCs. This is transparent — the same `CamusCommand`/`CamusTransaction` API drives it.
+
+Both transports raise the same `CamusException` (carrying the server's `CADBxxxx` code), so error handling and the transaction retry contract are unchanged when you switch. A couple of differences are inherent to the gRPC API surface:
+
+- **Query result cache metadata** (`CamusCommand.LastCacheMetadata` / `CamusDataReader.CacheMetadata`) is only reported over REST; it is `null` on the gRPC path.
+- Database-admin operations (`CreateDatabaseAsync`, `DropDatabaseAsync`, `CreateBranchDatabaseAsync`, `ShowBranchesAsync`, `ShowAncestorsAsync`) are issued as SQL over gRPC (the gRPC service has no dedicated admin RPCs); they behave the same from the caller's side.
 
 ### Usage
 
@@ -477,7 +501,7 @@ public class AppDbContext : DbContext
 }
 ```
 
-The same connection string keys are supported as in `CamusDB.Client` — see the [connection string reference](#configuration) above.
+The same connection string keys are supported as in `CamusDB.Client` — see the [connection string reference](#configuration) above. This includes `Protocol=grpc`, so the EF Core provider can run over gRPC by pointing `Endpoint` at the gRPC port; see [Transport](#transport-rest--grpc).
 
 #### Retry on failure
 

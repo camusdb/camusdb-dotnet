@@ -6,8 +6,7 @@
  * file that was distributed with this source code.
  */
 
-using System.Text.Json;
-using Flurl.Http;
+using CamusDB.Client.Transport;
 
 namespace CamusDB.Client;
 
@@ -21,45 +20,10 @@ public class CamusPingCommand : CamusCommand
     /// <inheritdoc />
     public override async Task<int> ExecuteNonQueryAsync(CancellationToken cancellationToken)
     {
-        string endpoint = "";
+        string endpoint = GetEndpoint();
 
-        try
-        {
-            endpoint = GetEndpoint();
+        bool alive = await builder.GetTransport().PingAsync(endpoint, CommandTimeout, cancellationToken).ConfigureAwait(false);
 
-            string responseJson = await endpoint
-                                                        .WithTimeout(CommandTimeout)
-                                                        .AppendPathSegments("ping")
-                                                        .GetStringAsync(cancellationToken: cancellationToken);
-
-            CamusExecuteSqlNonQueryResponse? response = JsonSerializer.Deserialize(responseJson, CamusJsonSerializerContext.Default.CamusExecuteSqlNonQueryResponse);
-
-            return response?.Status == "ok" ? 1 : 0;
-        }
-        catch (FlurlHttpException ex)
-        {
-            CamusEndpointHealth.MarkUnreachableIfTransportFailed(builder, endpoint, ex);
-
-            string response = await ex.GetResponseStringAsync();
-
-            if (!string.IsNullOrEmpty(response))
-            {
-                try
-                {
-                    CamusErrorResponse? errorResponse = JsonSerializer.Deserialize(response, CamusJsonSerializerContext.Default.CamusErrorResponse);
-
-                    if (errorResponse is not null)
-                        throw new CamusException(errorResponse.Code ?? "CADB0000", errorResponse.Message ?? "");
-                }
-                catch (JsonException)
-                {
-
-                }
-
-                throw new CamusException("CADB0000", response);
-            }
-
-            throw new CamusException("CADB0000", ex.Message);
-        }
+        return alive ? 1 : 0;
     }
 }
