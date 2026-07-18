@@ -138,6 +138,40 @@ public class TestDataTypes : BaseTest
     }
 
     [Fact]
+    public async Task TestGetGuidOnNonUuidColumnThrowsDescriptiveError()
+    {
+        CamusConnection connection = await GetConnection();
+        string tableName = await CreateTypesTableAsync(connection);
+
+        // A native `id`/ObjectId is 12 bytes (24 hex chars), not a 16-byte Guid, so it can never be
+        // reconstructed as one. Reading it via GetGuid must fail with the column name, its store type,
+        // and the offending value — not a bare "Unrecognized Guid format".
+        string id = CamusObjectIdGenerator.GenerateAsString();
+
+        await using (CamusCommand insert = connection.CreateInsertCommand(tableName))
+        {
+            insert.Parameters.Add("id", ColumnType.Id, id);
+            insert.Parameters.Add("name", ColumnType.String, "n");
+
+            Assert.Equal(1, await insert.ExecuteNonQueryAsync());
+        }
+
+        await using CamusCommand select = connection.CreateCamusCommand(
+            $"SELECT id FROM {tableName} WHERE id = @id");
+        select.Parameters.Add("@id", ColumnType.Id, id);
+
+        await using CamusDataReader reader = await select.ExecuteReaderAsync();
+        Assert.True(await reader.ReadAsync(default));
+
+        int idOrdinal = reader.GetOrdinal("id");
+        FormatException ex = Assert.Throws<FormatException>(() => reader.GetGuid(idOrdinal));
+
+        Assert.Contains("id", ex.Message, StringComparison.Ordinal);        // column name
+        Assert.Contains(id, ex.Message, StringComparison.Ordinal);          // offending value
+        Assert.Contains(ColumnType.Id.ToString(), ex.Message, StringComparison.Ordinal); // store type
+    }
+
+    [Fact]
     public async Task TestNullableUuid()
     {
         CamusConnection connection = await GetConnection();

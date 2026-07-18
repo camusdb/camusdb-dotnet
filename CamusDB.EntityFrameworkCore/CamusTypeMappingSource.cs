@@ -63,13 +63,13 @@ public sealed class CamusTypeMappingSource : RelationalTypeMappingSource
         a => a == null ? null! : a.ToArray());
 
     private static readonly CamusArrayTypeMapping Int64ArrayMapping =
-        CamusArrayTypeMapping.Create(typeof(long[]), "array(int64)", ColumnType.Integer64, ArrayComparer<long>());
+        CamusArrayTypeMapping.Create(typeof(long[]), "array(int64)", ColumnType.Integer64, Int64Mapping, ArrayComparer<long>());
     private static readonly CamusArrayTypeMapping StringArrayMapping =
-        CamusArrayTypeMapping.Create(typeof(string[]), "array(string)", ColumnType.String, ArrayComparer<string>());
+        CamusArrayTypeMapping.Create(typeof(string[]), "array(string)", ColumnType.String, StringMapping, ArrayComparer<string>());
     private static readonly CamusArrayTypeMapping Float64ArrayMapping =
-        CamusArrayTypeMapping.Create(typeof(double[]), "array(float64)", ColumnType.Float64, ArrayComparer<double>());
+        CamusArrayTypeMapping.Create(typeof(double[]), "array(float64)", ColumnType.Float64, Float64Mapping, ArrayComparer<double>());
     private static readonly CamusArrayTypeMapping BoolArrayMapping =
-        CamusArrayTypeMapping.Create(typeof(bool[]), "array(bool)", ColumnType.Bool, ArrayComparer<bool>());
+        CamusArrayTypeMapping.Create(typeof(bool[]), "array(bool)", ColumnType.Bool, BoolMapping, ArrayComparer<bool>());
 
     private static readonly Dictionary<Type, RelationalTypeMapping> ArrayClrMappings = new()
     {

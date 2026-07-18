@@ -326,7 +326,20 @@ public class CamusDataReader : DbDataReader
         if (column.Type == ColumnType.Uuid)
             return column.AsGuid();
 
-        return Guid.Parse(GetString(ordinal));
+        // Non-UUID columns (e.g. a native `id`/ObjectId, which is 12 bytes / 24 hex chars, or a plain
+        // string) cannot be reconstructed as a 16-byte Guid. Rather than letting Guid.Parse surface a
+        // bare "Unrecognized Guid format" with no context, report the column name, its store type, and
+        // the offending value so the mapping mistake is actionable (map the property as string, or
+        // declare the column as `uuid`).
+        string raw = GetString(ordinal);
+
+        if (Guid.TryParse(raw, out Guid parsed))
+            return parsed;
+
+        throw new FormatException(
+            $"Column '{GetName(ordinal)}' of type {column.Type} cannot be read as a Guid: the value " +
+            $"'{raw}' is not a valid UUID. Map this property as a string, or declare the column as a " +
+            $"'uuid' type if it should hold Guids.");
     }
 
     public override short GetInt16(int ordinal)

@@ -177,6 +177,14 @@ public sealed class CamusResultSet
                 return DecodeArray(cell);
 
             default:
+                // Defensive recovery for a server type-inference gap: JOIN projections can report a
+                // `uuid` column's type as String (3) while still sending the `[high, low]` two-int64
+                // wire form. A scalar cell never legitimately arrives as a JSON array, so a 2-element
+                // array here is that mis-tagged UUID — decode it structurally instead of trusting the
+                // declared type and dropping the value to Null.
+                if (cell.ValueKind == JsonValueKind.Array && cell.GetArrayLength() == 2)
+                    return DecodeUuid(cell);
+
                 return DecodeScalarByToken(cell, declared);
         }
     }

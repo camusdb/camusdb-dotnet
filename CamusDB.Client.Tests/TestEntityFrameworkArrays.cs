@@ -23,12 +23,17 @@ public class TestEntityFrameworkArrays
         using var ctx = new ArrCtx(Options());
         var et = ctx.Model.FindEntityType(typeof(ArrDoc))!;
 
-        // Direct type mappings must win over EF's primitive-collection (JSON string) convention.
+        // Direct type mappings must win over EF's primitive-collection (JSON string) convention:
+        // arrays land in first-class ARRAY(T) columns, never a JSON/text store type.
         Assert.Equal("array(int64)", et.FindProperty(nameof(ArrDoc.Longs))!.GetColumnType());
         Assert.Equal("array(string)", et.FindProperty(nameof(ArrDoc.Strings))!.GetColumnType());
         Assert.Equal("array(float64)", et.FindProperty(nameof(ArrDoc.Doubles))!.GetColumnType());
         Assert.Equal("array(bool)", et.FindProperty(nameof(ArrDoc.Bools))!.GetColumnType());
-        Assert.False(et.FindProperty(nameof(ArrDoc.Longs))!.IsPrimitiveCollection);
+
+        // The array mappings carry a scalar element mapping (so `values.Contains(col)` predicates can
+        // translate), which makes EF classify them as primitive collections — but the native array(T)
+        // store type above still wins, so nothing is stored as a JSON string.
+        Assert.DoesNotContain("json", et.FindProperty(nameof(ArrDoc.Strings))!.GetColumnType()!, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]

@@ -1,4 +1,5 @@
 using CamusDB.Client;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.Extensions.DependencyInjection;
 
@@ -38,6 +39,33 @@ public sealed class CamusDBOptionsExtension : RelationalOptionsExtension
     public TimeSpan RetryDeadline { get; private set; } = TimeSpan.FromSeconds(5);
 
     public TimeSpan RetryMedianFirstDelay { get; private set; } = TimeSpan.FromMilliseconds(30);
+
+    /// <summary>
+    /// How EF translates a parameterized collection in a query (e.g. <c>ids.Contains(x.Id)</c>).
+    ///
+    /// EF's relational default is <see cref="ParameterTranslationMode.Parameter"/>: the whole collection
+    /// is passed as a single array-valued parameter and expanded server-side via an <c>OPENJSON</c>-style
+    /// construct. CamusDB has no such table-valued expansion, so that mode leaves an unexpanded collection
+    /// parameter in the command whose element handling the provider cannot satisfy — it surfaces as a
+    /// <see cref="System.Data.Common.DbParameter"/> with a null type mapping and a
+    /// <see cref="NullReferenceException"/> while EF builds the command.
+    ///
+    /// We therefore treat the unsupported <see cref="ParameterTranslationMode.Parameter"/> default as
+    /// <see cref="ParameterTranslationMode.MultipleParameters"/> — the pre-EF8 behavior that expands to
+    /// <c>IN (@p0, @p1, …)</c>, which every CamusDB build understands. An explicit
+    /// <see cref="ParameterTranslationMode.Constant"/> selection (or a per-query <c>EF.Constant(…)</c> /
+    /// <c>EF.MultipleParameters(…)</c> wrapper) is still honored.
+    /// </summary>
+    public override ParameterTranslationMode ParameterizedCollectionMode
+    {
+        get
+        {
+            ParameterTranslationMode configured = base.ParameterizedCollectionMode;
+            return configured == ParameterTranslationMode.Parameter
+                ? ParameterTranslationMode.MultipleParameters
+                : configured;
+        }
+    }
 
     protected override RelationalOptionsExtension Clone() => new CamusDBOptionsExtension(this);
 

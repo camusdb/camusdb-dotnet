@@ -32,10 +32,21 @@ public sealed class CamusArrayTypeMapping : RelationalTypeMapping
         ElementType = elementType;
     }
 
-    public static CamusArrayTypeMapping Create(Type clrArrayType, string storeType, ColumnType elementType, ValueComparer comparer)
+    public static CamusArrayTypeMapping Create(
+        Type clrArrayType,
+        string storeType,
+        ColumnType elementType,
+        RelationalTypeMapping elementMapping,
+        ValueComparer comparer)
         => new(
             new RelationalTypeMappingParameters(
-                new CoreTypeMappingParameters(clrArrayType, comparer: comparer, keyComparer: comparer),
+                // Carrying the scalar element mapping makes this a proper collection type mapping. It does
+                // not change how an ARRAY *column* is stored (ConfigureParameter still stamps
+                // ColumnType.Array), but it is what EF's primitive-collection machinery needs to render a
+                // parameterized `col IN (…)` predicate — e.g. `values.Contains(entity.Col)` — by expanding
+                // the collection through the element mapping. Without it EF builds a collection parameter
+                // with no type mapping and throws NullReferenceException while creating the DbCommand.
+                new CoreTypeMappingParameters(clrArrayType, comparer: comparer, keyComparer: comparer, elementMapping: elementMapping),
                 storeType,
                 StoreTypePostfix.None,
                 System.Data.DbType.Object),
