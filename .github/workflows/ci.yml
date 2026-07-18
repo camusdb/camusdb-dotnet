@@ -24,7 +24,8 @@ jobs:
             10.0.x
 
       - name: Start CamusDB
-        run: docker run -d -p 5095:5095 -v camus-data:/data --name camusdb camusdb/camusdb:latest
+        # 5095 = REST/JSON API, 5096 = gRPC API (exercised by the Protocol=grpc transport tests).
+        run: docker run -d -p 5095:5095 -p 5096:5096 -v camus-data:/data --name camusdb camusdb/camusdb:latest
 
       - name: Wait for CamusDB to be ready
         run: |
@@ -36,6 +37,22 @@ jobs:
             sleep 1
           done
           echo "CamusDB did not become ready in time." >&2
+          docker logs camusdb || true
+          exit 1
+
+      - name: Wait for CamusDB gRPC port
+        # The gRPC API speaks HTTP/2, not plain HTTP, so probe it with a raw TCP connect instead of curl.
+        # A successful connect means Kestrel bound the gRPC listener (only happens when grpc_enabled), so
+        # the Protocol=grpc tests fail fast here with a clear message rather than mid-suite.
+        run: |
+          for i in $(seq 1 60); do
+            if timeout 1 bash -c '</dev/tcp/localhost/5096' 2>/dev/null; then
+              echo "CamusDB gRPC port 5096 is accepting connections after ${i}s."
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "CamusDB gRPC port 5096 did not open in time." >&2
           docker logs camusdb || true
           exit 1
 
