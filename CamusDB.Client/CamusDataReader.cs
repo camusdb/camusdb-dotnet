@@ -13,11 +13,9 @@ namespace CamusDB.Client;
 
 public class CamusDataReader : DbDataReader
 {
-    private int position = -1;
-
     private bool isClosed;
 
-    private readonly CamusResultSet resultSet;
+    private readonly CamusRowSource source;
 
     private readonly string[] columnNames;
 
@@ -25,13 +23,11 @@ public class CamusDataReader : DbDataReader
 
     public override int FieldCount => columnNames.Length;
 
-    public override bool HasRows => resultSet.RowCount > 0;
+    public override bool HasRows => source.HasRows;
 
     public override bool IsClosed => isClosed;
 
-    private readonly int recordsAffected = -1;
-
-    public override int RecordsAffected => recordsAffected;
+    public override int RecordsAffected => source.RecordsAffected;
 
     public override object this[string name] => GetValue(GetOrdinal(name));
 
@@ -44,17 +40,26 @@ public class CamusDataReader : DbDataReader
     public CamusCacheMetadata? CacheMetadata { get; }
 
     public CamusDataReader(CamusResultSet resultSet, CamusCacheMetadata? cacheMetadata = null)
+        : this(CamusRowSource.Buffered(resultSet), cacheMetadata)
     {
-        this.resultSet = resultSet;
-        columnNames = resultSet.ColumnNames;
-        CacheMetadata = cacheMetadata;
     }
 
     public CamusDataReader(int recordsAffected)
+        : this(CamusRowSource.Buffered(CamusResultSet.Empty, recordsAffected))
     {
-        this.resultSet = CamusResultSet.Empty;
-        this.columnNames = [];
-        this.recordsAffected = recordsAffected;
+    }
+
+    /// <summary>
+    /// Builds a reader over an arbitrary row source — the streaming NDJSON source for
+    /// <see cref="CamusCommand.ExecuteStreamReaderAsync()"/>, or the buffered source the public
+    /// constructors wrap. The schema (column names) is captured up front, so it is reported the same way
+    /// regardless of delivery mode.
+    /// </summary>
+    internal CamusDataReader(CamusRowSource source, CamusCacheMetadata? cacheMetadata = null)
+    {
+        this.source = source;
+        columnNames = source.ColumnNames;
+        CacheMetadata = cacheMetadata;
     }
 
     public override void Close()
@@ -66,14 +71,14 @@ public class CamusDataReader : DbDataReader
     {
         ThrowIfClosed();
 
-        position++;
-        return position < resultSet.RowCount;
+        return source.Read();
     }
 
-    public override Task<bool> ReadAsync(CancellationToken cancellationToken)
+    public override async Task<bool> ReadAsync(CancellationToken cancellationToken)
     {
-        cancellationToken.ThrowIfCancellationRequested();
-        return Task.FromResult(Read());
+        ThrowIfClosed();
+
+        return await source.ReadAsync(cancellationToken).ConfigureAwait(false);
     }
 
     public override bool NextResult() => false;
@@ -100,7 +105,7 @@ public class CamusDataReader : DbDataReader
     /// </summary>
     private ColumnType ColumnTypeAt(int ordinal)
     {
-        ColumnType[]? types = resultSet.ColumnTypes;
+        ColumnType[]? types = source.ColumnTypes;
 
         if (types is not null)
         {
@@ -390,9 +395,19 @@ public class CamusDataReader : DbDataReader
     protected override void Dispose(bool disposing)
     {
         if (disposing)
+        {
             Close();
+            source.Dispose();
+        }
 
         base.Dispose(disposing);
+    }
+
+    public override async ValueTask DisposeAsync()
+    {
+        Close();
+        await source.DisposeAsync().ConfigureAwait(false);
+        await base.DisposeAsync().ConfigureAwait(false);
     }
 
     public ColumnValue GetColumnValue(int ordinal)
@@ -402,10 +417,7 @@ public class CamusDataReader : DbDataReader
 
         ThrowIfClosed();
 
-        if (position < 0 || position >= resultSet.RowCount)
-            throw new InvalidOperationException("No current row is available.");
-
-        return resultSet.GetCell(position, ordinal);
+        return source.GetCell(ordinal);
     }
 
     private void ThrowIfClosed()

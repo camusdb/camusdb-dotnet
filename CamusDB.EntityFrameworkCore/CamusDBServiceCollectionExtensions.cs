@@ -20,6 +20,7 @@ public static class CamusDBServiceCollectionExtensions
 
         builder.TryAdd<IProviderConventionSetBuilder, CamusConventionSetBuilder>();
         builder.TryAdd<IQuerySqlGeneratorFactory, CamusQuerySqlGeneratorFactory>();
+        builder.TryAdd<IRelationalSqlTranslatingExpressionVisitorFactory, CamusSqlTranslatingExpressionVisitorFactory>();
         builder.TryAdd<IRelationalTransactionFactory, CamusRelationalTransactionFactory>();
         builder.TryAdd<IDatabaseProvider, DatabaseProvider<CamusDBOptionsExtension>>();
         builder.TryAdd<LoggingDefinitions, CamusLoggingDefinitions>();

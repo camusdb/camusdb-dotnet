@@ -181,6 +181,17 @@ internal sealed class GrpcTransport : ICamusTransport, IDisposable
         }
     }
 
+    // gRPC's data plane is multiplexed over shared BatchExecute streams that decode a whole result before
+    // returning (see GrpcBatcher). Wiring row-incremental delivery through that batcher is a separate
+    // effort, so streaming on gRPC buffers via the normal query path and replays through a buffered source
+    // — the ExecuteStreamReaderAsync API stays uniform across transports even though only REST is truly
+    // incremental. (The /execute-sql-query-stream endpoint this feature targets is REST-only.)
+    public async Task<CamusRowSource> ExecuteQueryStreamAsync(TransportSqlRequest request, CancellationToken cancellationToken)
+    {
+        QueryTransportResult result = await ExecuteQueryAsync(request, cancellationToken).ConfigureAwait(false);
+        return CamusRowSource.Buffered(result.ResultSet);
+    }
+
     public async Task<int> ExecuteNonQueryAsync(TransportSqlRequest request, CancellationToken cancellationToken)
     {
         SqlRequest wire = BuildSqlRequest(request);

@@ -348,6 +348,49 @@ public class CamusCommand : DbCommand, ICloneable
     public new async Task<CamusDataReader> ExecuteReaderAsync(CommandBehavior behavior, CancellationToken cancellationToken) =>
         (CamusDataReader)await ExecuteDbDataReaderAsync(behavior, cancellationToken).ConfigureAwait(false);
 
+    /// <summary>
+    /// Like <see cref="ExecuteReaderAsync()"/>, but pulls rows from the server incrementally over the
+    /// streaming (<c>/execute-sql-query-stream</c>) endpoint instead of buffering the whole result set —
+    /// so a large <c>SELECT</c> never fully materializes client-side. Rows arrive as the returned reader is
+    /// advanced (ideally with <see cref="CamusDataReader.ReadAsync(System.Threading.CancellationToken)"/>);
+    /// dispose the reader to release the underlying HTTP response.
+    ///
+    /// <para>The streaming path forfeits the buffered path's transparent serializable retry: because rows
+    /// can reach the client before the autocommit transaction commits, a late conflict is reported while
+    /// reading (as a <see cref="CamusException"/>) rather than retried. Use the buffered
+    /// <see cref="ExecuteReaderAsync()"/> — or drive an explicit transaction and retry yourself — when you
+    /// need that. Streaming applies to queries; a DML statement falls back to the buffered affected-row
+    /// reader. On the gRPC transport this currently buffers server-side and replays.</para>
+    /// </summary>
+    public Task<CamusDataReader> ExecuteStreamReaderAsync() =>
+        ExecuteStreamReaderAsync(CancellationToken.None);
+
+    /// <inheritdoc cref="ExecuteStreamReaderAsync()"/>
+    public async Task<CamusDataReader> ExecuteStreamReaderAsync(CancellationToken cancellationToken)
+    {
+        if (IsDmlStatement(CommandText))
+            return await ExecuteDmlAsReaderAsync(cancellationToken).ConfigureAwait(false);
+
+        TransportSqlRequest request = new()
+        {
+            Endpoint = GetEndpoint(),
+            Database = builder.Config["Database"],
+            Sql = GetRequestTarget(),
+            Parameters = GetCommandParameters(),
+            TxnIdPT = transaction?.TxnIdPT,
+            TxnIdCounter = transaction?.TxnIdCounter,
+            StreamSlot = transaction?.StreamSlot,
+            TimeoutSeconds = CommandTimeout,
+        };
+
+        CamusRowSource source = await builder.GetTransport().ExecuteQueryStreamAsync(request, cancellationToken).ConfigureAwait(false);
+
+        // The streaming endpoint carries no cache metadata (its trailer has no cache fields).
+        LastCacheMetadata = null;
+
+        return new CamusDataReader(source);
+    }
+
     /// <inheritdoc />
     protected override DbDataReader ExecuteDbDataReader(CommandBehavior behavior) =>
         ExecuteDbDataReaderAsync(behavior, default).GetAwaiter().GetResult();

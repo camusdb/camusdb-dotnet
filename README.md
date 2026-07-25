@@ -272,6 +272,46 @@ while (await reader.ReadAsync())
 }
 ```
 
+#### Streaming large results
+
+`ExecuteReaderAsync` buffers the whole result set before returning. For a large `SELECT`, call
+`ExecuteStreamReaderAsync` instead: it uses the server's streaming endpoint
+(`/execute-sql-query-stream`, newline-delimited JSON) and pulls rows from the network as you advance
+the reader, so a multi-thousand-row / multi-MB result never fully materializes client-side. The API is
+identical — same `CamusDataReader`, same accessors — only the delivery differs:
+
+```csharp
+await using CamusCommand select = connection.CreateSelectCommand(
+    "SELECT * FROM robots WHERE year > @year");
+
+select.Parameters.Add("@year", ColumnType.Integer64, 1900);
+
+// Rows arrive incrementally; dispose the reader to release the underlying HTTP response.
+await using CamusDataReader reader = await select.ExecuteStreamReaderAsync();
+
+while (await reader.ReadAsync())
+{
+    string name = reader.GetString(1);
+    long   year = reader.GetInt64(3);
+}
+```
+
+The schema (field count, names, types) is available before the first row, so `FieldCount` / `GetName`
+/ `HasRows` work on an empty result too.
+
+Trade-offs to know:
+
+- **No transparent serializable retry.** Because rows can reach you before the autocommit transaction
+  commits, a serializable conflict that surfaces mid-stream can't be replayed — it is reported in-band
+  as a `CamusException` thrown from the `ReadAsync` that reaches it. When you need automatic retry, use
+  the buffered `ExecuteReaderAsync`, or drive an explicit transaction and retry yourself.
+- **No cache metadata.** The streaming trailer carries no `{cache=…}` resolution, so
+  `CamusDataReader.CacheMetadata` is null on this path.
+- **gRPC.** On the `Protocol=grpc` transport, `ExecuteStreamReaderAsync` currently buffers server-side
+  and replays through the same reader (the streaming endpoint is REST-only); the call still works, it
+  is just not row-incremental.
+- **DML.** Calling it on an `INSERT`/`UPDATE`/`DELETE` falls back to the buffered affected-row reader.
+
 #### Query Result Cache
 
 CamusDB has an opt-in, per-node, in-memory cache of fully materialized `SELECT` results. A query
@@ -721,6 +761,28 @@ the server (rather than forcing client-side evaluation):
 
 The `starts_with` / `ends_with` / `contains` predicates take the search term as a plain argument, so
 they work with a column or parameter (not just a literal) and need no `LIKE` wildcard escaping.
+
+##### String ordering (`string.Compare` / `CompareTo`)
+
+The comparison idiom that keyset (cursor) pagination is written with translates to a plain relational
+comparison:
+
+```csharp
+// emits: WHERE `seq` < @seq OR (`seq` = @seq AND `code` < @code)
+query.Where(e => e.Seq < cursorSeq ||
+                 (e.Seq == cursorSeq && string.Compare(e.Code, cursorCode, StringComparison.Ordinal) < 0));
+```
+
+All of `string.Compare(a, b)`, `string.Compare(a, b, ignoreCase)`, `string.Compare(a, b, StringComparison)`
+and `a.CompareTo(b)` are supported, tested against `0` with any of `< <= > >= == !=`; the zero may sit on
+either side (`0 > string.Compare(a, b)` flips the operator). The `…IgnoreCase` forms wrap both operands in
+`lower(...)`.
+
+Other providers emit a three-valued `CASE WHEN … THEN -1 …` scalar here; CamusDB's dialect has no `CASE`,
+so the provider collapses the compare-and-test-against-zero pair into the direct comparison instead.
+Ordering is the server's: String and `id` columns compare with `StringComparison.Ordinal`, so the
+culture-sensitive overloads order ordinally too — the usual approximation when ordering is deferred to
+the database.
 
 ##### Regular expressions
 

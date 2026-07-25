@@ -11,3 +11,4 @@ CamusDB.EntityFrameworkCore/.idea/
 nupkg/
 nupkgs/
 artifacts
+.DS_Store

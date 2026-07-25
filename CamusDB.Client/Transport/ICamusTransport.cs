@@ -39,6 +39,17 @@ internal interface ICamusTransport
     /// <summary>Runs a <c>SELECT</c> and returns its decoded result set (schema + rows) plus cache metadata.</summary>
     Task<QueryTransportResult> ExecuteQueryAsync(TransportSqlRequest request, CancellationToken cancellationToken);
 
+    /// <summary>
+    /// Runs a <c>SELECT</c> and returns a <see cref="CamusRowSource"/> whose rows are pulled incrementally
+    /// as the caller advances, so a large result never materializes client-side. REST streams the
+    /// <c>/execute-sql-query-stream</c> NDJSON body row-by-row; gRPC has no cache-metadata channel and, in
+    /// this transport, falls back to a buffered result exposed through the same source (correct, not
+    /// memory-incremental). Because rows can reach the client before an autocommit transaction commits,
+    /// the streaming path forfeits the buffered path's transparent serializable retry — a late conflict is
+    /// surfaced as a <see cref="CamusException"/> while reading.
+    /// </summary>
+    Task<CamusRowSource> ExecuteQueryStreamAsync(TransportSqlRequest request, CancellationToken cancellationToken);
+
     /// <summary>Runs an <c>INSERT</c>/<c>UPDATE</c>/<c>DELETE</c> and returns the affected-row count.</summary>
     Task<int> ExecuteNonQueryAsync(TransportSqlRequest request, CancellationToken cancellationToken);
 

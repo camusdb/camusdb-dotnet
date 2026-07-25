@@ -137,6 +137,62 @@ internal sealed class RestTransport(CamusConnectionStringBuilder builder) : ICam
         }
     }
 
+    public async Task<CamusRowSource> ExecuteQueryStreamAsync(TransportSqlRequest request, CancellationToken cancellationToken)
+    {
+        string endpoint = request.Endpoint;
+
+        try
+        {
+            CamusExecuteSqlQueryRequest wire = new()
+            {
+                DatabaseName = request.Database,
+                Sql = request.Sql,
+                Parameters = ToDictionary(request.Parameters)
+            };
+
+            if (request.HasTransaction)
+            {
+                wire.TxnIdPT = request.TxnIdPT!.Value;
+                wire.TxnIdCounter = request.TxnIdCounter!.Value;
+            }
+
+            // ResponseHeadersRead returns as soon as the status + headers arrive, before the body is read,
+            // so rows flow incrementally instead of buffering the whole response. A setup failure (bad SQL,
+            // unknown database) arrives as a non-2xx here — surfaced before the first line — and Flurl
+            // throws FlurlHttpException, translated below exactly like the buffered endpoint. A conflict
+            // that surfaces after streaming starts is reported in-band by the NDJSON failure trailer and
+            // thrown from the reader (see NdjsonStreamRowSource).
+            IFlurlResponse response = await endpoint
+                .WithHeader("Accept", NdjsonStreamRowSource.ContentType)
+                .WithTimeout(request.TimeoutSeconds)
+                .AppendPathSegments("execute-sql-query-stream")
+                .PostAsync(
+                    CamusJsonContent.Create(wire, CamusJsonSerializerContext.Default.CamusExecuteSqlQueryRequest),
+                    HttpCompletionOption.ResponseHeadersRead,
+                    cancellationToken: cancellationToken)
+                .ConfigureAwait(false);
+
+            Stream stream = await response.GetStreamAsync().ConfigureAwait(false);
+
+            try
+            {
+                return await NdjsonStreamRowSource.CreateAsync(response, stream, cancellationToken).ConfigureAwait(false);
+            }
+            catch
+            {
+                // CreateAsync owns the stream/response only once it returns; on a header-parse failure we
+                // still own them here and must not leak the live HTTP response.
+                await stream.DisposeAsync().ConfigureAwait(false);
+                response.Dispose();
+                throw;
+            }
+        }
+        catch (FlurlHttpException ex)
+        {
+            throw await TranslateAsync(ex, endpoint).ConfigureAwait(false);
+        }
+    }
+
     public async Task<int> ExecuteNonQueryAsync(TransportSqlRequest request, CancellationToken cancellationToken)
     {
         string endpoint = request.Endpoint;

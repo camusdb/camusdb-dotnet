@@ -99,6 +99,32 @@ public sealed class CamusResultSet
         return new CamusResultSet(names, cells, rowCount, types);
     }
 
+    /// <summary>
+    /// Decodes one positional row array (a JSON array aligned to <paramref name="types"/>) into a flat
+    /// <see cref="ColumnValue"/>[]. Shared by the buffered <see cref="FromWire"/> path and the streaming
+    /// NDJSON reader, so both endpoints decode cells identically (the wire row encoding is the same —
+    /// only the framing differs). Positions the row omits stay <see cref="ColumnValue.Null"/>.
+    /// </summary>
+    internal static ColumnValue[] DecodeRow(JsonElement rowArray, ColumnType[] types)
+    {
+        ColumnValue[] cells = new ColumnValue[types.Length];
+
+        if (rowArray.ValueKind != JsonValueKind.Array)
+            return cells;
+
+        int c = 0;
+        foreach (JsonElement cell in rowArray.EnumerateArray())
+        {
+            if (c >= types.Length)
+                break;
+
+            cells[c] = DecodeCell(cell, types[c]);
+            c++;
+        }
+
+        return cells;
+    }
+
     public ColumnValue GetCell(int row, int column) => cells[row * ColumnCount + column];
 
     /// <summary>
