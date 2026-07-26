@@ -83,11 +83,24 @@ public class CamusDataReader : DbDataReader
 
     public override bool NextResult() => false;
 
+    /// <summary>
+    /// Resolves a column name to its ordinal. The server stores identifiers in the case they were
+    /// declared and echoes result column names in the case they were written in the SQL text, while
+    /// comparing identifiers case-insensitively. The reader mirrors that: an exact match wins, and a
+    /// case-insensitive match is accepted as a fallback so <c>reader["Name"]</c> resolves a column the
+    /// query spelled <c>name</c>.
+    /// </summary>
     public override int GetOrdinal(string name)
     {
         for (int i = 0; i < columnNames.Length; i++)
         {
             if (string.Equals(columnNames[i], name, StringComparison.Ordinal))
+                return i;
+        }
+
+        for (int i = 0; i < columnNames.Length; i++)
+        {
+            if (string.Equals(columnNames[i], name, StringComparison.OrdinalIgnoreCase))
                 return i;
         }
 
