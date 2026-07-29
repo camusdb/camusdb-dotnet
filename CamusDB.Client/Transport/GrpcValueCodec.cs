@@ -61,7 +61,7 @@ internal static class GrpcValueCodec
                 return new Grpc.Value { DatetimeValue = column.LongValue };
 
             case ColumnType.Uuid:
-                return new Grpc.Value { UuidValue = ByteString.CopyFrom(UuidToBigEndianBytes(column)) };
+                return new Grpc.Value { UuidValue = UuidToByteString(column) };
 
             case ColumnType.Array:
                 return EncodeArray(column);
@@ -160,19 +160,34 @@ internal static class GrpcValueCodec
         };
     }
 
-    // A UUID parameter reaches here as StrValue (canonical form, how CamusCommand builds it), or via the
-    // raw high/low halves. Both collapse to the same 16 big-endian bytes the wire wants (high||low).
-    private static byte[] UuidToBigEndianBytes(in ColumnValue column)
+    // A UUID parameter reaches here with the raw high/low halves populated (how CamusCommand builds a
+    // Guid parameter), or as a canonical string (a string-typed parameter, or a hand-built value). Both
+    // collapse to the same 16 big-endian bytes the wire wants (high||low); the halves path serializes
+    // directly with no string parse and no intermediate array. Zero halves fall through to the string
+    // forms so an all-zeros Guid carried as a string still encodes correctly.
+    private static ByteString UuidToByteString(in ColumnValue column)
     {
-        Guid guid;
-        if (!string.IsNullOrEmpty(column.StrValue))
-            guid = Guid.Parse(column.StrValue);
-        else if (!string.IsNullOrEmpty(column.UuidValue))
-            guid = Guid.Parse(column.UuidValue);
-        else
-            guid = column.AsGuid();
+        Span<byte> bytes = stackalloc byte[16];
 
-        return guid.ToByteArray(bigEndian: true);
+        if (column.UuidHigh != 0 || column.LongValue != 0)
+        {
+            BinaryPrimitives.WriteInt64BigEndian(bytes[..8], column.UuidHigh);
+            BinaryPrimitives.WriteInt64BigEndian(bytes[8..], column.LongValue);
+        }
+        else
+        {
+            Guid guid;
+            if (!string.IsNullOrEmpty(column.StrValue))
+                guid = Guid.Parse(column.StrValue);
+            else if (!string.IsNullOrEmpty(column.UuidValue))
+                guid = Guid.Parse(column.UuidValue);
+            else
+                guid = column.AsGuid();
+
+            guid.TryWriteBytes(bytes, bigEndian: true, out _);
+        }
+
+        return ByteString.CopyFrom(bytes);
     }
 
     // The gRPC and client ColumnType enums both mirror the engine's frozen integers exactly, so the

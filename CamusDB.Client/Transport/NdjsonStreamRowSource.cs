@@ -6,7 +6,6 @@
  * file that was distributed with this source code.
  */
 
-using System.Text;
 using System.Text.Json;
 
 namespace CamusDB.Client.Transport;
@@ -43,7 +42,11 @@ internal sealed class NdjsonStreamRowSource : CamusRowSource
     // disposed with the source. Null when the source is driven from a standalone stream (tests).
     private readonly IDisposable? responseHandle;
     private readonly Stream stream;
-    private readonly StreamReader reader;
+
+    // Byte-level line framing: each line is a slice of the reader's pooled buffer, parsed in place by
+    // JsonDocument and fully decoded (or copied) before the next line is read — no per-row string and no
+    // UTF-8→UTF-16→UTF-8 round trip.
+    private readonly Utf8LineReader reader;
 
     private readonly string[] names;
     private readonly ColumnType[] types;
@@ -57,7 +60,7 @@ internal sealed class NdjsonStreamRowSource : CamusRowSource
     private bool finished;
 
     private NdjsonStreamRowSource(
-        IDisposable? responseHandle, Stream stream, StreamReader reader, string[] names, ColumnType[] types)
+        IDisposable? responseHandle, Stream stream, Utf8LineReader reader, string[] names, ColumnType[] types)
     {
         this.responseHandle = responseHandle;
         this.stream = stream;
@@ -80,18 +83,18 @@ internal sealed class NdjsonStreamRowSource : CamusRowSource
     public static Task<NdjsonStreamRowSource> CreateAsync(
         IDisposable? responseHandle, Stream stream, CancellationToken cancellationToken)
     {
-        StreamReader reader = new(stream, Encoding.UTF8, detectEncodingFromByteOrderMarks: false);
+        Utf8LineReader reader = new(stream);
         return CreateAsync(responseHandle, stream, reader, cancellationToken);
     }
 
     private static async Task<NdjsonStreamRowSource> CreateAsync(
-        IDisposable? responseHandle, Stream stream, StreamReader reader, CancellationToken cancellationToken)
+        IDisposable? responseHandle, Stream stream, Utf8LineReader reader, CancellationToken cancellationToken)
     {
-        string? headerLine = await ReadNonEmptyLineAsync(reader, cancellationToken).ConfigureAwait(false);
+        ReadOnlyMemory<byte>? headerLine = await ReadNonEmptyLineAsync(reader, cancellationToken).ConfigureAwait(false);
         if (headerLine is null)
             throw new CamusException("CADB0000", "Streaming query response ended before the schema header.");
 
-        (string[] names, ColumnType[] types) = ParseHeader(headerLine);
+        (string[] names, ColumnType[] types) = ParseHeader(headerLine.Value);
 
         NdjsonStreamRowSource source = new(responseHandle, stream, reader, names, types);
         source.pending = await source.ReadNextRowAsync(cancellationToken).ConfigureAwait(false);
@@ -139,12 +142,12 @@ internal sealed class NdjsonStreamRowSource : CamusRowSource
         return current is not null;
     }
 
-    public override ColumnValue GetCell(int ordinal)
+    public override ref readonly ColumnValue GetCell(int ordinal)
     {
         if (current is null)
             throw new InvalidOperationException("No current row is available.");
 
-        return current[ordinal];
+        return ref current[ordinal];
     }
 
     private async Task<ColumnValue[]?> ReadNextRowAsync(CancellationToken cancellationToken)
@@ -155,7 +158,7 @@ internal sealed class NdjsonStreamRowSource : CamusRowSource
     /// trailer (marks the stream finished, and throws if it reports an in-band failure); a null line is a
     /// truncated stream (treated as end). Returns null at end of stream.
     /// </summary>
-    private ColumnValue[]? ReadNextRow(string? line)
+    private ColumnValue[]? ReadNextRow(ReadOnlyMemory<byte>? line)
     {
         if (line is null)
         {
@@ -163,7 +166,9 @@ internal sealed class NdjsonStreamRowSource : CamusRowSource
             return null;
         }
 
-        using JsonDocument doc = JsonDocument.Parse(line);
+        // The document reads the pooled line buffer in place; it is fully decoded into ColumnValues
+        // (which copy out any strings/bytes) and disposed before the next line overwrites that buffer.
+        using JsonDocument doc = JsonDocument.Parse(line.Value);
         JsonElement root = doc.RootElement;
 
         if (root.ValueKind == JsonValueKind.Array)
@@ -175,7 +180,7 @@ internal sealed class NdjsonStreamRowSource : CamusRowSource
         return null;
     }
 
-    private static (string[] Names, ColumnType[] Types) ParseHeader(string headerLine)
+    private static (string[] Names, ColumnType[] Types) ParseHeader(ReadOnlyMemory<byte> headerLine)
     {
         using JsonDocument doc = JsonDocument.Parse(headerLine);
         JsonElement root = doc.RootElement;
@@ -220,26 +225,26 @@ internal sealed class NdjsonStreamRowSource : CamusRowSource
 
     // The server writes exactly one record per line (value + '\n'), but skip any blank line defensively so
     // stray framing never surfaces as a spurious end-of-stream.
-    private static async Task<string?> ReadNonEmptyLineAsync(StreamReader reader, CancellationToken cancellationToken)
+    private static async ValueTask<ReadOnlyMemory<byte>?> ReadNonEmptyLineAsync(Utf8LineReader reader, CancellationToken cancellationToken)
     {
         while (true)
         {
-            string? line = await reader.ReadLineAsync(cancellationToken).ConfigureAwait(false);
+            ReadOnlyMemory<byte>? line = await reader.ReadLineAsync(cancellationToken).ConfigureAwait(false);
             if (line is null)
                 return null;
-            if (line.Length != 0)
+            if (line.Value.Length != 0)
                 return line;
         }
     }
 
-    private static string? ReadNonEmptyLine(StreamReader reader)
+    private static ReadOnlyMemory<byte>? ReadNonEmptyLine(Utf8LineReader reader)
     {
         while (true)
         {
-            string? line = reader.ReadLine();
+            ReadOnlyMemory<byte>? line = reader.ReadLine();
             if (line is null)
                 return null;
-            if (line.Length != 0)
+            if (line.Value.Length != 0)
                 return line;
         }
     }

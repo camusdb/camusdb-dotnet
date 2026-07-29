@@ -93,3 +93,155 @@ jobs:
       - name: Stop CamusDB
         if: always()
         run: docker rm -f camusdb || true
+
+  auth-build-and-test:
+    name: Build & test (authenticated)
+    runs-on: ubuntu-latest
+
+    # A separate job, not another leg of the one above: every test in the main suite connects without
+    # credentials, so they would all fail against an authenticated server. Its own runner also means this
+    # job can reuse ports 5095/5096, which is what TestAuthenticationLive expects.
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup .NET (8, 9, 10)
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: |
+            8.0.x
+            9.0.x
+            10.0.x
+
+      - name: Generate bootstrap credentials
+        # There is deliberately no default account: the server refuses to start with authentication on and
+        # an empty user catalog unless a bootstrap secret is supplied. Masked so it never lands in a log.
+        run: |
+          password="$(openssl rand -base64 24)"
+          echo "::add-mask::$password"
+          echo "CAMUSDB_BOOTSTRAP_PASSWORD=$password" >> "$GITHUB_ENV"
+          echo "CAMUSDB_TEST_PASSWORD=$password" >> "$GITHUB_ENV"
+
+      - name: Start CamusDB with authentication enabled
+        # --network host, not -p: with authentication on the server refuses credential-bearing requests
+        # over plaintext, and under port mapping it sees the client as the docker bridge gateway rather
+        # than loopback, so the loopback exemption would not apply and every request would be refused with
+        # CADB0519. Sharing the host network makes the peer 127.0.0.1, which is exempt — the same path
+        # single-host development takes, and it needs no certificate.
+        #
+        # The alternative is --require-tls-when-auth-enabled false (or require_tls_when_auth_enabled in
+        # config.yml), which is what a real deployment behind a TLS-terminating proxy uses. It is avoided
+        # here on purpose: the image's ENTRYPOINT is fixed, so passing it means overriding the entrypoint,
+        # and an image predating the flag would die on the unrecognized option — turning the graceful skip
+        # below into a red build.
+        run: |
+          docker run -d --network host -v camus-auth-data:/data --name camusdb-auth \
+            -e CAMUSDB_AUTH_ENABLED=true \
+            -e CAMUSDB_AUTH_TOKEN_KEY="$(openssl rand -hex 32)" \
+            -e CAMUSDB_NODE_SECRET="$(openssl rand -hex 32)" \
+            -e CAMUSDB_BOOTSTRAP_USER=admin \
+            -e CAMUSDB_BOOTSTRAP_PASSWORD="$CAMUSDB_BOOTSTRAP_PASSWORD" \
+            camusdb/camusdb:latest
+
+      - name: Wait for CamusDB to be ready
+        # /ping is exempt from authentication, so it answers 200 either way.
+        run: |
+          for i in $(seq 1 60); do
+            if curl --fail --silent http://localhost:5095/ping >/dev/null 2>&1; then
+              echo "CamusDB is up after ${i}s."
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "CamusDB did not become ready in time." >&2
+          docker logs camusdb-auth || true
+          exit 1
+
+      - name: Check the image supports authentication
+        # camusdb/camusdb:latest may predate the authentication feature, in which case it ignores the
+        # CAMUSDB_AUTH_* variables and serves everything unauthenticated — the tests below would then fail
+        # for a reason that has nothing to do with this repository. A missing /login route is the crisp
+        # signal for that, so skip rather than fail; the job starts testing for real the moment a newer
+        # image is published, with no edit here.
+        id: supported
+        run: |
+          status="$(curl --silent --output /dev/null --write-out '%{http_code}' \
+            -X POST http://localhost:5095/login \
+            -H "Content-Type: application/json" \
+            -d '{"user":"nobody","password":"nobody"}')"
+
+          if [ "$status" = "404" ]; then
+            echo "The published image has no /login route — it predates authentication. Skipping."
+            echo "supported=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "/login answered $status — authentication is available."
+            echo "supported=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Wait for CamusDB gRPC port
+        if: steps.supported.outputs.supported == 'true'
+        run: |
+          for i in $(seq 1 60); do
+            if timeout 1 bash -c '</dev/tcp/localhost/5096' 2>/dev/null; then
+              echo "CamusDB gRPC port 5096 is accepting connections after ${i}s."
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "CamusDB gRPC port 5096 did not open in time." >&2
+          docker logs camusdb-auth || true
+          exit 1
+
+      - name: Create test database
+        # /create-db requires the superuser attribute, so this has to present the bootstrap user's token.
+        if: steps.supported.outputs.supported == 'true'
+        run: |
+          token="$(curl --fail --silent -X POST http://localhost:5095/login \
+            -H "Content-Type: application/json" \
+            -d "{\"user\":\"admin\",\"password\":\"$CAMUSDB_BOOTSTRAP_PASSWORD\"}" \
+            | jq -r .token)"
+          echo "::add-mask::$token"
+
+          curl --fail --silent -X POST http://localhost:5095/create-db \
+            -H "Authorization: Bearer $token" \
+            -H "Content-Type: application/json" \
+            -d '{"databaseName":"test","ifNotExists":true}'
+
+      - name: Restore
+        if: steps.supported.outputs.supported == 'true'
+        run: dotnet restore CamusDB.Client/CamusDB.Client.sln
+
+      - name: Build
+        if: steps.supported.outputs.supported == 'true'
+        run: dotnet build CamusDB.Client/CamusDB.Client.sln --no-restore -c Release
+
+      - name: Test
+        # Only the live authentication tests: the rest of the suite connects without credentials and is
+        # already covered by the unauthenticated job. They no-op unless both variables below are set.
+        if: steps.supported.outputs.supported == 'true'
+        env:
+          CAMUSDB_TEST_USER: admin
+        run: >
+          dotnet test CamusDB.Client/CamusDB.Client.sln
+          --no-build -c Release
+          --filter FullyQualifiedName~TestAuthenticationLive
+          --logger "trx;LogFileName=auth-test-results.trx"
+          --results-directory TestResults
+          -- xUnit.ParallelizeTestCollections=false
+
+      - name: Dump CamusDB logs on failure
+        if: failure()
+        run: docker logs camusdb-auth || true
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: auth-test-results
+          path: TestResults/**/*.trx
+          if-no-files-found: ignore
+
+      - name: Stop CamusDB
+        if: always()
+        run: docker rm -f camusdb-auth || true

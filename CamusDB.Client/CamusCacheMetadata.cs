@@ -5,6 +5,8 @@
  * file that was distributed with this source code.
  */
 
+using System.Text.Json;
+
 namespace CamusDB.Client;
 
 /// <summary>
@@ -69,6 +71,62 @@ public sealed class CamusCacheMetadata
             response.CacheName,
             response.CachedAtHlc,
             response.AgeMs);
+    }
+
+    /// <summary>
+    /// Builds metadata straight from the query response's DOM — the single-pass parse the REST transport
+    /// uses instead of the <see cref="CamusExecuteSqlQueryResponse"/> DTO. Reads the same fields as
+    /// <see cref="FromResponse"/> and, like it, returns <see langword="null"/> when the response carried
+    /// no cache fields (the query was not hinted).
+    /// </summary>
+    internal static CamusCacheMetadata? FromJson(JsonElement root)
+    {
+        string? status = ReadString(root, "cacheStatus");
+        string? name = ReadString(root, "cacheName");
+
+        if (status is null && name is null)
+            return null;
+
+        CamusHlcTimestamp? cachedAt = null;
+        if (root.TryGetProperty("cachedAtHlc", out JsonElement hlc) && hlc.ValueKind == JsonValueKind.Object)
+            cachedAt = new CamusHlcTimestamp
+            {
+                L = hlc.TryGetProperty("l", out JsonElement l) && l.TryGetInt64(out long lv) ? lv : 0,
+                C = hlc.TryGetProperty("c", out JsonElement c) && c.TryGetUInt32(out uint cv) ? cv : 0,
+            };
+
+        long? ageMs = root.TryGetProperty("ageMs", out JsonElement age) && age.TryGetInt64(out long a) ? a : null;
+
+        return new CamusCacheMetadata(status, ReadString(root, "cacheBypassReason"), name, cachedAt, ageMs);
+    }
+
+    private static string? ReadString(JsonElement root, string property)
+        => root.TryGetProperty(property, out JsonElement value) && value.ValueKind == JsonValueKind.String
+            ? value.GetString()
+            : null;
+
+    /// <summary>
+    /// Builds metadata from the gRPC cache verdict carried by a query terminator. The server emits that
+    /// message only for a <c>{cache=…}</c>-hinted statement, so an absent (<see langword="null"/>) message
+    /// means the query was unhinted and this returns <see langword="null"/> — matching how the REST path
+    /// reports no cache fields. The status/bypass strings are the same values REST uses, so both transports
+    /// parse identically; the empty bypass string maps back to null.
+    /// </summary>
+    internal static CamusCacheMetadata? FromProto(Grpc.CacheMetadata? metadata)
+    {
+        if (metadata is null)
+            return null;
+
+        CamusHlcTimestamp? cachedAt = metadata.CachedAtHlc is { } hlc
+            ? new CamusHlcTimestamp { L = hlc.L, C = hlc.C }
+            : null;
+
+        return new CamusCacheMetadata(
+            string.IsNullOrEmpty(metadata.Status) ? null : metadata.Status,
+            string.IsNullOrEmpty(metadata.BypassReason) ? null : metadata.BypassReason,
+            string.IsNullOrEmpty(metadata.Name) ? null : metadata.Name,
+            cachedAt,
+            metadata.HasAgeMs ? metadata.AgeMs : null);
     }
 
     private static CamusCacheStatus ParseStatus(string? status) => status switch

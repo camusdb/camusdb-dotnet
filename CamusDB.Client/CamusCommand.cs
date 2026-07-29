@@ -169,8 +169,13 @@ public class CamusCommand : DbCommand, ICloneable
         return false;
     }
 
-    protected Dictionary<string, ColumnValue> GetCommandParameters()
+    /// <summary>Bound parameters as the transport-neutral dictionary, or null when the command has none —
+    /// the common case for EF-generated reads, which would otherwise allocate an empty dictionary each.</summary>
+    protected Dictionary<string, ColumnValue>? GetCommandParameters()
     {
+        if (Parameters.Count == 0)
+            return null;
+
         Dictionary<string, ColumnValue> commandParameters = new(Parameters.Count);
 
         foreach (CamusParameter parameter in Parameters)
@@ -203,9 +208,10 @@ public class CamusCommand : DbCommand, ICloneable
                 return new() { Type = columnType, StrValue = value.ToString() };
 
             // The server accepts a UUID parameter as its canonical string form and re-splits it into
-            // the big-endian halves on its side (see ColumnValue's JsonConstructor).
+            // the big-endian halves on its side (see ColumnValue's JsonConstructor). The raw halves are
+            // carried too so the gRPC codec serializes them directly instead of re-parsing the string.
             case ColumnType.Uuid when value is Guid gu:
-                return new() { Type = columnType, StrValue = gu.ToString() };
+                return UuidColumnValue(gu);
 
             case ColumnType.Uuid when value is string us:
                 return new() { Type = columnType, StrValue = us };
@@ -272,6 +278,20 @@ public class CamusCommand : DbCommand, ICloneable
         }
 
         return new() { Type = ColumnType.Array, ArrayElementType = elementType, ArrayValues = elements };
+    }
+
+    private static ColumnValue UuidColumnValue(in Guid guid)
+    {
+        Span<byte> bytes = stackalloc byte[16];
+        guid.TryWriteBytes(bytes, bigEndian: true, out _);
+
+        return new()
+        {
+            Type = ColumnType.Uuid,
+            StrValue = guid.ToString(),
+            UuidHigh = System.Buffers.Binary.BinaryPrimitives.ReadInt64BigEndian(bytes[..8]),
+            LongValue = System.Buffers.Binary.BinaryPrimitives.ReadInt64BigEndian(bytes[8..]),
+        };
     }
 
     private static byte[] ToBytes(string name, object value) => value switch

@@ -46,6 +46,10 @@ Supported connection string keys:
 | `Database` | Yes | Database name sent with requests. |
 | `Timeout` | No | Request timeout in seconds (default: `10`). |
 | `Protocol` | No | Wire protocol: `rest` (default) or `grpc`. See [Transport](#transport-rest--grpc). |
+| `User` | No | User to authenticate as. Aliases: `UserId`, `Uid`, `Username`. See [Authentication](#authentication). |
+| `Password` | No | That user's password. Alias: `Pwd`. |
+| `AccessToken` | No | A bearer token obtained elsewhere, used verbatim instead of logging in. |
+| `TokenLifetime` | No | Fallback seconds to reuse a token when the server reports no expiry (default: `600`). |
 
 `Endpoint` also supports a comma-separated pool. The client selects endpoints with round-robin routing:
 
@@ -55,6 +59,82 @@ CamusConnectionStringBuilder builder = new(
 ```
 
 When a request fails because an endpoint is unreachable, that endpoint is marked unavailable and skipped by later requests made through the same `CamusConnectionStringBuilder`.
+
+### Authentication
+
+CamusDB authentication is **off by default**; a connection string without credentials behaves exactly as before and sends no `Authorization` header. Against a server started with `CAMUSDB_AUTH_ENABLED=true` (see the server's `docs/sql-authentication.md`), add credentials:
+
+```csharp
+CamusConnectionStringBuilder builder = new(
+    "Endpoint=http://localhost:5095;Database=test;User=app;Password=app-secret");
+
+await using CamusConnection connection = new(builder);
+await connection.OpenAsync();
+
+// Nothing else changes — the first statement authenticates transparently.
+await using CamusCommand command = connection.CreateCamusCommand("SELECT * FROM orders");
+```
+
+The password is exchanged **once** for a short-lived bearer token — `POST /login` over REST, the `CamusAuth` service over gRPC — and every statement then carries that token, never the password. The driver handles the token for you:
+
+- **One login per credential set, not per connection.** The token is cached process-wide keyed by credentials + server, so a connection pool — or Entity Framework, which builds a fresh connection per operation — performs a single login. This matters: password verification is deliberately expensive server-side (PBKDF2, 600k iterations by default) and the server rate-limits logins to 20 per account per minute.
+- **Renewal is automatic.** The login reply reports how long the token is good for, and the driver renews at 80% of that — the server's `AccessTokenTtl` is configurable and may be shorter than any lifetime the driver would assume, so its value wins. Against a server that reports no expiry the driver falls back to `TokenLifetime` (10 minutes by default, comfortably inside the server's 15-minute default). A token rejected before then — after a password rotation, a `DROP USER`, a logout elsewhere, or a server restart — is caught reactively: the driver discards it, authenticates again, and **replays the statement once**. A rejected request never reached execution, so the replay is as safe as the serializable-conflict retry the driver already performs.
+- **`CADB0517` (insufficient privilege) is never retried** — re-authenticating as the same user cannot grant a privilege. Grant it with `GRANT … ON db.* TO user`.
+
+#### Authenticating explicitly
+
+When the password comes from a secret manager at runtime, keep it out of the connection string and log in on the open connection:
+
+```csharp
+await using CamusConnection connection = new(new CamusConnectionStringBuilder("Endpoint=http://localhost:5095;Database=test"));
+await connection.OpenAsync();
+
+string token = await connection.LoginAsync("app", await secrets.GetAsync("camus-password"));
+
+// … statements …
+
+await connection.LogoutAsync();   // revokes the token server-side
+```
+
+`connection.AccessToken` exposes the cached token (null when none has been minted) — useful to hand to another process via `AccessToken=`. A token supplied that way is used verbatim and never renewed: the driver has no password to mint a replacement with, so a rejection surfaces as `CamusException` with code `CADB0516` rather than being retried.
+
+`LogoutAsync` revokes the token but keeps the configured credentials, so a later statement authenticates again transparently.
+
+#### Authenticating over gRPC
+
+Nothing extra to configure — credentials work the same as over REST:
+
+```csharp
+CamusConnectionStringBuilder builder = new(
+    "Endpoint=http://localhost:5096;Database=test;Protocol=grpc;User=app;Password=app-secret");
+```
+
+The exchange rides the server's dedicated `CamusAuth` service (`Login`/`Logout`) on the very channel that carries the statements, so a gRPC-only deployment never has to expose the HTTP port just to obtain a token. The token then travels in the `authorization` call metadata.
+
+One consequence worth knowing: the token is attached when a `BatchExecute` stream opens, because the server resolves the principal once for the whole stream. A refreshed token therefore reaches the server on the next stream the client builds, not mid-stream.
+
+#### TLS
+
+With authentication enabled the server refuses credential-bearing requests over plaintext (`RequireTlsWhenAuthEnabled`, on by default), exempting loopback so single-host development works without certificates. Against any non-loopback deployment use `https://` endpoints, or the server answers `CADB0519`.
+
+When TLS terminates in front of the node (ingress, sidecar, service mesh) that hop is invisible to the server, so it would otherwise reject every forwarded request. Start it with `--require-tls-when-auth-enabled false`, or set `require_tls_when_auth_enabled: false` in `config.yml`, and keep the plaintext hop inside the trust boundary.
+
+#### Error codes
+
+| Code | HTTP | Meaning |
+| --- | --- | --- |
+| `CADB0516` | 401 | Authentication failed — missing/invalid/expired token, unknown user, or wrong password. The server returns the same code for all of them so replies cannot be used to enumerate accounts. |
+| `CADB0517` | 403 | Authenticated, but lacking the privilege the statement requires on some table it touches. |
+| `CADB0518` | 429 | Too many login attempts for that account. |
+| `CADB0519` | 400 | Credentials sent over a plaintext connection where the server requires TLS. |
+
+Users and grants are managed with SQL (`CREATE USER`, `GRANT`, `REVOKE`, `SHOW GRANTS`), which the driver runs like any other statement — as a superuser. Bind the password as a parameter rather than inlining it, so it does not reach query logs or tracing:
+
+```csharp
+await using CamusCommand command = connection.CreateCamusCommand("CREATE USER app IDENTIFIED BY @password");
+command.Parameters.Add("@password", ColumnType.String, "app-secret");
+await command.ExecuteNonQueryAsync();
+```
 
 ### Transport (REST / gRPC)
 
@@ -76,7 +156,6 @@ Under gRPC the data plane — queries, non-queries, and the transaction lifecycl
 
 Both transports raise the same `CamusException` (carrying the server's `CADBxxxx` code), so error handling and the transaction retry contract are unchanged when you switch. A couple of differences are inherent to the gRPC API surface:
 
-- **Query result cache metadata** (`CamusCommand.LastCacheMetadata` / `CamusDataReader.CacheMetadata`) is only reported over REST; it is `null` on the gRPC path.
 - Database-admin operations (`CreateDatabaseAsync`, `DropDatabaseAsync`, `CreateBranchDatabaseAsync`, `ShowBranchesAsync`, `ShowAncestorsAsync`) are issued as SQL over gRPC (the gRPC service has no dedicated admin RPCs); they behave the same from the caller's side.
 
 ### Usage
@@ -342,6 +421,10 @@ if (cache is not null)
 `EvictedBeforePublish`), `BypassReason`, `Name`, `CachedAtHlc`, and `AgeMs`. It is `null` for any
 query that carried no hint, so ordinary queries are unaffected.
 
+Both transports report it. Over gRPC the verdict rides the query terminator rather than a response
+envelope — the server only knows it once the result set has been produced — so it is available on the
+buffered `ExecuteReaderAsync` path, not on `ExecuteStreamReaderAsync` (see the streaming caveats above).
+
 Evict entries manually — both are scoped to the current database:
 
 ```csharp
@@ -542,6 +625,16 @@ public class AppDbContext : DbContext
 ```
 
 The same connection string keys are supported as in `CamusDB.Client` — see the [connection string reference](#configuration) above. This includes `Protocol=grpc`, so the EF Core provider can run over gRPC by pointing `Endpoint` at the gRPC port; see [Transport](#transport-rest--grpc).
+
+It also includes `User` / `Password` (see [Authentication](#authentication)), which is all the provider needs against an authenticated server:
+
+```csharp
+var options = new DbContextOptionsBuilder<AppDbContext>()
+    .UseCamusDB("Endpoint=http://localhost:8082;Database=mydb;User=app;Password=app-secret")
+    .Options;
+```
+
+EF opens a fresh connection per operation, but the token is cached per credential set rather than per connection, so the whole context still performs one login. Every table an EF query touches — including joins and subqueries — must be covered by a grant, or the query fails with `CADB0517`.
 
 #### Retry on failure
 
@@ -893,6 +986,9 @@ The provider supports EF Core migrations for the following DDL operations:
 | Create unique index | `CREATE UNIQUE INDEX name ON t (col1, col2)` |
 | Drop index | `ALTER TABLE t DROP INDEX name` |
 | Rename index | `ALTER TABLE t RENAME INDEX old TO new` |
+| Set/change table comment | `COMMENT ON TABLE t IS '...'` |
+| Set/change column comment | `COMMENT ON COLUMN t.col IS '...'` |
+| Set index comment | `COMMENT ON INDEX t.name IS '...'` |
 | Raw SQL | passed through as-is |
 
 A `CHECK` constraint declared with `ToTable(t => t.HasCheckConstraint(...))` is emitted as a
@@ -901,6 +997,46 @@ table-level `CONSTRAINT name CHECK (expr)` inside `CREATE TABLE` (both via migra
 `DropCheckConstraint`. Changing a property's nullability (with the column type unchanged) maps to
 CamusDB's `ALTER COLUMN … SET/DROP NOT NULL`; `DropCheckConstraint` also drops a named `NOT NULL`
 constraint by name, since CamusDB resolves `DROP CONSTRAINT` against both.
+
+#### Comments
+
+Table and column descriptions come from EF Core's built-in `HasComment` (or the `[Comment]`
+attribute); indexes use the provider's `HasComment` extension, since EF has no built-in surface for
+them:
+
+```csharp
+modelBuilder.Entity<User>(b =>
+{
+    b.ToTable("users", t => t.HasComment("Application users"));
+    b.Property(u => u.Email).HasComment("Unique login email address");
+    b.HasIndex(u => u.Email, "email_idx").HasComment("Lookup by login email");
+});
+```
+
+Creating the table emits the comments inline:
+
+```sql
+CREATE TABLE IF NOT EXISTS `users` (
+`id` OID NOT NULL COMMENT 'Internal user identifier',
+`email` STRING NOT NULL COMMENT 'Unique login email address',
+PRIMARY KEY (`id`)
+) COMMENT 'Application users';
+CREATE UNIQUE INDEX IF NOT EXISTS `email_idx` ON `users` (`email`);
+COMMENT ON INDEX `users`.`email_idx` IS 'Lookup by login email';
+```
+
+Changing a comment later emits `COMMENT ON …`; removing one emits `COMMENT ON … IS NULL`, which
+CamusDB treats as distinct from `IS ''` (a present-but-empty comment), matching PostgreSQL. A
+comment-only change on a column no longer trips the "only nullability can be altered" guard.
+
+Comments are validated when the SQL is generated, so invalid text fails the migration rather than
+the server round-trip. CamusDB cannot round-trip control characters (newlines, tabs), a backslash
+immediately before a quote, or a trailing backslash, and caps comments at 65 535 characters.
+Embedded single quotes are fine — they are doubled on output.
+
+Two limitations have no EF surface: the primary key index cannot carry a comment (comment the table
+instead), and database comments must be issued as raw SQL —
+`migrationBuilder.Sql("COMMENT ON DATABASE app IS '...'")`.
 
 The provider ships design-time services so the EF tooling can discover the provider automatically. No extra flags are needed:
 

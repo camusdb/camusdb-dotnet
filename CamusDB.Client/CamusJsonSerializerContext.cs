@@ -20,6 +20,8 @@ namespace CamusDB.Client;
 [JsonSerializable(typeof(CamusExecuteSqlQueryResponse))]
 [JsonSerializable(typeof(CamusHlcTimestamp))]
 [JsonSerializable(typeof(CamusInsertRequest))]
+[JsonSerializable(typeof(CamusLoginRequest))]
+[JsonSerializable(typeof(CamusLoginResponse))]
 [JsonSerializable(typeof(CamusStartTransactionRequest))]
 [JsonSerializable(typeof(CamusStartTransactionResponse))]
 [JsonSerializable(typeof(CamusTransactionRequest))]

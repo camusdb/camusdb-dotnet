@@ -8,6 +8,7 @@
 
 using System.Collections.Concurrent;
 using System.Net.Http;
+using CamusDB.Client.Auth;
 using CamusDB.Client.Transport.Batching;
 using CamusDB.Grpc;
 using Grpc.Core;
@@ -31,8 +32,21 @@ namespace CamusDB.Client.Transport;
 /// <para>The <c>CamusSql</c>/<c>CamusRows</c> proto has no dedicated database-admin RPCs, so the admin
 /// operations are expressed as SQL over the unary <c>ExecuteDdl</c> / the batched query path — exactly as
 /// the server's own gRPC client does.</para>
+///
+/// <para>Authentication rides in the <c>authorization</c> request metadata, exactly as the REST transport
+/// puts it in the HTTP header. Unary calls (DDL, Ping) attach it per call; the long-lived
+/// <c>BatchExecute</c> streams attach it once, when the stream opens, because that is when the server
+/// resolves the principal for the whole stream. Every batched entry point therefore awaits the token
+/// before touching the batcher, so a stream is never opened — or rebuilt after a fault — with a token the
+/// provider has not minted yet.</para>
+///
+/// <para>It is also the <see cref="ICamusLoginClient"/> for gRPC connections, exchanging credentials over
+/// the <c>CamusAuth</c> service on the same channel as everything else — so a gRPC deployment never has
+/// to expose the HTTP port merely to obtain a token. Those two RPCs deliberately do not consult the token
+/// provider (Login has no token yet, Logout is handed the one to revoke), which is what keeps the
+/// provider from re-entering itself while it holds its login gate.</para>
 /// </summary>
-internal sealed class GrpcTransport : ICamusTransport, IDisposable
+internal sealed class GrpcTransport(CamusTokenProvider auth) : ICamusTransport, ICamusLoginClient, IDisposable
 {
     static GrpcTransport()
     {
@@ -46,26 +60,42 @@ internal sealed class GrpcTransport : ICamusTransport, IDisposable
     private readonly ConcurrentDictionary<string, ChannelEntry> channels = new(StringComparer.OrdinalIgnoreCase);
 
     // Latest causal token observed on this transport (HLC N, L, C). Threaded into every request so the
-    // server can order this session's operations for read-your-writes. Guarded by tokenLock.
-    private readonly object tokenLock = new();
-    private int tokenN;
-    private long tokenL;
-    private long tokenC;
+    // server can order this session's operations for read-your-writes. Held as one immutable object so
+    // the per-request read is a lock-free volatile load; writers advance it by CAS.
+    private sealed record CausalToken(int N, long L, long C);
+
+    private static readonly CausalToken EmptyToken = new(0, 0, 0);
+
+    private CausalToken causalToken = EmptyToken;
 
     public CamusProtocol Protocol => CamusProtocol.Grpc;
 
-    private sealed class ChannelEntry(GrpcChannel channel, CamusSql.CamusSqlClient client)
+    private sealed class ChannelEntry(GrpcChannel channel, CamusSql.CamusSqlClient client, Func<global::Grpc.Core.Metadata?> headers)
     {
         public GrpcChannel Channel { get; } = channel;
         public CamusSql.CamusSqlClient Client { get; } = client;
-        public GrpcBatcher Batcher { get; } = new(BatchOptions, id => new GrpcBatchTransport(id, client));
+        public CamusAuth.CamusAuthClient AuthClient { get; } = new(channel);
+
+        // Lazy because the batcher eagerly opens its whole pool of BatchExecute streams: a caller that
+        // only logs in, pings, or runs DDL never needs them, and — since a stream carries the token it
+        // was opened with — opening them before the first login would open them unauthenticated.
+        private readonly Lazy<GrpcBatcher> batcher = new(
+            () => new GrpcBatcher(BatchOptions, id => new GrpcBatchTransport(id, client, headers())),
+            LazyThreadSafetyMode.ExecutionAndPublication);
+
+        // The batcher rebuilds a faulted stream on its own, so the factory reads the current token on
+        // every call rather than closing over one — a stream re-opened after a token refresh carries the
+        // new token.
+        public GrpcBatcher Batcher => batcher.Value;
+
+        public GrpcBatcher? BatcherIfCreated => batcher.IsValueCreated ? batcher.Value : null;
     }
 
     private ChannelEntry GetEntry(string endpoint)
-        => channels.GetOrAdd(endpoint, static ep =>
+        => channels.GetOrAdd(endpoint, ep =>
         {
             GrpcChannel channel = CreateChannel(ep);
-            return new ChannelEntry(channel, new CamusSql.CamusSqlClient(channel));
+            return new ChannelEntry(channel, new CamusSql.CamusSqlClient(channel), CurrentCallHeaders);
         });
 
     private CamusSql.CamusSqlClient GetClient(string endpoint) => GetEntry(endpoint).Client;
@@ -93,6 +123,8 @@ internal sealed class GrpcTransport : ICamusTransport, IDisposable
     public async Task<StartTransactionResult> StartTransactionAsync(
         string endpoint, string database, CamusTransactionOptions options, int timeoutSeconds, CancellationToken cancellationToken)
     {
+        await EnsureTokenAsync(cancellationToken).ConfigureAwait(false);
+
         GrpcBatcher batcher = GetBatcher(endpoint);
         int slot = batcher.ReserveSlot();
 
@@ -125,6 +157,8 @@ internal sealed class GrpcTransport : ICamusTransport, IDisposable
     public async Task FinalizeTransactionAsync(
         bool commit, string endpoint, string database, long txnIdPT, uint txnIdCounter, int? streamSlot, int timeoutSeconds, CancellationToken cancellationToken)
     {
+        await EnsureTokenAsync(cancellationToken).ConfigureAwait(false);
+
         GrpcBatcher batcher = GetBatcher(endpoint);
         int slot = streamSlot ?? batcher.ReserveSlot();
 
@@ -157,6 +191,8 @@ internal sealed class GrpcTransport : ICamusTransport, IDisposable
 
     public async Task<QueryTransportResult> ExecuteQueryAsync(TransportSqlRequest request, CancellationToken cancellationToken)
     {
+        await EnsureTokenAsync(cancellationToken).ConfigureAwait(false);
+
         SqlRequest wire = BuildSqlRequest(request);
 
         (CancellationToken token, CancellationTokenSource? cts) = WithTimeout(request.TimeoutSeconds, cancellationToken);
@@ -167,9 +203,11 @@ internal sealed class GrpcTransport : ICamusTransport, IDisposable
 
             ObserveToken(result.Token);
 
-            // gRPC query results carry no cache-metadata channel (the proto has no such field), so cache
-            // hints are unavailable on this transport.
-            return new QueryTransportResult(BuildResultSet(result.Schema, result.Rows), cacheMetadata: null);
+            // The cache verdict rides the QUERY terminator (it is known only once the server has drained
+            // the cursor) and is absent for an unhinted statement, which maps to null metadata just as on REST.
+            return new QueryTransportResult(
+                BuildResultSet(result.Schema, result.Rows),
+                CamusCacheMetadata.FromProto(result.CacheMetadata));
         }
         catch (RpcException ex)
         {
@@ -194,6 +232,8 @@ internal sealed class GrpcTransport : ICamusTransport, IDisposable
 
     public async Task<int> ExecuteNonQueryAsync(TransportSqlRequest request, CancellationToken cancellationToken)
     {
+        await EnsureTokenAsync(cancellationToken).ConfigureAwait(false);
+
         SqlRequest wire = BuildSqlRequest(request);
 
         (CancellationToken token, CancellationTokenSource? cts) = WithTimeout(request.TimeoutSeconds, cancellationToken);
@@ -221,11 +261,12 @@ internal sealed class GrpcTransport : ICamusTransport, IDisposable
     public async Task<bool> ExecuteDdlAsync(TransportSqlRequest request, CancellationToken cancellationToken)
     {
         SqlRequest wire = BuildSqlRequest(request);
+        global::Grpc.Core.Metadata? headers = await HeadersAsync(cancellationToken).ConfigureAwait(false);
 
         try
         {
             DdlReply reply = await GetClient(request.Endpoint)
-                .ExecuteDdlAsync(wire, CallOptions(request.TimeoutSeconds, cancellationToken))
+                .ExecuteDdlAsync(wire, CallOptions(request.TimeoutSeconds, headers, cancellationToken))
                 .ResponseAsync.ConfigureAwait(false);
 
             ObserveToken(reply.CausalTokenN, reply.CausalTokenL, reply.CausalTokenC);
@@ -241,10 +282,12 @@ internal sealed class GrpcTransport : ICamusTransport, IDisposable
 
     public async Task<bool> PingAsync(string endpoint, int timeoutSeconds, CancellationToken cancellationToken)
     {
+        global::Grpc.Core.Metadata? headers = await HeadersAsync(cancellationToken).ConfigureAwait(false);
+
         try
         {
             PingReply reply = await GetClient(endpoint)
-                .PingAsync(new PingRequest(), CallOptions(timeoutSeconds, cancellationToken))
+                .PingAsync(new PingRequest(), CallOptions(timeoutSeconds, headers, cancellationToken))
                 .ResponseAsync.ConfigureAwait(false);
 
             return reply is not null;
@@ -342,6 +385,67 @@ internal sealed class GrpcTransport : ICamusTransport, IDisposable
         return result;
     }
 
+    // ─── Credential exchange (CamusAuth) ────────────────────────────────────────
+
+    /// <summary>
+    /// Exchanges a password for a bearer token over the <c>CamusAuth</c> service. No <c>authorization</c>
+    /// metadata is attached — this is the one call a client makes before it has a token, and attaching one
+    /// would mean asking the provider for a token while it is minting this very one.
+    /// </summary>
+    public async Task<CamusLoginResult> LoginAsync(
+        string endpoint, string user, string password, int timeoutSeconds, CancellationToken cancellationToken)
+    {
+        try
+        {
+            LoginReply reply = await GetEntry(endpoint).AuthClient
+                .LoginAsync(new LoginRequest { User = user, Password = password }, CallOptions(timeoutSeconds, headers: null, cancellationToken))
+                .ResponseAsync.ConfigureAwait(false);
+
+            return new CamusLoginResult(reply.Token, ReadExpiry(reply));
+        }
+        catch (RpcException ex)
+        {
+            throw Translate(ex);
+        }
+    }
+
+    /// <summary>Revokes <paramref name="token"/>, which travels in the metadata like on any authenticated
+    /// call rather than in the message body.</summary>
+    public async Task LogoutAsync(string endpoint, string token, int timeoutSeconds, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await GetEntry(endpoint).AuthClient
+                .LogoutAsync(new LogoutRequest(), CallOptions(timeoutSeconds, BuildHeaders(token), cancellationToken))
+                .ResponseAsync.ConfigureAwait(false);
+        }
+        catch (RpcException ex)
+        {
+            throw Translate(ex);
+        }
+    }
+
+    /// <summary>
+    /// How long the token is good for. Prefers the server-measured duration over the absolute deadline,
+    /// so a client whose clock disagrees with the server's still renews on time. Zero means the server
+    /// reported nothing, leaving the driver on its configured fallback lifetime.
+    /// </summary>
+    private static TimeSpan? ReadExpiry(LoginReply reply)
+    {
+        if (reply.ExpiresInSeconds > 0)
+            return TimeSpan.FromSeconds(reply.ExpiresInSeconds);
+
+        if (reply.ExpiresAtUnixMs > 0)
+        {
+            TimeSpan remaining = DateTimeOffset.FromUnixTimeMilliseconds(reply.ExpiresAtUnixMs) - DateTimeOffset.UtcNow;
+
+            if (remaining > TimeSpan.Zero)
+                return remaining;
+        }
+
+        return null;
+    }
+
     // ─── Wire building / decoding ───────────────────────────────────────────────
 
     private static CamusResultSet BuildResultSet(ResultSchema schema, IReadOnlyList<ResultRow> rows)
@@ -356,16 +460,19 @@ internal sealed class GrpcTransport : ICamusTransport, IDisposable
             types[i] = GrpcValueCodec.ToClientColumnType(column.Type);
         }
 
-        ColumnValue[] cells = new ColumnValue[rows.Count * columnCount];
-        for (int r = 0; r < rows.Count; r++)
+        int rowCount = rows.Count;
+        ColumnValue[] cells = new ColumnValue[rowCount * columnCount];
+        for (int r = 0; r < rowCount; r++)
         {
-            ResultRow row = rows[r];
+            // Hoisted out of the cell loop: the RepeatedField indexer/count aren't free per access.
+            Google.Protobuf.Collections.RepeatedField<Value> values = rows[r].Values;
+            int valueCount = values.Count;
             int rowBase = r * columnCount;
             for (int c = 0; c < columnCount; c++)
-                cells[rowBase + c] = c < row.Values.Count ? GrpcValueCodec.Decode(row.Values[c]) : ColumnValue.Null;
+                cells[rowBase + c] = c < valueCount ? GrpcValueCodec.Decode(values[c]) : ColumnValue.Null;
         }
 
-        return new CamusResultSet(names, cells, rows.Count, types);
+        return new CamusResultSet(names, cells, rowCount, types);
     }
 
     private SqlRequest BuildSqlRequest(TransportSqlRequest request)
@@ -422,8 +529,8 @@ internal sealed class GrpcTransport : ICamusTransport, IDisposable
 
     private (int N, long L, long C) CurrentToken()
     {
-        lock (tokenLock)
-            return (tokenN, tokenL, tokenC);
+        CausalToken token = Volatile.Read(ref causalToken);
+        return (token.N, token.L, token.C);
     }
 
     private void ObserveToken(BatchCausalToken token) => ObserveToken(token.N, token.L, token.C);
@@ -435,14 +542,15 @@ internal sealed class GrpcTransport : ICamusTransport, IDisposable
         if (l == 0 && c == 0)
             return;
 
-        lock (tokenLock)
+        while (true)
         {
-            if (l > tokenL || (l == tokenL && c > tokenC))
-            {
-                tokenL = l;
-                tokenC = c;
-                tokenN = n;
-            }
+            CausalToken current = Volatile.Read(ref causalToken);
+
+            if (l < current.L || (l == current.L && c <= current.C))
+                return;
+
+            if (Interlocked.CompareExchange(ref causalToken, new CausalToken(n, l, c), current) == current)
+                return;
         }
     }
 
@@ -458,11 +566,53 @@ internal sealed class GrpcTransport : ICamusTransport, IDisposable
         return (cts.Token, cts);
     }
 
-    private static CallOptions CallOptions(int timeoutSeconds, CancellationToken cancellationToken)
+    private static CallOptions CallOptions(int timeoutSeconds, global::Grpc.Core.Metadata? headers, CancellationToken cancellationToken)
     {
         DateTime? deadline = timeoutSeconds > 0 ? DateTime.UtcNow.AddSeconds(timeoutSeconds) : null;
-        return new CallOptions(deadline: deadline, cancellationToken: cancellationToken);
+        return new CallOptions(headers: headers, deadline: deadline, cancellationToken: cancellationToken);
     }
+
+    /// <summary>
+    /// Mints or refreshes the bearer token, for the batched entry points: they await this purely for its
+    /// side effect — warming the provider's cache — before handing work to the batcher, whose stream
+    /// factory can only read the token synchronously. Builds no metadata, since none is attached per op.
+    /// </summary>
+    private async ValueTask EnsureTokenAsync(CancellationToken cancellationToken)
+        => _ = await auth.GetTokenAsync(cancellationToken).ConfigureAwait(false);
+
+    /// <summary>Mints or refreshes the bearer token and returns it as request metadata.</summary>
+    private async ValueTask<global::Grpc.Core.Metadata?> HeadersAsync(CancellationToken cancellationToken)
+        => HeadersFor(await auth.GetTokenAsync(cancellationToken).ConfigureAwait(false));
+
+    /// <summary>The cached token as metadata, without awaiting — the batch-stream factory's view.</summary>
+    private global::Grpc.Core.Metadata? CurrentCallHeaders() => HeadersFor(auth.CurrentToken);
+
+    private sealed record CachedHeaders(string Token, global::Grpc.Core.Metadata Metadata);
+
+    private CachedHeaders? cachedHeaders;
+
+    /// <summary>
+    /// Request metadata for <paramref name="token"/>, cached per token — it changes every few minutes at
+    /// most, so per-call rebuilding of the <c>Metadata</c> and its <c>"Bearer "</c> string is pure churn.
+    /// The single-object cache makes the token/metadata pair swap atomically; gRPC only reads the shared
+    /// instance when sending, so reuse across concurrent calls is safe.
+    /// </summary>
+    private global::Grpc.Core.Metadata? HeadersFor(string? token)
+    {
+        if (string.IsNullOrEmpty(token))
+            return null;
+
+        CachedHeaders? cached = Volatile.Read(ref cachedHeaders);
+        if (cached is not null && string.Equals(cached.Token, token, StringComparison.Ordinal))
+            return cached.Metadata;
+
+        global::Grpc.Core.Metadata headers = new() { { "authorization", "Bearer " + token } };
+        Volatile.Write(ref cachedHeaders, new CachedHeaders(token, headers));
+        return headers;
+    }
+
+    private static global::Grpc.Core.Metadata? BuildHeaders(string? token)
+        => string.IsNullOrEmpty(token) ? null : new global::Grpc.Core.Metadata { { "authorization", "Bearer " + token } };
 
     private static IsolationLevel ToGrpcIsolation(CamusIsolationLevel? level) => level switch
     {
@@ -512,14 +662,27 @@ internal sealed class GrpcTransport : ICamusTransport, IDisposable
         if (!string.IsNullOrEmpty(code))
             return new CamusException(code, message ?? "");
 
-        return new CamusException("CADB0000", string.IsNullOrEmpty(ex.Status.Detail) ? ex.Message : ex.Status.Detail);
+        string detail = string.IsNullOrEmpty(ex.Status.Detail) ? ex.Message : ex.Status.Detail;
+
+        // A rejection raised before the handler runs (the auth gate at stream open) can arrive without
+        // trailers; recover the domain code from the status so the token-refresh path still triggers.
+        return ex.StatusCode switch
+        {
+            StatusCode.Unauthenticated => new CamusException(CamusAuthErrorCodes.AuthenticationFailed, detail),
+            StatusCode.PermissionDenied => new CamusException(CamusAuthErrorCodes.InsufficientPrivilege, detail),
+            _ => new CamusException("CADB0000", detail),
+        };
     }
 
     public void Dispose()
     {
         foreach (ChannelEntry entry in channels.Values)
         {
-            try { entry.Batcher.DisposeAsync().AsTask().GetAwaiter().GetResult(); } catch { /* best effort */ }
+            if (entry.BatcherIfCreated is { } batcher)
+            {
+                try { batcher.DisposeAsync().AsTask().GetAwaiter().GetResult(); } catch { /* best effort */ }
+            }
+
             entry.Channel.Dispose();
         }
 

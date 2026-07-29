@@ -1,5 +1,6 @@
 using Microsoft.EntityFrameworkCore.Diagnostics;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Metadata;
 using Microsoft.EntityFrameworkCore.Metadata.Conventions.Infrastructure;
 using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Query;
@@ -33,6 +34,7 @@ public static class CamusDBServiceCollectionExtensions
         builder.TryAdd<IValueGeneratorSelector, CamusValueGeneratorSelector>();
         builder.TryAdd<IRelationalDatabaseCreator, CamusDatabaseCreator>();
         builder.TryAdd<IMigrationsSqlGenerator, CamusMigrationsSqlGenerator>();
+        builder.TryAdd<IRelationalAnnotationProvider, CamusRelationalAnnotationProvider>();
         builder.TryAdd<IHistoryRepository, CamusHistoryRepository>();
         builder.TryAdd<IExecutionStrategyFactory, CamusExecutionStrategyFactory>();
         builder.TryAdd<IMethodCallTranslatorPlugin, CamusMethodCallTranslatorPlugin>();

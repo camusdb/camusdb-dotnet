@@ -128,7 +128,7 @@ public class CamusDataReader : DbDataReader
             return types[ordinal];
         }
 
-        return GetColumnValue(ordinal).Type;
+        return Cell(ordinal).Type;
     }
 
     public override Type GetFieldType(int ordinal) => ColumnTypeAt(ordinal) switch
@@ -148,7 +148,7 @@ public class CamusDataReader : DbDataReader
         _ => typeof(object)
     };
 
-    public override object GetValue(int ordinal) => ConvertToClr(GetColumnValue(ordinal));
+    public override object GetValue(int ordinal) => ConvertToClr(in Cell(ordinal));
 
     // ColumnValue is a sizeable struct; take it by 'in' to avoid copying it on the per-cell path.
     private static object ConvertToClr(in ColumnValue value) => value.Type switch
@@ -189,11 +189,11 @@ public class CamusDataReader : DbDataReader
         return count;
     }
 
-    public override bool IsDBNull(int ordinal) => GetColumnValue(ordinal).Type == ColumnType.Null;
+    public override bool IsDBNull(int ordinal) => Cell(ordinal).Type == ColumnType.Null;
 
     public override bool GetBoolean(int ordinal)
     {
-        ColumnValue value = GetColumnValue(ordinal);
+        ref readonly ColumnValue value = ref Cell(ordinal);
 
         return value.Type switch
         {
@@ -215,7 +215,7 @@ public class CamusDataReader : DbDataReader
 
     public override long GetBytes(int ordinal, long dataOffset, byte[]? buffer, int bufferOffset, int length)
     {
-        ColumnValue value = GetColumnValue(ordinal);
+        ref readonly ColumnValue value = ref Cell(ordinal);
         byte[] data = value.Type == ColumnType.Bytes
             ? value.BytesValue ?? []
             : System.Text.Encoding.UTF8.GetBytes(GetString(ordinal));
@@ -240,7 +240,7 @@ public class CamusDataReader : DbDataReader
 
     public override DateTime GetDateTime(int ordinal)
     {
-        ColumnValue column = GetColumnValue(ordinal);
+        ref readonly ColumnValue column = ref Cell(ordinal);
 
         if (column.Type is ColumnType.Date or ColumnType.DateTime)
             return new DateTime(column.LongValue, DateTimeKind.Utc);
@@ -260,7 +260,7 @@ public class CamusDataReader : DbDataReader
 
     public override double GetDouble(int ordinal)
     {
-        ColumnValue value = GetColumnValue(ordinal);
+        ref readonly ColumnValue value = ref Cell(ordinal);
 
         return value.Type switch
         {
@@ -294,12 +294,13 @@ public class CamusDataReader : DbDataReader
             return (T)(object)TimeOnly.FromDateTime(GetDateTime(ordinal));
 
         if (target == typeof(byte[]))
-            return (T)(object)(GetColumnValue(ordinal).BytesValue ?? Array.Empty<byte>());
+            return (T)(object)(Cell(ordinal).BytesValue ?? Array.Empty<byte>());
 
         // Typed arrays (long[], string[], double[], bool[], ...) from a native ARRAY column: the raw
         // value is an object?[]; project it into the requested element type.
-        if (target.IsArray && GetColumnValue(ordinal) is { Type: ColumnType.Array } arrayColumn)
+        if (target.IsArray && Cell(ordinal) is { Type: ColumnType.Array })
         {
+            ref readonly ColumnValue arrayColumn = ref Cell(ordinal);
             Type elementType = target.GetElementType()!;
             object?[] source = ConvertArray(in arrayColumn);
             Array typed = Array.CreateInstance(elementType, source.Length);
@@ -339,7 +340,7 @@ public class CamusDataReader : DbDataReader
 
     public override Guid GetGuid(int ordinal)
     {
-        ColumnValue column = GetColumnValue(ordinal);
+        ref readonly ColumnValue column = ref Cell(ordinal);
 
         if (column.Type == ColumnType.Uuid)
             return column.AsGuid();
@@ -382,7 +383,7 @@ public class CamusDataReader : DbDataReader
 
     public override long GetInt64(int ordinal)
     {
-        ColumnValue value = GetColumnValue(ordinal);
+        ref readonly ColumnValue value = ref Cell(ordinal);
 
         return value.Type switch
         {
@@ -394,7 +395,7 @@ public class CamusDataReader : DbDataReader
 
     public override string GetString(int ordinal)
     {
-        ColumnValue value = GetColumnValue(ordinal);
+        ref readonly ColumnValue value = ref Cell(ordinal);
 
         return value.Type switch
         {
@@ -423,14 +424,18 @@ public class CamusDataReader : DbDataReader
         await base.DisposeAsync().ConfigureAwait(false);
     }
 
-    public ColumnValue GetColumnValue(int ordinal)
+    public ColumnValue GetColumnValue(int ordinal) => Cell(ordinal);
+
+    // By-reference access to the current row's cell — ColumnValue is a large struct, and every typed
+    // getter goes through here, so the internal path never copies it per access.
+    private ref readonly ColumnValue Cell(int ordinal)
     {
         if (ordinal < 0 || ordinal >= columnNames.Length)
             throw new IndexOutOfRangeException();
 
         ThrowIfClosed();
 
-        return source.GetCell(ordinal);
+        return ref source.GetCell(ordinal);
     }
 
     private void ThrowIfClosed()

@@ -71,6 +71,47 @@ public sealed class CamusConnection : DbConnection
             .WithDefaults(DefaultTransactionOptions)
             .WithDefaults(builder.DefaultTransactionOptions);
 
+    /// <summary>
+    /// Authenticates as <paramref name="user"/> and caches the resulting bearer token for every
+    /// subsequent statement on this connection — and on every other connection sharing this connection
+    /// string's builder, which is the point: password verification is deliberately expensive server-side
+    /// and rate-limited per account, so the token is minted once and reused.
+    ///
+    /// <para>Only needed when the credentials are not already in the connection string (<c>User=</c> /
+    /// <c>Password=</c>), which authenticates lazily on first use, or to switch identity mid-connection.
+    /// Prefer this over embedding a password in the connection string when the password comes from a
+    /// secret manager at runtime.</para>
+    ///
+    /// <para>Against a server with authentication disabled this still performs a real <c>/login</c> call
+    /// and will fail — do not call it unconditionally.</para>
+    /// </summary>
+    /// <returns>The minted bearer token. The driver already holds it; it is returned for callers that
+    /// want to pass it to another process via <c>AccessToken=</c>.</returns>
+    /// <exception cref="CamusException">CADB0516 when the credentials are rejected, CADB0518 when the
+    /// per-account login rate limit is exceeded, CADB0519 when the server requires TLS and the connection
+    /// is plaintext.</exception>
+    public Task<string> LoginAsync(string user, string password, CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(user);
+        ArgumentNullException.ThrowIfNull(password);
+
+        return builder.TokenProvider.LoginAsync(user, password, cancellationToken);
+    }
+
+    /// <summary>
+    /// Revokes this connection's bearer token server-side. The configured credentials are kept, so a
+    /// later statement authenticates again transparently — this ends the session, it does not turn
+    /// authentication off. A no-op when no token has been minted.
+    /// </summary>
+    public Task LogoutAsync(CancellationToken cancellationToken = default)
+        => builder.TokenProvider.LogoutAsync(cancellationToken);
+
+    /// <summary>
+    /// The bearer token currently cached for this connection, or null when none has been minted (or the
+    /// connection is unauthenticated). Reading it never triggers a login.
+    /// </summary>
+    public string? AccessToken => builder.TokenProvider.CurrentToken;
+
     public override void ChangeDatabase(string databaseName)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(databaseName);

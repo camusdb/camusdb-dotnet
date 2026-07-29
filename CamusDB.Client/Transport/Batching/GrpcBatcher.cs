@@ -17,9 +17,11 @@ namespace CamusDB.Client.Transport.Batching;
 /// round-trip) per op. Ported from the server's <c>CamusDB.Grpc.Client</c>, itself modeled on Kahuna.
 ///
 /// <para><b>How it stays busy, else queues.</b> Every op is registered by a monotonic <c>request_id</c>,
-/// dropped on a single inbox queue, and drained by a single-flight pump onto its stream; a background
-/// reader per stream demultiplexes responses back to the waiting op by id. Responses interleave and
-/// arrive out of order across ops.</para>
+/// dropped on its slot's inbox queue, and drained by that slot's single-flight pump onto its stream —
+/// one pump per stream, so the streams write concurrently and a slow write on one never stalls the
+/// others (and the single writer per stream needs no write lock). A background reader per stream
+/// demultiplexes responses back to the waiting op by id. Responses interleave and arrive out of order
+/// across ops.</para>
 ///
 /// <para><b>Two routing regimes.</b> Autocommit ops (no transaction) round-robin across the pool for
 /// maximum concurrency; a transaction pins <i>all</i> of its ops — START, statements, COMMIT/ROLLBACK — to
@@ -34,12 +36,10 @@ internal sealed class GrpcBatcher : IAsyncDisposable
     private readonly CancellationTokenSource shutdown = new();
 
     private readonly ConcurrentDictionary<int, PendingOp> pending = new();
-    private readonly ConcurrentQueue<QueuedItem> inbox = new();
 
     private static int requestIdSeq;
     private int roundRobin = -1;
     private long transportIdSeq;
-    private int processing;   // 0 = idle, 1 = a pump loop is running
 
     /// <summary>
     /// Builds a batcher over <paramref name="options"/>.<see cref="GrpcBatchOptions.ChannelPoolSize"/>
@@ -105,8 +105,9 @@ internal sealed class GrpcBatcher : IAsyncDisposable
         pending[id] = op;
 
         BatchExecuteRequest wire = new() { RequestId = id, Kind = kind, Request = request };
-        inbox.Enqueue(new QueuedItem(wire, slot, op));
-        TryStartPump();
+        Slot target = slots[slot];
+        target.Inbox.Enqueue(new QueuedItem(wire, op));
+        TryStartPump(target);
 
         object? result = await op.Promise.Task.ConfigureAwait(false);
         return (T)result!;
@@ -114,22 +115,22 @@ internal sealed class GrpcBatcher : IAsyncDisposable
 
     // ─── Pump ─────────────────────────────────────────────────────────────────
 
-    private void TryStartPump()
+    private void TryStartPump(Slot slot)
     {
-        if (Interlocked.CompareExchange(ref processing, 1, 0) == 0)
-            _ = DeliverMessagesAsync();
+        if (Interlocked.CompareExchange(ref slot.Processing, 1, 0) == 0)
+            _ = DeliverMessagesAsync(slot);
     }
 
-    private async Task DeliverMessagesAsync()
+    private async Task DeliverMessagesAsync(Slot slot)
     {
         try
         {
             while (true)
             {
                 int drained = 0;
-                while (inbox.TryDequeue(out QueuedItem item))
+                while (slot.Inbox.TryDequeue(out QueuedItem item))
                 {
-                    await WriteItemAsync(item).ConfigureAwait(false);
+                    await WriteItemAsync(slot, item).ConfigureAwait(false);
                     drained++;
                 }
 
@@ -142,32 +143,30 @@ internal sealed class GrpcBatcher : IAsyncDisposable
                     catch (OperationCanceledException) { return; }
                 }
 
-                Interlocked.Exchange(ref processing, 0);   // mark idle
-                if (inbox.IsEmpty)
+                Interlocked.Exchange(ref slot.Processing, 0);   // mark idle
+                if (slot.Inbox.IsEmpty)
                     return;
                 // Items arrived between drain and idle — re-acquire, or bail if another pump took over.
-                if (Interlocked.CompareExchange(ref processing, 1, 0) != 0)
+                if (Interlocked.CompareExchange(ref slot.Processing, 1, 0) != 0)
                     return;
             }
         }
         catch
         {
-            Interlocked.Exchange(ref processing, 0);
+            Interlocked.Exchange(ref slot.Processing, 0);
         }
     }
 
-    private async Task WriteItemAsync(QueuedItem item)
+    // The slot's pump is the only writer to its stream, so no write lock is needed.
+    private async Task WriteItemAsync(Slot slot, QueuedItem item)
     {
         try
         {
-            Slot slot = slots[item.SlotIndex];
             IBatchTransport transport = slot.Transport
                 ?? throw new InvalidOperationException("Transport slot is not connected");
             item.Op.TransportId = transport.Id;
 
-            await slot.WriteLock.WaitAsync(shutdown.Token).ConfigureAwait(false);
-            try { await transport.SendAsync(item.Request, shutdown.Token).ConfigureAwait(false); }
-            finally { slot.WriteLock.Release(); }
+            await transport.SendAsync(item.Request, shutdown.Token).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
@@ -226,12 +225,13 @@ internal sealed class GrpcBatcher : IAsyncDisposable
                 op.Schema = resp.Schema;
                 break;
             case BatchExecuteResponse.PayloadOneofCase.Row:
-                op.Rows.Add(resp.Row);
+                (op.Rows ??= []).Add(resp.Row);
                 break;
             case BatchExecuteResponse.PayloadOneofCase.QueryComplete:
                 Complete(op, new BatchQueryResult(
-                    op.Schema ?? new ResultSchema(), op.Rows,
-                    new BatchCausalToken(resp.QueryComplete.CausalTokenN, resp.QueryComplete.CausalTokenL, resp.QueryComplete.CausalTokenC)));
+                    op.Schema ?? new ResultSchema(), op.Rows ?? (IReadOnlyList<ResultRow>)[],
+                    new BatchCausalToken(resp.QueryComplete.CausalTokenN, resp.QueryComplete.CausalTokenL, resp.QueryComplete.CausalTokenC),
+                    resp.QueryComplete.CacheMetadata));
                 break;
             case BatchExecuteResponse.PayloadOneofCase.NonQuery:
                 Complete(op, new BatchNonQueryResult(
@@ -273,9 +273,11 @@ internal sealed class GrpcBatcher : IAsyncDisposable
             op.Promise.TrySetException(ex);
     }
 
+    // ConcurrentDictionary enumeration is safe under concurrent mutation, so no snapshot copy is needed;
+    // Fault's TryRemove keeps a concurrently-completed op from being faulted twice.
     private void FailTransportPending(long transportId, Exception ex)
     {
-        foreach (KeyValuePair<int, PendingOp> entry in pending.ToArray())
+        foreach (KeyValuePair<int, PendingOp> entry in pending)
             if (entry.Value.TransportId == transportId)
                 Fault(entry.Value, ex);
     }
@@ -291,7 +293,7 @@ internal sealed class GrpcBatcher : IAsyncDisposable
                 try { await t.DisposeAsync().ConfigureAwait(false); } catch { /* best effort */ }
             }
         }
-        foreach (KeyValuePair<int, PendingOp> entry in pending.ToArray())
+        foreach (KeyValuePair<int, PendingOp> entry in pending)
             Fault(entry.Value, new ObjectDisposedException(nameof(GrpcBatcher)));
         shutdown.Dispose();
     }
@@ -301,11 +303,12 @@ internal sealed class GrpcBatcher : IAsyncDisposable
     private sealed class Slot(int index)
     {
         public readonly int Index = index;
-        public readonly SemaphoreSlim WriteLock = new(1, 1);
+        public readonly ConcurrentQueue<QueuedItem> Inbox = new();
+        public int Processing;   // 0 = idle, 1 = this slot's pump loop is running
         public volatile IBatchTransport? Transport;
     }
 
-    private readonly record struct QueuedItem(BatchExecuteRequest Request, int SlotIndex, PendingOp Op);
+    private readonly record struct QueuedItem(BatchExecuteRequest Request, PendingOp Op);
 
     /// <summary>One in-flight op awaiting its terminal response, plus the accumulator a QUERY needs.</summary>
     private sealed class PendingOp(int requestId)
@@ -313,7 +316,11 @@ internal sealed class GrpcBatcher : IAsyncDisposable
         public readonly int RequestId = requestId;
         public readonly TaskCompletionSource<object?> Promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public ResultSchema? Schema;
-        public readonly List<ResultRow> Rows = [];
+
+        /// <summary>Row accumulator, materialized on the first ROW payload — only a QUERY ever needs it,
+        /// and even a QUERY may complete with zero rows.</summary>
+        public List<ResultRow>? Rows;
+
         public long TransportId;
         public GrpcBatcher? Owner;
         public CancellationTokenRegistration Registration;

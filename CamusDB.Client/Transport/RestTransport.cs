@@ -7,6 +7,7 @@
  */
 
 using System.Text.Json;
+using CamusDB.Client.Auth;
 using Flurl.Http;
 
 namespace CamusDB.Client.Transport;
@@ -18,9 +19,24 @@ namespace CamusDB.Client.Transport;
 /// bookkeeping the ADO surface used before the transport seam existed. Behavior is byte-identical to the
 /// previous inlined code; it now lives behind <see cref="ICamusTransport"/> so gRPC can sit beside it.
 /// </summary>
-internal sealed class RestTransport(CamusConnectionStringBuilder builder) : ICamusTransport
+internal sealed class RestTransport(CamusConnectionStringBuilder builder, CamusTokenProvider auth) : ICamusTransport
 {
     public CamusProtocol Protocol => CamusProtocol.Rest;
+
+    /// <summary>
+    /// Starts a request against <paramref name="endpoint"/> carrying the connection's bearer token, if it
+    /// has one. Every call goes through here, so no route can accidentally be built unauthenticated — and
+    /// when no credentials are configured no <c>Authorization</c> header is added at all, which is what a
+    /// server with authentication off (the default) expects.
+    /// </summary>
+    private async Task<IFlurlRequest> AuthorizeAsync(string endpoint, string accept, CancellationToken cancellationToken)
+    {
+        IFlurlRequest request = endpoint.WithHeader("Accept", accept);
+
+        string? token = await auth.GetTokenAsync(cancellationToken).ConfigureAwait(false);
+
+        return token is null ? request : request.WithOAuthBearerToken(token);
+    }
 
     public async Task<StartTransactionResult> StartTransactionAsync(
         string endpoint, string database, CamusTransactionOptions options, int timeoutSeconds, CancellationToken cancellationToken)
@@ -35,8 +51,7 @@ internal sealed class RestTransport(CamusConnectionStringBuilder builder) : ICam
                 Locking = options.LockingWire
             };
 
-            byte[] responseBytes = await endpoint
-                .WithHeader("Accept", "application/json")
+            byte[] responseBytes = await (await AuthorizeAsync(endpoint, "application/json", cancellationToken).ConfigureAwait(false))
                 .WithTimeout(timeoutSeconds)
                 .AppendPathSegments("start-transaction")
                 .PostAsync(CamusJsonContent.Create(request, CamusJsonSerializerContext.Default.CamusStartTransactionRequest), cancellationToken: cancellationToken)
@@ -72,8 +87,7 @@ internal sealed class RestTransport(CamusConnectionStringBuilder builder) : ICam
                 TxnIdCounter = txnIdCounter
             };
 
-            byte[] responseBytes = await endpoint
-                .WithHeader("Accept", "application/json")
+            byte[] responseBytes = await (await AuthorizeAsync(endpoint, "application/json", cancellationToken).ConfigureAwait(false))
                 .WithTimeout(timeoutSeconds)
                 .AppendPathSegments(pathSegment)
                 .PostAsync(CamusJsonContent.Create(request, CamusJsonSerializerContext.Default.CamusTransactionRequest), cancellationToken: cancellationToken)
@@ -109,27 +123,48 @@ internal sealed class RestTransport(CamusConnectionStringBuilder builder) : ICam
                 wire.TxnIdCounter = request.TxnIdCounter!.Value;
             }
 
-            byte[] responseBytes = await endpoint
-                .WithHeader("Accept", "application/json")
+            // ResponseHeadersRead + ParseAsync parse the body as it streams in: the bytes land once in
+            // the document's pooled buffers instead of first materializing as a byte[] (LOH for large
+            // results) that is then deserialized into a second DOM clone via the JsonElement DTO field.
+            IFlurlResponse response = await (await AuthorizeAsync(endpoint, "application/json", cancellationToken).ConfigureAwait(false))
                 .WithTimeout(request.TimeoutSeconds)
                 .AppendPathSegments("execute-sql-query")
-                .PostAsync(CamusJsonContent.Create(wire, CamusJsonSerializerContext.Default.CamusExecuteSqlQueryRequest), cancellationToken: cancellationToken)
-                .ReceiveBytes();
+                .PostAsync(
+                    CamusJsonContent.Create(wire, CamusJsonSerializerContext.Default.CamusExecuteSqlQueryRequest),
+                    HttpCompletionOption.ResponseHeadersRead,
+                    cancellationToken: cancellationToken)
+                .ConfigureAwait(false);
 
-            CamusExecuteSqlQueryResponse? response = JsonSerializer.Deserialize(responseBytes, CamusJsonSerializerContext.Default.CamusExecuteSqlQueryResponse);
+            try
+            {
+                Stream body = await response.GetStreamAsync().ConfigureAwait(false);
 
-            if (response is null)
+                using JsonDocument doc = await JsonDocument.ParseAsync(body, cancellationToken: cancellationToken).ConfigureAwait(false);
+                JsonElement root = doc.RootElement;
+
+                if (root.ValueKind != JsonValueKind.Object)
+                    throw new CamusException("CADB0000", "Empty result returned");
+
+                CamusCacheMetadata? cacheMetadata = CamusCacheMetadata.FromJson(root);
+
+                // The response carries an authoritative `columns` schema plus positional `rows`. Decoding
+                // from the schema (not by peeking at the first row) means the reader reports field count,
+                // names and types even for an empty result — required by consumers that inspect the schema
+                // before reading a row (e.g. EF Core's buffered reader under EnableRetryOnFailure).
+                CamusResultSet resultSet = CamusResultSet.FromWire(
+                    root.TryGetProperty("columns", out JsonElement columns) ? columns : default,
+                    root.TryGetProperty("rows", out JsonElement rows) ? rows : default);
+
+                return new QueryTransportResult(resultSet, cacheMetadata);
+            }
+            catch (JsonException)
+            {
                 throw new CamusException("CADB0000", "Empty result returned");
-
-            CamusCacheMetadata? cacheMetadata = CamusCacheMetadata.FromResponse(response);
-
-            // The response carries an authoritative `columns` schema plus positional `rows`. Decoding
-            // from the schema (not by peeking at the first row) means the reader reports field count,
-            // names and types even for an empty result — required by consumers that inspect the schema
-            // before reading a row (e.g. EF Core's buffered reader under EnableRetryOnFailure).
-            CamusResultSet resultSet = CamusResultSet.FromWire(response.Columns ?? [], response.Rows);
-
-            return new QueryTransportResult(resultSet, cacheMetadata);
+            }
+            finally
+            {
+                response.Dispose();
+            }
         }
         catch (FlurlHttpException ex)
         {
@@ -162,8 +197,7 @@ internal sealed class RestTransport(CamusConnectionStringBuilder builder) : ICam
             // throws FlurlHttpException, translated below exactly like the buffered endpoint. A conflict
             // that surfaces after streaming starts is reported in-band by the NDJSON failure trailer and
             // thrown from the reader (see NdjsonStreamRowSource).
-            IFlurlResponse response = await endpoint
-                .WithHeader("Accept", NdjsonStreamRowSource.ContentType)
+            IFlurlResponse response = await (await AuthorizeAsync(endpoint, NdjsonStreamRowSource.ContentType, cancellationToken).ConfigureAwait(false))
                 .WithTimeout(request.TimeoutSeconds)
                 .AppendPathSegments("execute-sql-query-stream")
                 .PostAsync(
@@ -201,8 +235,7 @@ internal sealed class RestTransport(CamusConnectionStringBuilder builder) : ICam
         {
             CamusExecuteSqlNonQueryRequest wire = BuildNonQueryRequest(request);
 
-            byte[] responseBytes = await endpoint
-                .WithHeader("Accept", "application/json")
+            byte[] responseBytes = await (await AuthorizeAsync(endpoint, "application/json", cancellationToken).ConfigureAwait(false))
                 .WithTimeout(request.TimeoutSeconds)
                 .AppendPathSegments("execute-sql-non-query")
                 .PostAsync(CamusJsonContent.Create(wire, CamusJsonSerializerContext.Default.CamusExecuteSqlNonQueryRequest), cancellationToken: cancellationToken)
@@ -245,8 +278,7 @@ internal sealed class RestTransport(CamusConnectionStringBuilder builder) : ICam
                 wire.Locking = options.LockingWire;
             }
 
-            byte[] responseBytes = await endpoint
-                .WithHeader("Accept", "application/json")
+            byte[] responseBytes = await (await AuthorizeAsync(endpoint, "application/json", cancellationToken).ConfigureAwait(false))
                 .WithTimeout(request.TimeoutSeconds)
                 .AppendPathSegments("execute-sql-ddl")
                 .PostAsync(CamusJsonContent.Create(wire, CamusJsonSerializerContext.Default.CamusExecuteDDLRequest), cancellationToken: cancellationToken)
@@ -266,7 +298,7 @@ internal sealed class RestTransport(CamusConnectionStringBuilder builder) : ICam
     {
         try
         {
-            string responseJson = await endpoint
+            string responseJson = await (await AuthorizeAsync(endpoint, "application/json", cancellationToken).ConfigureAwait(false))
                 .WithTimeout(timeoutSeconds)
                 .AppendPathSegments("ping")
                 .GetStringAsync(cancellationToken: cancellationToken);
@@ -292,8 +324,7 @@ internal sealed class RestTransport(CamusConnectionStringBuilder builder) : ICam
                 IfNotExists = ifNotExists
             };
 
-            byte[] responseBytes = await endpoint
-                .WithHeader("Accept", "application/json")
+            byte[] responseBytes = await (await AuthorizeAsync(endpoint, "application/json", cancellationToken).ConfigureAwait(false))
                 .WithTimeout(timeoutSeconds)
                 .AppendPathSegments("create-db")
                 .PostAsync(CamusJsonContent.Create(request, CamusJsonSerializerContext.Default.CamusCreateDatabaseRequest), cancellationToken: cancellationToken)
@@ -322,8 +353,7 @@ internal sealed class RestTransport(CamusConnectionStringBuilder builder) : ICam
                 IfNotExists = ifNotExists
             };
 
-            byte[] responseBytes = await endpoint
-                .WithHeader("Accept", "application/json")
+            byte[] responseBytes = await (await AuthorizeAsync(endpoint, "application/json", cancellationToken).ConfigureAwait(false))
                 .WithTimeout(timeoutSeconds)
                 .AppendPathSegments("create-branch-db")
                 .PostAsync(CamusJsonContent.Create(request, CamusJsonSerializerContext.Default.CamusCreateBranchDatabaseRequest), cancellationToken: cancellationToken)
@@ -349,8 +379,7 @@ internal sealed class RestTransport(CamusConnectionStringBuilder builder) : ICam
                 DatabaseName = database
             };
 
-            byte[] responseBytes = await endpoint
-                .WithHeader("Accept", "application/json")
+            byte[] responseBytes = await (await AuthorizeAsync(endpoint, "application/json", cancellationToken).ConfigureAwait(false))
                 .WithTimeout(timeoutSeconds)
                 .AppendPathSegments("drop-db")
                 .PostAsync(CamusJsonContent.Create(request, CamusJsonSerializerContext.Default.CamusDropDatabaseRequest), cancellationToken: cancellationToken)
@@ -377,8 +406,7 @@ internal sealed class RestTransport(CamusConnectionStringBuilder builder) : ICam
                 DatabaseName = database
             };
 
-            byte[] responseBytes = await endpoint
-                .WithHeader("Accept", "application/json")
+            byte[] responseBytes = await (await AuthorizeAsync(endpoint, "application/json", cancellationToken).ConfigureAwait(false))
                 .WithTimeout(timeoutSeconds)
                 .AppendPathSegments("show-branches")
                 .PostAsync(CamusJsonContent.Create(request, CamusJsonSerializerContext.Default.CamusShowBranchesRequest), cancellationToken: cancellationToken)
@@ -407,8 +435,7 @@ internal sealed class RestTransport(CamusConnectionStringBuilder builder) : ICam
                 DatabaseName = database
             };
 
-            byte[] responseBytes = await endpoint
-                .WithHeader("Accept", "application/json")
+            byte[] responseBytes = await (await AuthorizeAsync(endpoint, "application/json", cancellationToken).ConfigureAwait(false))
                 .WithTimeout(timeoutSeconds)
                 .AppendPathSegments("show-ancestors")
                 .PostAsync(CamusJsonContent.Create(request, CamusJsonSerializerContext.Default.CamusShowAncestorsRequest), cancellationToken: cancellationToken)
@@ -468,24 +495,6 @@ internal sealed class RestTransport(CamusConnectionStringBuilder builder) : ICam
     {
         CamusEndpointHealth.MarkUnreachableIfTransportFailed(builder, endpoint, ex);
 
-        string response = await ex.GetResponseStringAsync().ConfigureAwait(false);
-
-        if (!string.IsNullOrEmpty(response))
-        {
-            try
-            {
-                CamusErrorResponse? errorResponse = JsonSerializer.Deserialize(response, CamusJsonSerializerContext.Default.CamusErrorResponse);
-
-                if (errorResponse is not null)
-                    return new CamusException(errorResponse.Code ?? "CADB0000", errorResponse.Message ?? "");
-            }
-            catch (JsonException)
-            {
-            }
-
-            return new CamusException("CADB0000", response);
-        }
-
-        return new CamusException("CADB0000", ex.Message);
+        return await RestErrorTranslator.TranslateAsync(ex).ConfigureAwait(false);
     }
 }

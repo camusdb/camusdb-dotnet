@@ -6,6 +6,7 @@
  * file that was distributed with this source code.
  */
 
+using CamusDB.Client.Auth;
 using CamusDB.Client.Transport;
 
 namespace CamusDB.Client;
@@ -25,7 +26,11 @@ public class CamusConnectionStringBuilder
 
     private ICamusTransport? transport;
 
+    private CamusTokenProvider? tokenProvider;
+
     private readonly object transportLock = new();
+
+    private readonly object authLock = new();
 
     public CamusConnectionStringBuilder(string connectionString)
     {
@@ -87,9 +92,82 @@ public class CamusConnectionStringBuilder
     public CamusProtocol Protocol => ParseEnum<CamusProtocol>("Protocol") ?? CamusProtocol.Rest;
 
     /// <summary>
+    /// Credentials read from the connection string. Either <c>User=</c> (aliases <c>UserId</c>,
+    /// <c>Uid</c>, <c>Username</c>) plus <c>Password=</c> (alias <c>Pwd</c>), which the driver exchanges
+    /// for a bearer token and re-exchanges as needed, or <c>AccessToken=</c> for a token obtained
+    /// elsewhere. Neither key present means unauthenticated, which is what a default CamusDB install
+    /// expects.
+    /// </summary>
+    internal CamusCredentials Credentials
+    {
+        get
+        {
+            if (TryGetSetting(out string? accessToken, "AccessToken"))
+                return CamusCredentials.FromToken(accessToken);
+
+            if (TryGetSetting(out string? user, "User", "UserId", "Uid", "Username"))
+                return CamusCredentials.FromPassword(user, Config.TryGetValue("Password", out string? password)
+                    ? password
+                    : Config.TryGetValue("Pwd", out string? pwd) ? pwd : "");
+
+            return CamusCredentials.None;
+        }
+    }
+
+    /// <summary>
+    /// How long the driver reuses a minted token before logging in again, from <c>TokenLifetime=</c>
+    /// (seconds), defaulting to 10 minutes. Only consulted when the server does not report the token's
+    /// expiry — when it does, that value wins, since its <c>AccessTokenTtl</c> is configurable and may be
+    /// shorter than anything set here. Either way an expiry missed on the client is caught reactively and
+    /// the statement replayed.
+    /// </summary>
+    internal TimeSpan TokenLifetime
+        => Config.TryGetValue("TokenLifetime", out string? raw) && int.TryParse(raw, out int seconds) && seconds > 0
+            ? TimeSpan.FromSeconds(seconds)
+            : CamusTokenProvider.DefaultLifetime;
+
+    /// <summary>
+    /// The token provider shared by every connection built from this builder, so a pool of connections
+    /// performs one login rather than one each.
+    /// </summary>
+    internal CamusTokenProvider TokenProvider
+    {
+        get
+        {
+            if (tokenProvider is not null)
+                return tokenProvider;
+
+            lock (authLock)
+            {
+                if (tokenProvider is not null)
+                    return tokenProvider;
+
+                CamusCredentials credentials = Credentials;
+
+                CamusTokenProvider Create() => new(
+                    credentials,
+                    GetLoginClient,
+                    GetEndpoint,
+                    () => CommandTimeout,
+                    TokenLifetime);
+
+                // Configured credentials are shared process-wide so repeatedly-rebuilt connections (EF
+                // opens one per operation) reuse a single token. With nothing configured the provider is
+                // inert and stays private to this builder, so a later CamusConnection.LoginAsync only
+                // affects the connections built from this connection string.
+                return tokenProvider = credentials.IsSet
+                    ? CamusTokenProvider.Shared(CamusTokenProvider.SharingKey(credentials, DeploymentKey), Create)
+                    : Create();
+            }
+        }
+    }
+
+    /// <summary>
     /// The transport this builder's connections use, chosen once from <see cref="Protocol"/> and cached
     /// for the builder's lifetime (a gRPC transport pools long-lived channels, so it must be shared, not
-    /// recreated per call).
+    /// recreated per call). It is always wrapped in <see cref="AuthenticatingTransport"/>: with no
+    /// credentials configured that wrapper is inert, and wrapping unconditionally means a connection
+    /// authenticated later — via <see cref="CamusConnection.LoginAsync"/> — is covered too.
     /// </summary>
     internal ICamusTransport GetTransport()
     {
@@ -97,7 +175,30 @@ public class CamusConnectionStringBuilder
             return transport;
 
         lock (transportLock)
-            return transport ??= Protocol == CamusProtocol.Grpc ? new GrpcTransport() : new RestTransport(this);
+        {
+            if (transport is not null)
+                return transport;
+
+            CamusTokenProvider auth = TokenProvider;
+
+            ICamusTransport inner = Protocol == CamusProtocol.Grpc
+                ? new GrpcTransport(auth)
+                : new RestTransport(this, auth);
+
+            return transport = new AuthenticatingTransport(inner, auth);
+        }
+    }
+
+    private bool TryGetSetting([System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out string? value, params string[] keys)
+    {
+        foreach (string key in keys)
+        {
+            if (Config.TryGetValue(key, out value) && !string.IsNullOrWhiteSpace(value))
+                return true;
+        }
+
+        value = null;
+        return false;
     }
 
     internal string GetEndpoint()
@@ -109,6 +210,23 @@ public class CamusConnectionStringBuilder
 
         return endpointPool.GetNextEndpoint();
     }
+
+    /// <summary>
+    /// Identifies the deployment when deciding which connections may share one token: the endpoint pool
+    /// plus the protocol, so the same credentials against two different servers never share a token, and
+    /// a REST and a gRPC connection each hold the token minted by their own transport.
+    /// </summary>
+    private string DeploymentKey
+        => $"{(Config.TryGetValue("Endpoint", out string? endpoint) ? endpoint : "")}|{Protocol}";
+
+    /// <summary>
+    /// Who performs the credential exchange. gRPC connections use the <c>CamusAuth</c> service on the
+    /// transport's own channel; REST connections post to <c>/login</c>. Either way the token is obtained
+    /// over the same protocol and endpoint that carries the statements — there is no second port to
+    /// configure and no cross-protocol hop.
+    /// </summary>
+    private ICamusLoginClient GetLoginClient()
+        => GetTransport() is AuthenticatingTransport { Inner: ICamusLoginClient grpc } ? grpc : new RestLoginClient();
 
     internal void MarkEndpointUnreachable(string endpoint)
     {

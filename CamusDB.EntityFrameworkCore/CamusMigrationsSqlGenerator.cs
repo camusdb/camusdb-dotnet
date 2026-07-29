@@ -33,6 +33,9 @@ public class CamusMigrationsSqlGenerator : MigrationsSqlGenerator
 
             if (!col.IsNullable)
                 builder.Append(" NOT NULL");
+
+            if (col.Comment is not null)
+                builder.Append(" COMMENT ").Append(CamusCommentSyntax.Literal(col.Comment, $"column '{operation.Name}.{col.Name}'"));
         }
 
         if (pkCols.Length > 0)
@@ -53,6 +56,9 @@ public class CamusMigrationsSqlGenerator : MigrationsSqlGenerator
         }
 
         builder.AppendLine().Append(")");
+
+        if (operation.Comment is not null)
+            builder.Append(" COMMENT ").Append(CamusCommentSyntax.Literal(operation.Comment, $"table '{operation.Name}'"));
 
         if (terminate)
             builder.EndCommand();
@@ -90,6 +96,9 @@ public class CamusMigrationsSqlGenerator : MigrationsSqlGenerator
         else if (!string.IsNullOrEmpty(operation.DefaultValueSql))
             builder.Append(" DEFAULT (").Append(operation.DefaultValueSql).Append(")");
 
+        if (operation.Comment is not null)
+            builder.Append(" COMMENT ").Append(CamusCommentSyntax.Literal(operation.Comment, $"column '{operation.Table}.{operation.Name}'"));
+
         if (terminate)
             builder.EndCommand();
     }
@@ -126,8 +135,19 @@ public class CamusMigrationsSqlGenerator : MigrationsSqlGenerator
                .Append(string.Join(", ", operation.Columns.Select(c => helper.DelimitIdentifier(c))))
                .Append(")");
 
-        if (terminate)
+        if (!terminate)
+            return;
+
+        builder.EndCommand();
+
+        // CamusDB has no inline COMMENT clause on standalone CREATE INDEX — only on the inline
+        // KEY form inside CREATE TABLE — so the comment goes out as its own statement.
+        if (operation[CamusAnnotationNames.IndexComment] is string indexComment)
+        {
+            AppendCommentOn(builder, "INDEX", $"{helper.DelimitIdentifier(operation.Table)}.{helper.DelimitIdentifier(operation.Name)}",
+                indexComment, $"index '{operation.Table}.{operation.Name}'");
             builder.EndCommand();
+        }
     }
 
     protected override void Generate(
@@ -189,13 +209,24 @@ public class CamusMigrationsSqlGenerator : MigrationsSqlGenerator
     protected override void Generate(EnsureSchemaOperation operation, IModel? model, MigrationCommandListBuilder builder) { }
     protected override void Generate(DropSchemaOperation operation, IModel? model, MigrationCommandListBuilder builder) { }
 
-    // No-ops for table/database metadata changes that don't affect CamusDB structure
+    // CamusDB has no ALTER DATABASE surface; a database comment can only be set with an explicit
+    // COMMENT ON DATABASE statement, which EF has no model concept for.
     protected override void Generate(AlterDatabaseOperation operation, IModel? model, MigrationCommandListBuilder builder) { }
-    protected override void Generate(AlterTableOperation operation, IModel? model, MigrationCommandListBuilder builder) { }
+
+    // The only table-level metadata CamusDB can alter in place is the comment.
+    protected override void Generate(AlterTableOperation operation, IModel? model, MigrationCommandListBuilder builder)
+    {
+        if (string.Equals(operation.Comment, operation.OldTable.Comment, StringComparison.Ordinal))
+            return;
+
+        AppendCommentOn(builder, "TABLE", Dependencies.SqlGenerationHelper.DelimitIdentifier(operation.Name),
+            operation.Comment, $"table '{operation.Name}'");
+        builder.EndCommand();
+    }
 
     // CamusDB cannot change a column's stored type in place, but it does support toggling a column's
-    // NOT NULL constraint (ALTER COLUMN ... SET/DROP NOT NULL). Map a nullability-only change to that;
-    // reject anything that would require rewriting the column's type.
+    // NOT NULL constraint (ALTER COLUMN ... SET/DROP NOT NULL) and re-describing it (COMMENT ON
+    // COLUMN). Map those two; reject anything that would require rewriting the column's type.
     protected override void Generate(AlterColumnOperation operation, IModel? model, MigrationCommandListBuilder builder)
     {
         var helper = Dependencies.SqlGenerationHelper;
@@ -203,13 +234,42 @@ public class CamusMigrationsSqlGenerator : MigrationsSqlGenerator
         if (!string.Equals(GetDdlType(operation), GetDdlType(operation.OldColumn), StringComparison.Ordinal))
             throw new NotSupportedException("CamusDB does not support altering an existing column type.");
 
-        if (operation.IsNullable == operation.OldColumn.IsNullable)
-            throw new NotSupportedException("CamusDB only supports altering a column's nullability.");
+        bool nullabilityChanged = operation.IsNullable != operation.OldColumn.IsNullable;
+        bool commentChanged = !string.Equals(operation.Comment, operation.OldColumn.Comment, StringComparison.Ordinal);
 
-        builder.Append("ALTER TABLE ").Append(helper.DelimitIdentifier(operation.Table))
-               .Append(" ALTER COLUMN ").Append(helper.DelimitIdentifier(operation.Name))
-               .Append(operation.IsNullable ? " DROP NOT NULL" : " SET NOT NULL");
-        builder.EndCommand();
+        if (!nullabilityChanged && !commentChanged)
+            throw new NotSupportedException("CamusDB only supports altering a column's nullability or comment.");
+
+        if (nullabilityChanged)
+        {
+            builder.Append("ALTER TABLE ").Append(helper.DelimitIdentifier(operation.Table))
+                   .Append(" ALTER COLUMN ").Append(helper.DelimitIdentifier(operation.Name))
+                   .Append(operation.IsNullable ? " DROP NOT NULL" : " SET NOT NULL");
+            builder.EndCommand();
+        }
+
+        if (commentChanged)
+        {
+            AppendCommentOn(builder, "COLUMN",
+                $"{helper.DelimitIdentifier(operation.Table)}.{helper.DelimitIdentifier(operation.Name)}",
+                operation.Comment, $"column '{operation.Table}.{operation.Name}'");
+            builder.EndCommand();
+        }
+    }
+
+    /// <summary>
+    /// Emits COMMENT ON &lt;kind&gt; &lt;target&gt; IS &lt;value&gt;. A null comment renders as IS NULL,
+    /// which removes the comment — distinct from IS '', which stores a present-but-empty one.
+    /// </summary>
+    private static void AppendCommentOn(
+        MigrationCommandListBuilder builder,
+        string kind,
+        string qualifiedName,
+        string? comment,
+        string description)
+    {
+        builder.Append("COMMENT ON ").Append(kind).Append(" ").Append(qualifiedName).Append(" IS ")
+               .Append(comment is null ? "NULL" : CamusCommentSyntax.Literal(comment, description));
     }
 
     protected override void Generate(RenameColumnOperation operation, IModel? model, MigrationCommandListBuilder builder)

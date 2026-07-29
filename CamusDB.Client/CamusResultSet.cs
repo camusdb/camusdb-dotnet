@@ -71,6 +71,40 @@ public sealed class CamusResultSet
             types[i] = columns[i].Type;
         }
 
+        return FromWireCore(names, types, rows);
+    }
+
+    /// <summary>
+    /// Like <see cref="FromWire(IReadOnlyList{CamusColumnSchema}, JsonElement)"/>, but reads the schema
+    /// straight out of the response's <c>columns</c> DOM element — used by the transport's single-pass
+    /// parse of the query response, which never materializes intermediate schema/row DTOs.
+    /// </summary>
+    internal static CamusResultSet FromWire(JsonElement columns, JsonElement rows)
+    {
+        if (columns.ValueKind != JsonValueKind.Array)
+            return FromWireCore([], [], rows);
+
+        int columnCount = columns.GetArrayLength();
+        string[] names = new string[columnCount];
+        ColumnType[] types = new ColumnType[columnCount];
+
+        int i = 0;
+        foreach (JsonElement column in columns.EnumerateArray())
+        {
+            names[i] = column.TryGetProperty("name", out JsonElement name) ? name.GetString() ?? "" : "";
+            types[i] = column.TryGetProperty("type", out JsonElement type) && type.TryGetInt32(out int t)
+                ? (ColumnType)t
+                : ColumnType.Null;
+            i++;
+        }
+
+        return FromWireCore(names, types, rows);
+    }
+
+    private static CamusResultSet FromWireCore(string[] names, ColumnType[] types, JsonElement rows)
+    {
+        int columnCount = names.Length;
+
         if (rows.ValueKind != JsonValueKind.Array || columnCount == 0)
             return new CamusResultSet(names, [], 0, types);
 
@@ -126,6 +160,10 @@ public sealed class CamusResultSet
     }
 
     public ColumnValue GetCell(int row, int column) => cells[row * ColumnCount + column];
+
+    /// <summary>By-reference variant of <see cref="GetCell"/> for the per-cell reader hot path —
+    /// <see cref="ColumnValue"/> is a large struct, and returning a ref skips copying it per access.</summary>
+    internal ref readonly ColumnValue GetCellRef(int row, int column) => ref cells[row * ColumnCount + column];
 
     /// <summary>
     /// Builds a zero-row result that still carries the query's output schema (column names + declared

@@ -46,8 +46,10 @@ internal abstract class CamusRowSource : IDisposable, IAsyncDisposable
     /// <summary>Advances to the next row. Returns false at end of result.</summary>
     public abstract ValueTask<bool> ReadAsync(CancellationToken cancellationToken);
 
-    /// <summary>The current row's cell at <paramref name="ordinal"/>. Throws when positioned off a row.</summary>
-    public abstract ColumnValue GetCell(int ordinal);
+    /// <summary>The current row's cell at <paramref name="ordinal"/>, by reference —
+    /// <see cref="ColumnValue"/> is a large struct, so the per-cell path avoids copying it.
+    /// Throws when positioned off a row.</summary>
+    public abstract ref readonly ColumnValue GetCell(int ordinal);
 
     public virtual void Dispose() { }
 
@@ -85,12 +87,12 @@ internal abstract class CamusRowSource : IDisposable, IAsyncDisposable
             return new ValueTask<bool>(Read());
         }
 
-        public override ColumnValue GetCell(int ordinal)
+        public override ref readonly ColumnValue GetCell(int ordinal)
         {
             if (position < 0 || position >= resultSet.RowCount)
                 throw new InvalidOperationException("No current row is available.");
 
-            return resultSet.GetCell(position, ordinal);
+            return ref resultSet.GetCellRef(position, ordinal);
         }
     }
 }

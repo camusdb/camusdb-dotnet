@@ -40,13 +40,24 @@ internal readonly struct BatchCausalToken(int n, long l, long c)
 
 /// <summary>Materialized result of a batched QUERY: the output-column schema, the positional rows, and the
 /// trailing causal token. Rows align to <see cref="Schema"/> by position.</summary>
-internal sealed class BatchQueryResult(ResultSchema schema, IReadOnlyList<ResultRow> rows, BatchCausalToken token)
+internal sealed class BatchQueryResult(
+    ResultSchema schema,
+    IReadOnlyList<ResultRow> rows,
+    BatchCausalToken token,
+    CacheMetadata? cacheMetadata)
 {
     public ResultSchema Schema { get; } = schema;
 
     public IReadOnlyList<ResultRow> Rows { get; } = rows;
 
     public BatchCausalToken Token { get; } = token;
+
+    /// <summary>
+    /// Cache verdict carried by the QUERY terminator, or <see langword="null"/> when the statement
+    /// carried no <c>{cache=…}</c> hint and so never entered the cache path. A hinted statement that
+    /// was bypassed still reports a value (with a bypass reason), so null means "not hinted".
+    /// </summary>
+    public CacheMetadata? CacheMetadata { get; } = cacheMetadata;
 }
 
 /// <summary>Result of a batched NON_QUERY: affected-row count plus the trailing causal token.</summary>

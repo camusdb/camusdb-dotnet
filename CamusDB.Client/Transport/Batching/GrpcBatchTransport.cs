@@ -15,6 +15,11 @@ namespace CamusDB.Client.Transport.Batching;
 /// Real <see cref="IBatchTransport"/> over a gRPC <c>BatchExecute</c> duplex call. One instance owns one
 /// long-lived stream; the batcher keeps several (the pool) and multiplexes ops across them. Ported from
 /// the server's <c>CamusDB.Grpc.Client</c>.
+///
+/// <para>Any authentication metadata is attached when the stream opens, because the server resolves the
+/// principal once for the whole <c>BatchExecute</c> call: every op multiplexed onto this stream runs as
+/// that identity. A token refresh therefore reaches the server on the next stream the batcher builds, not
+/// mid-stream.</para>
 /// </summary>
 internal sealed class GrpcBatchTransport : IBatchTransport
 {
@@ -22,10 +27,10 @@ internal sealed class GrpcBatchTransport : IBatchTransport
 
     public long Id { get; }
 
-    public GrpcBatchTransport(long id, CamusSql.CamusSqlClient client)
+    public GrpcBatchTransport(long id, CamusSql.CamusSqlClient client, global::Grpc.Core.Metadata? headers = null)
     {
         Id = id;
-        call = client.BatchExecute();
+        call = headers is null ? client.BatchExecute() : client.BatchExecute(headers);
     }
 
     public Task SendAsync(BatchExecuteRequest request, CancellationToken cancellationToken)
