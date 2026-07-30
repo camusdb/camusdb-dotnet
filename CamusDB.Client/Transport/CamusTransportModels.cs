@@ -55,7 +55,26 @@ internal sealed class TransportSqlRequest
 
     public int TimeoutSeconds { get; init; }
 
+    /// <summary>
+    /// Run this statement as a prepared execution: the transport registers <see cref="Sql"/> once (or
+    /// reuses a registration it already holds), then sends only the handle and the parameter values in
+    /// the server's published binding order, so neither the SQL nor the parameter names travel again.
+    ///
+    /// <para>A hint, not a demand. Everything about how a handle is scoped, invalidated and replayed is
+    /// the transport's business, and a transport that cannot prepare this statement — no server support,
+    /// a full server-side cap — runs it inline instead, with identical semantics. The ADO layer only
+    /// decides that the statement is worth preparing.</para>
+    /// </summary>
+    public bool Prepared { get; init; }
+
     public bool HasTransaction => TxnIdPT.HasValue && TxnIdCounter.HasValue;
+}
+
+/// <summary>A statement registered with the server: the placeholder names it declares, in binding order,
+/// verbatim including the leading <c>@</c>.</summary>
+internal sealed class PreparedStatementInfo(IReadOnlyList<string> parameterNames)
+{
+    public IReadOnlyList<string> ParameterNames { get; } = parameterNames;
 }
 
 /// <summary>Identity of a transaction the server minted for <see cref="ICamusTransport.StartTransactionAsync"/>,

@@ -68,7 +68,14 @@ public class CamusCommand : DbCommand, ICloneable
 
     public override int CommandTimeout { get; set; } = 10;
 
-    public override CommandType CommandType { get; set; }
+    /// <summary>
+    /// Always <see cref="System.Data.CommandType.Text"/> in practice — CamusDB has no stored procedures
+    /// or direct table access — but it defaults to it explicitly rather than to <c>default(CommandType)</c>,
+    /// which is not a valid value at all. Callers that never touch this property (EF Core among them)
+    /// would otherwise present a command whose type is zero, and anything reading it to decide what a
+    /// command is would have to special-case that.
+    /// </summary>
+    public override CommandType CommandType { get; set; } = CommandType.Text;
 
     public override bool DesignTimeVisible { get => designTimeVisible; set => designTimeVisible = value; }
 
@@ -145,22 +152,14 @@ public class CamusCommand : DbCommand, ICloneable
         "DELETE",
     ];
 
-    private static bool IsDdlStatement(string sql)
-    {
-        ReadOnlySpan<char> trimmed = sql.AsSpan().TrimStart();
-        foreach (string prefix in DdlPrefixes)
-        {
-            if (trimmed.Length >= prefix.Length &&
-                trimmed[..prefix.Length].Equals(prefix.AsSpan(), StringComparison.OrdinalIgnoreCase))
-                return true;
-        }
-        return false;
-    }
+    private static bool IsDdlStatement(string sql) => StartsWithAny(sql, DdlPrefixes);
 
-    private static bool IsDmlStatement(string sql)
+    private static bool IsDmlStatement(string sql) => StartsWithAny(sql, DmlPrefixes);
+
+    private static bool StartsWithAny(string sql, string[] prefixes)
     {
         ReadOnlySpan<char> trimmed = sql.AsSpan().TrimStart();
-        foreach (string prefix in DmlPrefixes)
+        foreach (string prefix in prefixes)
         {
             if (trimmed.Length >= prefix.Length &&
                 trimmed[..prefix.Length].Equals(prefix.AsSpan(), StringComparison.OrdinalIgnoreCase))
@@ -391,9 +390,11 @@ public class CamusCommand : DbCommand, ICloneable
         if (IsDmlStatement(CommandText))
             return await ExecuteDmlAsReaderAsync(cancellationToken).ConfigureAwait(false);
 
+        string endpoint = GetEndpoint();
+
         TransportSqlRequest request = new()
         {
-            Endpoint = GetEndpoint(),
+            Endpoint = endpoint,
             Database = builder.Config["Database"],
             Sql = GetRequestTarget(),
             Parameters = GetCommandParameters(),
@@ -401,6 +402,7 @@ public class CamusCommand : DbCommand, ICloneable
             TxnIdCounter = transaction?.TxnIdCounter,
             StreamSlot = transaction?.StreamSlot,
             TimeoutSeconds = CommandTimeout,
+            Prepared = await ShouldPrepareAsync(endpoint, cancellationToken).ConfigureAwait(false),
         };
 
         CamusRowSource source = await builder.GetTransport().ExecuteQueryStreamAsync(request, cancellationToken).ConfigureAwait(false);
@@ -421,9 +423,11 @@ public class CamusCommand : DbCommand, ICloneable
         if (IsDmlStatement(CommandText))
             return await ExecuteDmlAsReaderAsync(cancellationToken).ConfigureAwait(false);
 
+        string endpoint = GetEndpoint();
+
         TransportSqlRequest request = new()
         {
-            Endpoint = GetEndpoint(),
+            Endpoint = endpoint,
             Database = builder.Config["Database"],
             Sql = GetRequestTarget(),
             Parameters = GetCommandParameters(),
@@ -431,6 +435,7 @@ public class CamusCommand : DbCommand, ICloneable
             TxnIdCounter = transaction?.TxnIdCounter,
             StreamSlot = transaction?.StreamSlot,
             TimeoutSeconds = CommandTimeout,
+            Prepared = await ShouldPrepareAsync(endpoint, cancellationToken).ConfigureAwait(false),
         };
 
         QueryTransportResult result = await builder.GetTransport().ExecuteQueryAsync(request, cancellationToken).ConfigureAwait(false);
@@ -452,21 +457,31 @@ public class CamusCommand : DbCommand, ICloneable
     /// <see cref="Transaction"/> when present, otherwise carries the resolved autocommit concurrency
     /// options for the short transaction the server begins for this statement.
     /// </summary>
-    private TransportSqlRequest BuildNonQueryTransportRequest() => new()
+    private async ValueTask<TransportSqlRequest> BuildNonQueryTransportRequestAsync(CancellationToken cancellationToken)
     {
-        Endpoint = GetEndpoint(),
-        Database = builder.Config["Database"],
-        Sql = GetRequestTarget(),
-        Parameters = GetCommandParameters(),
-        TxnIdPT = transaction?.TxnIdPT,
-        TxnIdCounter = transaction?.TxnIdCounter,
-        StreamSlot = transaction?.StreamSlot,
-        AutocommitOptions = transaction is null ? ResolveAutocommitOptions() : null,
-        TimeoutSeconds = CommandTimeout,
-    };
+        string endpoint = GetEndpoint();
 
-    private Task<int> ExecuteNonQueryCoreAsync(CancellationToken cancellationToken)
-        => builder.GetTransport().ExecuteNonQueryAsync(BuildNonQueryTransportRequest(), cancellationToken);
+        return new()
+        {
+            Endpoint = endpoint,
+            Database = builder.Config["Database"],
+            Sql = GetRequestTarget(),
+            Parameters = GetCommandParameters(),
+            TxnIdPT = transaction?.TxnIdPT,
+            TxnIdCounter = transaction?.TxnIdCounter,
+            StreamSlot = transaction?.StreamSlot,
+            AutocommitOptions = transaction is null ? ResolveAutocommitOptions() : null,
+            TimeoutSeconds = CommandTimeout,
+            Prepared = await ShouldPrepareAsync(endpoint, cancellationToken).ConfigureAwait(false),
+        };
+    }
+
+    private async Task<int> ExecuteNonQueryCoreAsync(CancellationToken cancellationToken)
+    {
+        TransportSqlRequest request = await BuildNonQueryTransportRequestAsync(cancellationToken).ConfigureAwait(false);
+
+        return await builder.GetTransport().ExecuteNonQueryAsync(request, cancellationToken).ConfigureAwait(false);
+    }
 
     /// <summary>
     /// Executes the command and returns the number of rows affected.
@@ -534,10 +549,176 @@ public class CamusCommand : DbCommand, ICloneable
         return reader.GetValue(0);
     }
 
-    public override void Prepare()
+    /// <summary>
+    /// Registers <see cref="CommandText"/> with the server so this and every later command running the
+    /// same SQL sends only a handle and its parameter values.
+    ///
+    /// <para>Calling this is optional. The driver prepares a statement on its own once it has seen the
+    /// same SQL a few times (see <c>MaxAutoPrepare=</c> / <c>AutoPrepareMinUsages=</c>), which is what
+    /// makes Entity Framework Core — which never calls <see cref="Prepare"/> — benefit. Call it to skip
+    /// the warm-up for a statement you already know is hot.</para>
+    ///
+    /// <para>Registration is idempotent per (endpoint, database, SQL) and shared across every connection
+    /// built from the same connection string, so preparing twice costs nothing. A statement that cannot
+    /// be prepared — DDL, database administration, or a server that has no prepared-statement support —
+    /// is remembered as such and simply keeps running inline; that is not an error, and this method does
+    /// not throw for it.</para>
+    /// </summary>
+    public override void Prepare() => PrepareAsync().GetAwaiter().GetResult();
+
+    /// <inheritdoc cref="Prepare"/>
+    public override async Task PrepareAsync(CancellationToken cancellationToken = default)
     {
-        // CamusDB does not currently expose a server-side prepare API.
+        if (!IsPreparableStatement(CommandText))
+            return;
+
+        CamusPreparedStatementPolicy policy = builder.PreparedStatements;
+        string database = builder.Config["Database"];
+        string endpoint = GetEndpoint();
+
+        if (policy.Pin(database, CommandText, out (string Database, string Sql)? evicted) == PrepareDecision.Register)
+            await RegisterAsync(policy, endpoint, database, CommandText, cancellationToken).ConfigureAwait(false);
+
+        Release(endpoint, evicted);
     }
+
+    /// <summary>
+    /// Whether this execution should name a prepared statement instead of carrying its SQL, registering
+    /// it first if this is the execution that tips it over the threshold.
+    ///
+    /// <para>Registration is awaited rather than started in the background because the whole point is
+    /// that <em>this</em> execution and the ones after it are cheap; firing it off and running inline
+    /// anyway would leave a busy statement racing its own warm-up. It costs one extra round trip, once
+    /// per statement per endpoint.</para>
+    ///
+    /// <para>The caller passes the endpoint it has already resolved rather than letting this resolve its
+    /// own. A REST handle is node-local and <see cref="GetEndpoint"/> rotates through the pool, so
+    /// registering against a freshly drawn endpoint would routinely prepare on one node and execute on
+    /// another — correct, because the transport re-prepares on the node it lands on, but a wasted round
+    /// trip every single time.</para>
+    /// </summary>
+    private async ValueTask<bool> ShouldPrepareAsync(string endpoint, CancellationToken cancellationToken)
+    {
+        if (CommandType != CommandType.Text || !IsPreparableStatement(CommandText))
+            return false;
+
+        CamusPreparedStatementPolicy policy = builder.PreparedStatements;
+
+        if (policy.IsDisabled)
+            return false;
+
+        string database = builder.Config["Database"];
+
+        PrepareDecision decision = policy.Decide(database, CommandText, out (string Database, string Sql)? evicted);
+
+        Release(endpoint, evicted);
+
+        return decision switch
+        {
+            PrepareDecision.Yes => true,
+            PrepareDecision.Register => await RegisterAsync(policy, endpoint, database, CommandText, cancellationToken).ConfigureAwait(false),
+            _ => false,
+        };
+    }
+
+    /// <summary>
+    /// Registers a statement and records the outcome, returning whether it may now be executed prepared.
+    ///
+    /// <para>A registration failure is never surfaced: preparing is an optimization, and the statement
+    /// runs inline exactly as it would have if the driver had not tried. What the failure <em>does</em>
+    /// decide is whether to try again — a refusal specific to this statement (not preparable, a full
+    /// server-side cap) stops asking for that statement, while anything that suggests the node has no
+    /// prepared-statement support at all stops asking for every statement, because one round trip per
+    /// distinct SQL to relearn that is worse than not trying.</para>
+    /// </summary>
+    private async ValueTask<bool> RegisterAsync(
+        CamusPreparedStatementPolicy policy, string endpoint, string database, string sql, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await builder.GetTransport()
+                .PrepareAsync(endpoint, database, sql, CommandTimeout, cancellationToken)
+                .ConfigureAwait(false);
+
+            policy.MarkPrepared(database, sql);
+            return true;
+        }
+        catch (OperationCanceledException)
+        {
+            // The caller's cancellation, not a verdict on the statement — but the entry must not be left
+            // mid-registration, or it would never be reconsidered.
+            policy.Forget(database, sql);
+            throw;
+        }
+        catch (Exception ex)
+        {
+            // Deliberately broad. Whatever went wrong, the statement is about to run inline and report
+            // any real problem itself; the only decision left here is whether asking again is worth a
+            // round trip, and for this statement it is not.
+            policy.MarkRefused(database, sql);
+
+            if (ex is CamusException camus && IsUnsupported(camus))
+                policy.Disable();
+
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// True when the failure says the node does not implement prepared statements at all, rather than
+    /// declining this particular statement — a route that does not exist over REST, or an RPC the server
+    /// does not implement over gRPC. Both surface under the generic transport code, because a server old
+    /// enough not to have the feature is also too old to have a specific code for refusing it; a server
+    /// that does have it declines individual statements with a <c>CADB05xx</c> code instead.
+    ///
+    /// <para>A heuristic, and only ever used to answer "is asking again worth a round trip?". Reading it
+    /// wrong costs at most one wasted registration attempt per statement, never a failed statement.</para>
+    /// </summary>
+    private static bool IsUnsupported(CamusException ex)
+        => ex.Code == "CADB0000"
+            && (ex.Message.Contains("404", StringComparison.Ordinal)
+                || ex.Message.Contains("Unimplemented", StringComparison.OrdinalIgnoreCase));
+
+    /// <summary>Releases a statement the policy evicted, so the server stops holding a handle this client
+    /// has stopped using. Best-effort and off the caller's path: it is bookkeeping, not part of the
+    /// statement being run. Takes the endpoint the caller already resolved rather than drawing a new one,
+    /// which would rotate the endpoint pool as a side effect of housekeeping.</summary>
+    private void Release(string endpoint, (string Database, string Sql)? evicted)
+    {
+        if (evicted is not { } statement)
+            return;
+
+        ICamusTransport transport = builder.GetTransport();
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await transport.ClosePreparedAsync(endpoint, statement.Database, statement.Sql, CancellationToken.None)
+                    .ConfigureAwait(false);
+            }
+            catch
+            {
+                // The handle expires on its own; failing to close it early is not worth reporting.
+            }
+        });
+    }
+
+    /// <summary>
+    /// The statements the server accepts a registration for: the repeatable data statements, whose whole
+    /// point is running many times with different values. Schema and administration statements are
+    /// one-shot and are excluded on the server too, so this list mirrors that rather than guessing.
+    /// </summary>
+    private static readonly string[] PreparablePrefixes =
+    [
+        "SELECT",
+        "INSERT",
+        "UPDATE",
+        "DELETE",
+        "SHOW",
+    ];
+
+    private static bool IsPreparableStatement(string sql) => StartsWithAny(sql, PreparablePrefixes);
 
     protected override DbParameter CreateDbParameter()
     {

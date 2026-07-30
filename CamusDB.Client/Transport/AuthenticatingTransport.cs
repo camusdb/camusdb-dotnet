@@ -55,6 +55,15 @@ internal sealed class AuthenticatingTransport(ICamusTransport inner, CamusTokenP
     public Task<bool> ExecuteDdlAsync(TransportSqlRequest request, CancellationToken cancellationToken)
         => RunAsync(ct => inner.ExecuteDdlAsync(request, ct), cancellationToken);
 
+    public Task<PreparedStatementInfo> PrepareAsync(
+        string endpoint, string database, string sql, int timeoutSeconds, CancellationToken cancellationToken)
+        => RunAsync(ct => inner.PrepareAsync(endpoint, database, sql, timeoutSeconds, ct), cancellationToken);
+
+    // Closing is best-effort and idempotent: a token the server has already rejected means the handle it
+    // named is unreachable anyway, so there is nothing a replay could still release.
+    public Task ClosePreparedAsync(string endpoint, string database, string sql, CancellationToken cancellationToken)
+        => inner.ClosePreparedAsync(endpoint, database, sql, cancellationToken);
+
     public Task<bool> PingAsync(string endpoint, int timeoutSeconds, CancellationToken cancellationToken)
         => RunAsync(ct => inner.PingAsync(endpoint, timeoutSeconds, ct), cancellationToken);
 

@@ -461,6 +461,12 @@ public class TestAuthentication
         public Task<bool> ExecuteDdlAsync(TransportSqlRequest request, CancellationToken cancellationToken)
             => throw new NotSupportedException();
 
+        public Task<PreparedStatementInfo> PrepareAsync(string endpoint, string database, string sql, int timeoutSeconds, CancellationToken cancellationToken)
+            => throw new NotSupportedException();
+
+        public Task ClosePreparedAsync(string endpoint, string database, string sql, CancellationToken cancellationToken)
+            => throw new NotSupportedException();
+
         public Task<bool> PingAsync(string endpoint, int timeoutSeconds, CancellationToken cancellationToken)
             => throw new NotSupportedException();
 

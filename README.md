@@ -50,6 +50,8 @@ Supported connection string keys:
 | `Password` | No | That user's password. Alias: `Pwd`. |
 | `AccessToken` | No | A bearer token obtained elsewhere, used verbatim instead of logging in. |
 | `TokenLifetime` | No | Fallback seconds to reuse a token when the server reports no expiry (default: `600`). |
+| `MaxAutoPrepare` | No | How many statements to keep prepared (default: `128`; `0` disables). See [Prepared Statements](#prepared-statements). |
+| `AutoPrepareMinUsages` | No | Executions of the same SQL before it is prepared (default: `2`). |
 
 `Endpoint` also supports a comma-separated pool. The client selects endpoints with round-robin routing:
 
@@ -157,6 +159,69 @@ Under gRPC the data plane — queries, non-queries, and the transaction lifecycl
 Both transports raise the same `CamusException` (carrying the server's `CADBxxxx` code), so error handling and the transaction retry contract are unchanged when you switch. A couple of differences are inherent to the gRPC API surface:
 
 - Database-admin operations (`CreateDatabaseAsync`, `DropDatabaseAsync`, `CreateBranchDatabaseAsync`, `ShowBranchesAsync`, `ShowAncestorsAsync`) are issued as SQL over gRPC (the gRPC service has no dedicated admin RPCs); they behave the same from the caller's side.
+
+### Prepared Statements
+
+A prepared statement is registered with the server once and executed many times with different values. Neither the SQL text nor the parameter names travel again per execution, and — the larger win — the server stops re-parsing the statement on every request just to decide how to route it. Both transports support it.
+
+**You do not have to do anything to use it.** The driver watches the SQL it sends and, once it has seen the same statement twice, registers it and runs it prepared from then on:
+
+```csharp
+// Nothing here mentions preparing. The second and later executions are prepared automatically.
+for (int i = 0; i < 100; i++)
+{
+    await using CamusCommand cmd = connection.CreateCamusCommand(
+        "SELECT name FROM robots WHERE year = @year");
+    cmd.Parameters.Add("@year", ColumnType.Integer64, 1984);
+
+    await using CamusDataReader reader = await cmd.ExecuteReaderAsync();
+    while (await reader.ReadAsync())
+        Console.WriteLine(reader.GetString(0));
+}
+```
+
+This is what makes **Entity Framework Core benefit**: EF never calls `Prepare()` on any provider, but it does issue the same handful of statement shapes for the lifetime of a process, and those are exactly what the driver picks up. No provider configuration is needed. The decision is shared per deployment rather than per connection, so a request-scoped `DbContext` — a new connection and a new command every request — still crosses the threshold.
+
+Call `Prepare()` (or `PrepareAsync()`) to skip the warm-up for a statement you already know is hot:
+
+```csharp
+await using CamusCommand insert = connection.CreateCamusCommand(
+    "INSERT INTO robots (id, name, year) VALUES (@id, @name, @year)");
+
+await insert.PrepareAsync();
+
+foreach (Robot robot in robots)
+{
+    insert.Parameters.Clear();
+    insert.Parameters.Add("@id", ColumnType.Id, robot.Id);
+    insert.Parameters.Add("@name", ColumnType.String, robot.Name);
+    insert.Parameters.Add("@year", ColumnType.Integer64, robot.Year);
+
+    await insert.ExecuteNonQueryAsync();
+}
+```
+
+Tuning:
+
+```csharp
+// Prepare on first sight, and keep more statements registered.
+CamusConnectionStringBuilder eager = new(
+    "Endpoint=http://localhost:5095;Database=test;MaxAutoPrepare=512;AutoPrepareMinUsages=1");
+
+// Turn automatic preparation off entirely. Explicit Prepare() still works.
+CamusConnectionStringBuilder off = new(
+    "Endpoint=http://localhost:5095;Database=test;MaxAutoPrepare=0");
+```
+
+Things worth knowing:
+
+- **A prepared execution is indistinguishable from an inline one.** Same rows, same affected counts, same transaction, isolation, locking and cache-hint behavior. Parameters are still bound by name in this API — the driver maps them onto the server's ordinals before writing — and names must match the placeholder exactly, `@` included, just as they must inline.
+- **Only `SELECT`, `INSERT`, `UPDATE`, `DELETE` and `SHOW` are preparable.** Schema and database administration statements are one-shot; `Prepare()` on one is a no-op and the statement runs normally.
+- **Preparing never causes a failure.** If the server declines to register a statement — an older node with no prepared-statement support, or a full server-side cap — it runs inline exactly as before, and a node that has no support at all is only asked once.
+- **Handles are node-local and expire.** The driver treats "unknown statement" as routine, re-registers, and replays the execution once; a load-balanced deployment settles at one registration per node per statement. Under gRPC a handle belongs to the `BatchExecute` stream that minted it, so a rebuilt stream is re-registered transparently.
+- **`MaxAutoPrepare` bounds both sides.** The least recently used statement is dropped and its server-side handle closed, so a workload that generates unbounded distinct SQL — string-concatenated queries, or EF's `IN (…)` expansion, whose text changes with the list length — degrades to inline execution instead of exhausting the server's per-principal cap.
+
+`CamusConnectionStringBuilder.PreparedStatementCount` and `IsPrepared(sql)` report what is currently registered, for diagnostics.
 
 ### Usage
 
@@ -635,6 +700,10 @@ var options = new DbContextOptionsBuilder<AppDbContext>()
 ```
 
 EF opens a fresh connection per operation, but the token is cached per credential set rather than per connection, so the whole context still performs one login. Every table an EF query touches — including joins and subqueries — must be covered by a grant, or the query fails with `CADB0517`.
+
+#### Prepared statements
+
+EF Core queries and `SaveChanges` statements are prepared automatically once the same SQL has run twice — no provider configuration, and no code change. EF generates deterministic, parameterized SQL per query shape, which is exactly the pattern that repays a registration. See [Prepared Statements](#prepared-statements) for the mechanism, the `MaxAutoPrepare` / `AutoPrepareMinUsages` knobs, and why an `IN (…)` expansion is the one shape that does not benefit.
 
 #### Retry on failure
 

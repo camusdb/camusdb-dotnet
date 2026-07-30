@@ -193,13 +193,13 @@ internal sealed class GrpcTransport(CamusTokenProvider auth) : ICamusTransport, 
     {
         await EnsureTokenAsync(cancellationToken).ConfigureAwait(false);
 
-        SqlRequest wire = BuildSqlRequest(request);
-
         (CancellationToken token, CancellationTokenSource? cts) = WithTimeout(request.TimeoutSeconds, cancellationToken);
         try
         {
-            BatchQueryResult result = await GetBatcher(request.Endpoint)
-                .EnqueueQueryAsync(wire, request.StreamSlot, token).ConfigureAwait(false);
+            BatchQueryResult result = await ExecuteBatchedAsync(
+                request,
+                static (batcher, wire, slot, transportId, ct) => batcher.EnqueueQueryAsync(wire, slot, ct, transportId),
+                token).ConfigureAwait(false);
 
             ObserveToken(result.Token);
 
@@ -234,13 +234,13 @@ internal sealed class GrpcTransport(CamusTokenProvider auth) : ICamusTransport, 
     {
         await EnsureTokenAsync(cancellationToken).ConfigureAwait(false);
 
-        SqlRequest wire = BuildSqlRequest(request);
-
         (CancellationToken token, CancellationTokenSource? cts) = WithTimeout(request.TimeoutSeconds, cancellationToken);
         try
         {
-            BatchNonQueryResult result = await GetBatcher(request.Endpoint)
-                .EnqueueNonQueryAsync(wire, request.StreamSlot, token).ConfigureAwait(false);
+            BatchNonQueryResult result = await ExecuteBatchedAsync(
+                request,
+                static (batcher, wire, slot, transportId, ct) => batcher.EnqueueNonQueryAsync(wire, slot, ct, transportId),
+                token).ConfigureAwait(false);
 
             ObserveToken(result.Token);
 
@@ -255,6 +255,118 @@ internal sealed class GrpcTransport(CamusTokenProvider auth) : ICamusTransport, 
             cts?.Dispose();
         }
     }
+
+    // ─── Prepared statements ────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Registers a statement so later executions can name it instead of resending it.
+    ///
+    /// <para>Registration happens on one stream, and a handle is meaningless on any other, so this
+    /// prepares on a single slot — enough to answer what the caller actually asked (does it parse, and
+    /// what is its binding order) without spending a handle on every stream in the pool for a statement
+    /// that may only ever run once. Executions register themselves on whichever stream they land on, so
+    /// the rest of the pool warms up as it is used.</para>
+    /// </summary>
+    public async Task<PreparedStatementInfo> PrepareAsync(
+        string endpoint, string database, string sql, int timeoutSeconds, CancellationToken cancellationToken)
+    {
+        await EnsureTokenAsync(cancellationToken).ConfigureAwait(false);
+
+        GrpcBatcher batcher = GetBatcher(endpoint);
+
+        (CancellationToken token, CancellationTokenSource? cts) = WithTimeout(timeoutSeconds, cancellationToken);
+        try
+        {
+            PreparedSlotEntry entry = await batcher
+                .EnsurePreparedAsync(batcher.ReserveSlot(), database, sql, token).ConfigureAwait(false);
+
+            return new PreparedStatementInfo(entry.ParameterNames);
+        }
+        catch (RpcException ex)
+        {
+            throw Translate(ex);
+        }
+        finally
+        {
+            cts?.Dispose();
+        }
+    }
+
+    public async Task ClosePreparedAsync(string endpoint, string database, string sql, CancellationToken cancellationToken)
+    {
+        // Only a batcher that exists can hold registrations, and asking for one here would open the whole
+        // stream pool just to release nothing.
+        if (GetEntry(endpoint).BatcherIfCreated is not { } batcher)
+            return;
+
+        foreach ((int slot, PreparedSlotEntry entry) in batcher.TakePrepared(database, sql))
+            await batcher.ClosePreparedAsync(slot, entry, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Runs one batched op, as a prepared execution when the request asked for it.
+    ///
+    /// <para>A prepared execution pins to a single slot for its whole attempt: the handle lives on that
+    /// slot's stream, so registering on one and executing on another would be guaranteed to fail. An
+    /// autocommit statement picks the slot the same way the inline path would; a transaction's statement
+    /// uses the slot the transaction already pinned to, which is also what keeps its ops ordered.</para>
+    ///
+    /// <para>Retries exactly once, and only for the two ways a registration goes stale underneath a
+    /// correct caller: the stream was rebuilt between the check and the write
+    /// (<see cref="PreparedStatementStaleException"/>), or the server does not know the handle
+    /// (<c>CADB0520</c> — a rebuild this client had not noticed yet). Both mean "prepare again and
+    /// resend". Everything else propagates: a transport fault on the execution itself is the caller's to
+    /// handle under the normal retry taxonomy, and replaying a mutation that may already have been
+    /// applied is not this layer's decision to make. A failure to <em>register</em> is absorbed instead —
+    /// the statement simply runs inline, since preparing is an optimization and must never be the reason
+    /// a working statement fails.</para>
+    /// </summary>
+    private async Task<T> ExecuteBatchedAsync<T>(
+        TransportSqlRequest request,
+        Func<GrpcBatcher, SqlRequest, int?, long?, CancellationToken, Task<T>> send,
+        CancellationToken cancellationToken)
+    {
+        GrpcBatcher batcher = GetBatcher(request.Endpoint);
+
+        if (!request.Prepared)
+            return await send(batcher, BuildSqlRequest(request), request.StreamSlot, null, cancellationToken).ConfigureAwait(false);
+
+        int slot = request.StreamSlot ?? batcher.ReserveSlot();
+
+        for (int attempt = 0; ; attempt++)
+        {
+            PreparedSlotEntry entry;
+            SqlRequest wire;
+
+            try
+            {
+                entry = await batcher.EnsurePreparedAsync(slot, request.Database, request.Sql, cancellationToken).ConfigureAwait(false);
+                wire = BuildPreparedSqlRequest(request, entry);
+            }
+            catch (Exception ex) when (ex is CamusException or RpcException)
+            {
+                return await send(batcher, BuildSqlRequest(request), slot, null, cancellationToken).ConfigureAwait(false);
+            }
+
+            try
+            {
+                return await send(batcher, wire, slot, entry.TransportId, cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (attempt == 0 && IsStaleRegistration(ex))
+            {
+                batcher.InvalidatePrepared(slot, request.Database, request.Sql, entry);
+            }
+        }
+    }
+
+    /// <summary>
+    /// True for the failures that mean "this registration is gone", as opposed to a real error: the
+    /// pre-write transport check, and the server's own unknown-statement code, which is the backstop for
+    /// anything the check misses.
+    /// </summary>
+    private static bool IsStaleRegistration(Exception ex) =>
+        ex is PreparedStatementStaleException ||
+        (ex is CamusException camus && camus.Code == CamusPreparedStatementErrorCodes.UnknownPreparedStatement);
 
     // ─── Unary (DDL, ping) ──────────────────────────────────────────────────────
 
@@ -489,6 +601,31 @@ internal sealed class GrpcTransport(CamusTokenProvider auth) : ICamusTransport, 
                 wire.Parameters[parameter.Key] = GrpcValueCodec.Encode(parameter.Value);
         }
 
+        return ApplyExecutionContext(wire, request);
+    }
+
+    /// <summary>
+    /// The wire request for a prepared execution: the handle plus this call's values in the published
+    /// binding order. Deliberately carries no <c>database</c>, <c>sql</c> or named <c>parameters</c> —
+    /// the handle already names all three, and the server refuses a request that sends both rather than
+    /// resolving it by a precedence rule. Everything else — transaction, isolation, causal token —
+    /// travels exactly as it does inline, which is what makes a prepared execution indistinguishable
+    /// from an inline one past this point.
+    /// </summary>
+    private SqlRequest BuildPreparedSqlRequest(TransportSqlRequest request, in PreparedSlotEntry entry)
+    {
+        SqlRequest wire = new() { StatementId = entry.StatementId };
+
+        foreach (ColumnValue value in PreparedStatementBinder.Bind(entry.ParameterNames, request.Parameters, static v => v))
+            wire.PositionalParameters.Add(GrpcValueCodec.Encode(value));
+
+        return ApplyExecutionContext(wire, request);
+    }
+
+    /// <summary>Applies the transaction handle, or the autocommit knobs plus this session's causal token,
+    /// to a request that already carries what it executes.</summary>
+    private SqlRequest ApplyExecutionContext(SqlRequest wire, TransportSqlRequest request)
+    {
         if (request.HasTransaction)
         {
             wire.TxnHandle = BuildHandle(request.TxnIdPT!.Value, request.TxnIdCounter!.Value);

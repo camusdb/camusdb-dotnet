@@ -56,6 +56,31 @@ internal interface ICamusTransport
     /// <summary>Runs a DDL statement (<c>CREATE</c>/<c>ALTER</c>/<c>DROP TABLE</c>, indexes). Returns success.</summary>
     Task<bool> ExecuteDdlAsync(TransportSqlRequest request, CancellationToken cancellationToken);
 
+    /// <summary>
+    /// Registers <paramref name="sql"/> as a prepared statement and returns the placeholder names in
+    /// binding order, or reuses a registration this transport already holds for it.
+    ///
+    /// <para>Callers do not receive a handle. A handle's lifetime is a property of the transport that
+    /// minted it — a gRPC handle dies with its stream, a REST handle with an idle timeout or a node
+    /// restart — so it stays inside, where it can be checked and renewed. What the caller gets is the
+    /// statement's binding order and the knowledge that later executions carrying
+    /// <see cref="TransportSqlRequest.Prepared"/> will be cheap.</para>
+    ///
+    /// <para>Idempotent per (endpoint, database, sql); concurrent first calls share one registration.</para>
+    /// </summary>
+    Task<PreparedStatementInfo> PrepareAsync(
+        string endpoint, string database, string sql, int timeoutSeconds, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Releases this transport's registration(s) for a statement, both locally and on the server.
+    ///
+    /// <para>Best-effort by contract: a handle whose stream, node or idle window is already gone was
+    /// freed by the server anyway, so a failure here means the work was already done. Skipping it
+    /// entirely is safe for the same reason — it exists so a long-lived client that cycles through many
+    /// distinct statements stays under the server's caps instead of meeting them.</para>
+    /// </summary>
+    Task ClosePreparedAsync(string endpoint, string database, string sql, CancellationToken cancellationToken);
+
     /// <summary>Liveness check. Returns true when the server answers.</summary>
     Task<bool> PingAsync(string endpoint, int timeoutSeconds, CancellationToken cancellationToken);
 

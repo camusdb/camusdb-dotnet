@@ -28,6 +28,8 @@ public class CamusConnectionStringBuilder
 
     private CamusTokenProvider? tokenProvider;
 
+    private CamusPreparedStatementPolicy? preparedStatements;
+
     private readonly object transportLock = new();
 
     private readonly object authLock = new();
@@ -90,6 +92,70 @@ public class CamusConnectionStringBuilder
     /// <c>Endpoint=</c> must address the server's gRPC port.
     /// </summary>
     public CamusProtocol Protocol => ParseEnum<CamusProtocol>("Protocol") ?? CamusProtocol.Rest;
+
+    /// <summary>
+    /// How many distinct statements this connection string keeps prepared on the server, from
+    /// <c>MaxAutoPrepare=</c>. <c>0</c> turns automatic preparation off, leaving only explicit
+    /// <see cref="CamusCommand.Prepare"/>. Defaults to
+    /// <see cref="CamusPreparedStatementPolicy.DefaultMaxAutoPrepare"/>.
+    /// </summary>
+    public int MaxAutoPrepare
+        => Config.TryGetValue("MaxAutoPrepare", out string? raw) && int.TryParse(raw, out int max) && max >= 0
+            ? max
+            : CamusPreparedStatementPolicy.DefaultMaxAutoPrepare;
+
+    /// <summary>
+    /// How many times the same SQL must run before it is prepared, from <c>AutoPrepareMinUsages=</c>.
+    /// Defaults to <see cref="CamusPreparedStatementPolicy.DefaultMinUsages"/>. Raise it for a workload
+    /// that issues many near-unique statements; lower it to 1 to prepare on first sight.
+    /// </summary>
+    public int AutoPrepareMinUsages
+        => Config.TryGetValue("AutoPrepareMinUsages", out string? raw) && int.TryParse(raw, out int usages) && usages > 0
+            ? usages
+            : CamusPreparedStatementPolicy.DefaultMinUsages;
+
+    /// <summary>
+    /// How many statements this connection string currently keeps prepared on the server. Zero before
+    /// anything has been prepared — and while auto-preparation is off — so it also answers "is this
+    /// connection preparing anything at all?".
+    /// </summary>
+    public int PreparedStatementCount => PreparedStatements.PreparedCount;
+
+    /// <summary>
+    /// Whether <paramref name="sql"/> is currently kept prepared for this connection string's database.
+    /// Answers "did that statement get prepared?" without depending on what else the process has run,
+    /// which <see cref="PreparedStatementCount"/> cannot, since the decision is shared per deployment.
+    /// </summary>
+    public bool IsPrepared(string sql)
+        => PreparedStatements.IsPrepared(Config.TryGetValue("Database", out string? database) ? database : "", sql);
+
+    /// <summary>
+    /// Which statements this connection string's commands prepare.
+    ///
+    /// <para>Shared process-wide by deployment and settings rather than owned by this builder. Which
+    /// statements a workload repeats is a property of the workload, not of one short-lived builder — and
+    /// EF Core creates a builder per <c>DbContext</c>, so a builder-owned policy would restart its
+    /// counting on every request and never conclude anything.</para>
+    /// </summary>
+    internal CamusPreparedStatementPolicy PreparedStatements
+    {
+        get
+        {
+            if (preparedStatements is not null)
+                return preparedStatements;
+
+            lock (transportLock)
+            {
+                int max = MaxAutoPrepare;
+                int usages = AutoPrepareMinUsages;
+                string database = Config.TryGetValue("Database", out string? name) ? name : "";
+
+                return preparedStatements ??= CamusPreparedStatementPolicy.Shared(
+                    $"{DeploymentKey}|{database}|{max}|{usages}",
+                    () => new CamusPreparedStatementPolicy(max, usages));
+            }
+        }
+    }
 
     /// <summary>
     /// Credentials read from the connection string. Either <c>User=</c> (aliases <c>UserId</c>,
