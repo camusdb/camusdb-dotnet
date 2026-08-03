@@ -32,6 +32,7 @@ namespace CamusDB.Client.Transport.Batching;
 internal sealed class GrpcBatcher : IAsyncDisposable
 {
     private readonly GrpcBatchOptions options;
+    private readonly Func<long, IBatchTransport> transportFactory;
     private readonly Slot[] slots;
     private readonly CancellationTokenSource shutdown = new();
 
@@ -44,11 +45,13 @@ internal sealed class GrpcBatcher : IAsyncDisposable
     /// <summary>
     /// Builds a batcher over <paramref name="options"/>.<see cref="GrpcBatchOptions.ChannelPoolSize"/>
     /// transports produced by <paramref name="transportFactory"/> (the argument is a fresh transport id).
-    /// The factory is called again to rebuild a slot after its stream faults.
+    /// The factory is called again to rebuild a slot after its stream faults — but lazily, on the next
+    /// op that needs the slot, never in a retry loop.
     /// </summary>
     public GrpcBatcher(GrpcBatchOptions options, Func<long, IBatchTransport> transportFactory)
     {
         this.options = options;
+        this.transportFactory = transportFactory;
         int poolSize = Math.Max(1, options.ChannelPoolSize);
         slots = new Slot[poolSize];
         for (int i = 0; i < poolSize; i++)
@@ -56,10 +59,10 @@ internal sealed class GrpcBatcher : IAsyncDisposable
             slots[i] = new Slot(i)
             {
                 // Connect the first transport synchronously so a slot is never written to before it exists;
-                // the reader loop then owns reads and rebuilds the slot after a fault.
+                // the reader loop then owns reads, and the write path rebuilds the slot after a fault.
                 Transport = transportFactory(Interlocked.Increment(ref transportIdSeq)),
             };
-            StartReaderLoop(slots[i], transportFactory);
+            StartReaderLoop(slots[i]);
         }
     }
 
@@ -307,8 +310,7 @@ internal sealed class GrpcBatcher : IAsyncDisposable
     {
         try
         {
-            IBatchTransport transport = slot.Transport
-                ?? throw new InvalidOperationException("Transport slot is not connected");
+            IBatchTransport transport = slot.Transport ?? Reconnect(slot);
 
             // A prepared execution names a handle that exists only on the stream it was registered on.
             // This is the last moment the two can be compared — check any earlier and the stream could
@@ -329,13 +331,37 @@ internal sealed class GrpcBatcher : IAsyncDisposable
 
     // ─── Reader / demux ───────────────────────────────────────────────────────
 
-    private void StartReaderLoop(Slot slot, Func<long, IBatchTransport> factory)
+    /// <summary>
+    /// Builds a fresh transport for a slot whose stream faulted. Called only from the slot's pump —
+    /// the single writer — so at most one reconnect runs per slot, and only when an op actually needs
+    /// the stream. The reader loop is parked on <see cref="Slot.TransportConnected"/> until then, so a
+    /// client sitting idle against an unreachable server never cycles through connect attempts.
+    /// </summary>
+    private IBatchTransport Reconnect(Slot slot)
+    {
+        IBatchTransport transport = transportFactory(Interlocked.Increment(ref transportIdSeq));
+        slot.Transport = transport;
+        slot.TransportConnected.Release();
+        return transport;
+    }
+
+    private void StartReaderLoop(Slot slot)
     {
         _ = Task.Run(async () =>
         {
             while (!shutdown.IsCancellationRequested)
             {
-                IBatchTransport transport = slot.Transport!;
+                IBatchTransport? transport = slot.Transport;
+                if (transport is null)
+                {
+                    // The slot faulted and no op has needed it since. Wait for the write path to
+                    // reconnect rather than rebuilding here, which would spin at full speed while
+                    // the server is unreachable.
+                    try { await slot.TransportConnected.WaitAsync(shutdown.Token).ConfigureAwait(false); }
+                    catch (OperationCanceledException) { break; }
+                    continue;
+                }
+
                 Exception fault = new IOException("gRPC batch stream closed");
                 try
                 {
@@ -356,13 +382,9 @@ internal sealed class GrpcBatcher : IAsyncDisposable
                 }
 
                 // Fail this transport's still-pending ops so callers see the fault and can replay.
+                // The next op through the pump rebuilds the slot.
                 slot.Transport = null;
                 FailTransportPending(transport.Id, fault);
-                if (shutdown.IsCancellationRequested)
-                    break;
-
-                // Rebuild the slot with a fresh transport for subsequent ops.
-                slot.Transport = factory(Interlocked.Increment(ref transportIdSeq));
             }
         });
     }
@@ -465,6 +487,11 @@ internal sealed class GrpcBatcher : IAsyncDisposable
         public readonly ConcurrentQueue<QueuedItem> Inbox = new();
         public int Processing;   // 0 = idle, 1 = this slot's pump loop is running
         public volatile IBatchTransport? Transport;
+
+        /// <summary>Signaled by the write path each time it reconnects the slot, waking the parked
+        /// reader loop. One release per null→connected transition, one wait per observed null, so the
+        /// count stays balanced.</summary>
+        public readonly SemaphoreSlim TransportConnected = new(0);
 
         /// <summary>
         /// Statements registered on this slot, keyed by (database, sql). The value is the in-flight or

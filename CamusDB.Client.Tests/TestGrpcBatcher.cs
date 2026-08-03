@@ -90,16 +90,58 @@ public class TestGrpcBatcher
             Assert.Equal($"q{i}", results[i].Rows[0].Values[0].StringValue);
     }
 
+    [Fact]
+    public async Task FaultedStreamReconnectsLazilyOnNextOp()
+    {
+        int factoryCalls = 0;
+        FakeTransport? current = null;
+        await using GrpcBatcher batcher = new(new GrpcBatchOptions { ChannelPoolSize = 1 },
+            id => { Interlocked.Increment(ref factoryCalls); return current = new FakeTransport(id); });
+
+        await batcher.EnqueueNonQueryAsync(new SqlRequest { Sql = "u" }, slotIndex: null, default);
+        Assert.Equal(1, factoryCalls);
+
+        current!.Fault(new IOException("stream reset"));
+
+        // The batcher must not rebuild the transport on its own — an idle client against a dead
+        // server would otherwise spin through connect attempts at full speed.
+        await Task.Delay(200);
+        Assert.Equal(1, factoryCalls);
+
+        // An op that races the teardown may fault (callers see it and replay, per the contract);
+        // a replay reconnects the slot and succeeds.
+        BatchNonQueryResult? result = null;
+        for (int attempt = 0; attempt < 50 && result is null; attempt++)
+        {
+            try { result = await batcher.EnqueueNonQueryAsync(new SqlRequest { Sql = "u" }, slotIndex: null, default); }
+            catch (IOException) { await Task.Delay(20); }
+        }
+
+        Assert.NotNull(result);
+        Assert.Equal(3, result.AffectedRows);
+        Assert.Equal(2, factoryCalls);
+    }
+
     /// <summary>An in-process <see cref="IBatchTransport"/> that answers each request deterministically by
-    /// kind, echoing the request's SQL back for QUERY so correlation can be asserted under concurrency.</summary>
+    /// kind, echoing the request's SQL back for QUERY so correlation can be asserted under concurrency.
+    /// <see cref="Fault"/> kills the stream the way a dropped connection would, for reconnect tests.</summary>
     private sealed class FakeTransport(long id) : IBatchTransport
     {
         private readonly Channel<BatchExecuteResponse> channel = Channel.CreateUnbounded<BatchExecuteResponse>();
+        private Exception? fault;
 
         public long Id { get; } = id;
 
+        public void Fault(Exception ex)
+        {
+            fault = ex;
+            channel.Writer.TryComplete(ex);
+        }
+
         public Task SendAsync(BatchExecuteRequest request, CancellationToken cancellationToken)
         {
+            if (fault is not null)
+                return Task.FromException(fault);
             foreach (BatchExecuteResponse response in Respond(request))
                 channel.Writer.TryWrite(response);
             return Task.CompletedTask;
