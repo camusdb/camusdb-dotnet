@@ -28,9 +28,25 @@ jobs:
         run: docker run -d -p 5095:5095 -p 5096:5096 -v camus-data:/data --name camusdb camusdb/camusdb:latest
 
       - name: Wait for CamusDB to be ready
+        # Kestrel binds before startup finishes, so /ping can answer from a process that is already on
+        # its way down (a startup exception thrown after the socket is bound). Answering the probe is
+        # therefore necessary but not sufficient: re-check that the container is still running a moment
+        # later, so a server that dies during startup fails here with its logs rather than surfacing as
+        # an unexplained connection error in a later step.
         run: |
           for i in $(seq 1 60); do
+            if ! [ "$(docker inspect -f '{{.State.Running}}' camusdb 2>/dev/null)" = "true" ]; then
+              echo "The CamusDB container exited during startup." >&2
+              docker logs camusdb || true
+              exit 1
+            fi
             if curl --fail --silent http://localhost:5095/ping >/dev/null 2>&1; then
+              sleep 3
+              if ! [ "$(docker inspect -f '{{.State.Running}}' camusdb 2>/dev/null)" = "true" ]; then
+                echo "CamusDB answered /ping and then exited — it failed during startup." >&2
+                docker logs camusdb || true
+                exit 1
+              fi
               echo "CamusDB is up after ${i}s."
               exit 0
             fi
@@ -146,9 +162,25 @@ jobs:
 
       - name: Wait for CamusDB to be ready
         # /ping is exempt from authentication, so it answers 200 either way.
+        #
+        # The liveness re-check matters more here than in the unauthenticated job: bootstrap seeding runs
+        # after Kestrel binds, so an auth-enabled server that refuses to start still answers /ping for a
+        # few seconds first. Without this the job proceeded and died on a bare curl exit 52 downstream.
         run: |
           for i in $(seq 1 60); do
+            if ! [ "$(docker inspect -f '{{.State.Running}}' camusdb-auth 2>/dev/null)" = "true" ]; then
+              echo "The CamusDB container exited during startup." >&2
+              docker logs camusdb-auth || true
+              exit 1
+            fi
             if curl --fail --silent http://localhost:5095/ping >/dev/null 2>&1; then
+              sleep 3
+              if ! [ "$(docker inspect -f '{{.State.Running}}' camusdb-auth 2>/dev/null)" = "true" ]; then
+                echo "CamusDB answered /ping and then exited — it failed during startup." >&2
+                echo "With authentication enabled this is usually a bootstrap-superuser configuration error." >&2
+                docker logs camusdb-auth || true
+                exit 1
+              fi
               echo "CamusDB is up after ${i}s."
               exit 0
             fi
@@ -164,12 +196,28 @@ jobs:
         # for a reason that has nothing to do with this repository. A missing /login route is the crisp
         # signal for that, so skip rather than fail; the job starts testing for real the moment a newer
         # image is published, with no edit here.
+        #
+        # Only an answered request decides anything. The step runs under `bash -e`, so an unguarded
+        # command substitution would abort it on any transport-level curl failure — a dead server showed
+        # up as a bare "Process completed with exit code 52" with no indication of what happened. A
+        # failure to reach a server that just passed the readiness gate is a real fault, not a reason to
+        # skip, so it fails loudly and prints the logs.
         id: supported
         run: |
-          status="$(curl --silent --output /dev/null --write-out '%{http_code}' \
+          set +e
+          status="$(curl --silent --max-time 10 --output /dev/null --write-out '%{http_code}' \
             -X POST http://localhost:5095/login \
             -H "Content-Type: application/json" \
             -d '{"user":"nobody","password":"nobody"}')"
+          rc=$?
+          set -e
+
+          if [ "$rc" -ne 0 ]; then
+            echo "Could not reach /login: curl exited $rc (HTTP status '${status:-none}')." >&2
+            echo "The server answered the readiness probe but not this request, so it most likely died in between." >&2
+            docker logs camusdb-auth || true
+            exit 1
+          fi
 
           if [ "$status" = "404" ]; then
             echo "The published image has no /login route — it predates authentication. Skipping."
