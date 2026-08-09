@@ -52,6 +52,9 @@ Supported connection string keys:
 | `TokenLifetime` | No | Fallback seconds to reuse a token when the server reports no expiry (default: `600`). |
 | `MaxAutoPrepare` | No | How many statements to keep prepared (default: `128`; `0` disables). See [Prepared Statements](#prepared-statements). |
 | `AutoPrepareMinUsages` | No | Executions of the same SQL before it is prepared (default: `2`). |
+| `ChannelPoolSize` | No | gRPC only: long-lived `BatchExecute` streams per endpoint (default: `2`). See [Transport](#transport-rest--grpc). |
+| `CoalescingThreshold` | No | gRPC only: ops a drain must produce before the pump stops waiting for more (default: `10`; `1` disables coalescing). |
+| `CoalescingDelay` | No | gRPC only: milliseconds the pump waits to accumulate a larger batch (default: `2`; `0` disables coalescing). |
 
 `Endpoint` also supports a comma-separated pool. The client selects endpoints with round-robin routing:
 
@@ -155,6 +158,10 @@ CamusConnectionStringBuilder grpc = new("Endpoint=http://localhost:5096;Database
 The server exposes REST and gRPC on **separate ports** (for example `5095` for REST and `5096` for gRPC), so when selecting `Protocol=grpc` the `Endpoint` must address the gRPC port. Use `http://` for plaintext HTTP/2 (h2c) in local development, or `https://` against a TLS-terminated deployment. The comma-separated endpoint pool works with either protocol.
 
 Under gRPC the data plane — queries, non-queries, and the transaction lifecycle — is multiplexed over a small pool of long-lived `BatchExecute` duplex streams, so concurrent operations coalesce onto shared streams instead of each paying a unary round-trip. Autocommit statements fan out across the pool; a transaction's `BEGIN`/statements/`COMMIT` are pinned to one stream so the server orders them. DDL and ping stay on the unary RPCs. This is transparent — the same `CamusCommand`/`CamusTransaction` API drives it.
+
+The stream pool is sized by `ChannelPoolSize` (default `2`). It is *not* a cap on in-flight transactions — many transactions hash onto the same streams and interleave — so the default suits most workloads; raise it when many long-running streaming queries against one endpoint would otherwise queue behind each other on a shared stream. `CoalescingThreshold` and `CoalescingDelay` trade a couple of milliseconds of latency for fewer, larger writes when a burst of operations arrives together.
+
+If you are coming from Cloud Spanner: `ChannelPoolSize` is the analogue of `NumChannels`. There is no analogue of `MinSessions`/`MaxSessions`, because CamusDB has no server-side session object to pool — nothing is created ahead of a statement, nothing expires while idle, and there is no per-node session ceiling. The `SessionPoolManager`/`SessionPoolOptions` types are obsolete no-ops kept only so Spanner-shaped code still compiles.
 
 Both transports raise the same `CamusException` (carrying the server's `CADBxxxx` code), so error handling and the transaction retry contract are unchanged when you switch. A couple of differences are inherent to the gRPC API surface:
 
@@ -461,7 +468,8 @@ Trade-offs to know:
 CamusDB has an opt-in, per-node, in-memory cache of fully materialized `SELECT` results. A query
 joins it with an inline `{cache=name}` hint placed right after a table reference; an identical later
 query (same shape, same bound values, same schema) can then be served from memory. The cache only
-serves single-table, autocommit reads — hints on joins or inside explicit transactions are inert.
+serves single-table, autocommit reads — hints on joins, on reads through a view, or inside explicit
+transactions are inert, and the response says which of those it was (`BypassReason`).
 
 Add the hint directly in your SQL, optionally with a per-entry TTL or `strict` (validate every hit
 against live storage). `CamusCacheHint.Build(...)` assembles the fragment for you:
@@ -990,7 +998,8 @@ CHECK-constraint predicates, the same patterns work in `HasCheckConstraint` (e.g
 Opt a LINQ query into CamusDB's [query result cache](#query-result-cache) with `WithCache(name)`.
 The provider injects the `{cache=…}` hint into the generated SQL, so an identical later query is
 served from the server's in-memory cache. As with the raw client, only single-table, autocommit
-reads are cacheable — a query with a join, or one inside an explicit transaction, reads live storage.
+reads are cacheable — a query with a join, one reading through a view, or one inside an explicit
+transaction reads live storage.
 
 ```csharp
 using CamusDB.EntityFrameworkCore;
@@ -1149,6 +1158,106 @@ public partial class AddStockColumn : Migration
 }
 ```
 
+### Views
+
+CamusDB views are stored queries expanded at every reference, so anything that works on a subquery —
+joins, aggregation, `ORDER BY`, the optimizer — works when reading through one. Map an entity to a
+view with EF's `ToView`; EF excludes view-mapped types from migrations and from `EnsureCreated`, so
+the view's own DDL is yours to write:
+
+```csharp
+modelBuilder.Entity<OpenOrder>().HasNoKey().ToView("open_orders");
+
+var spend = await ctx.OpenOrders
+    .GroupBy(o => o.Customer)
+    .Select(g => new { Customer = g.Key, Spent = g.Sum(o => o.Total) })
+    .ToListAsync();
+```
+
+EF has no migration operation for views, so the provider adds three that emit the DDL for you:
+
+```csharp
+protected override void Up(MigrationBuilder migrationBuilder)
+{
+    migrationBuilder.CreateView(
+        "open_orders",
+        "SELECT id, customer, total FROM orders WHERE status = 'open'");
+
+    // Optional: name the view's own columns, and/or replace an existing definition.
+    migrationBuilder.CreateView(
+        "order_summary",
+        "SELECT id, customer, total FROM orders",
+        columns: ["order_id", "who", "amount"]);
+
+    migrationBuilder.RenameView("open_orders", "active_orders");
+}
+
+protected override void Down(MigrationBuilder migrationBuilder)
+{
+    migrationBuilder.DropView("order_summary");
+    migrationBuilder.DropView("active_orders", ifExists: true);
+}
+```
+
+Things the server enforces, worth knowing before writing the body:
+
+- **Every output column needs a name.** A bare expression is refused (`CADB0400`) rather than named
+  `?column?`; alias it (`total + 1 AS total_plus_one`).
+- **`CREATE OR REPLACE` may only append columns.** Existing names, types, and order must be preserved,
+  because dependent views and cached plans are bound to them. Drop and recreate to change the shape.
+- **Dependencies block drops.** Dropping a view or table that another view reads fails with `CADB0530`.
+  `DROP VIEW … CASCADE` takes the dependents with it (`cascade: true` above); `DROP TABLE` has **no**
+  `CASCADE` form, so a migration dropping such a table must drop the dependent views first.
+- **`SELECT *` is frozen at creation**, cannot be mixed with other projections, and the body may carry
+  neither `AS OF SYSTEM TIME` nor index/cache hints.
+- **Views are read-only.** Inserts, updates, and deletes through a view are not implemented, so map a
+  view-backed type as `HasNoKey()` (or otherwise keep it out of `SaveChanges`).
+- **A hinted read through a view is not cached.** A view expands to a derived table, which has no row
+  keyspace for the result cache to fence, so `WithCache(...)` is accepted but inert. It is reported
+  rather than silent: the response carries `cacheStatus = bypass` with bypass reason `derived-source`
+  (see [Query Result Cache](#query-result-cache) — `CamusCacheMetadata`).
+
+The same statements work from the ADO client through `ExecuteNonQueryAsync` (or `ExecuteDDLAsync`):
+
+```csharp
+await using CamusCommand cmd = connection.CreateCamusCommand(
+    "CREATE VIEW open_orders AS SELECT id, customer, total FROM orders WHERE status = 'open'");
+
+await cmd.ExecuteNonQueryAsync();
+```
+
+#### Materialized views
+
+A materialized view stores its query's rows and answers reads from that copy until you refresh it, so
+it is a physical relation: it can be indexed, analyzed, commented, and **cached like a table**. Map it
+with `ToTable` rather than `ToView` — but keep it out of `SaveChanges`, because writing to one is
+refused (the row would be discarded by the next refresh).
+
+```csharp
+protected override void Up(MigrationBuilder migrationBuilder)
+{
+    migrationBuilder.Sql(
+        "CREATE MATERIALIZED VIEW customer_totals AS " +
+        "SELECT customer, SUM(total) AS total_spent FROM orders GROUP BY customer");
+}
+```
+
+The stored rows do not move on their own — only a refresh advances them, and it is a write rather
+than schema, so it reports the number of rows it wrote:
+
+```csharp
+await using CamusCommand refresh = connection.CreateCamusCommand(
+    "REFRESH MATERIALIZED VIEW customer_totals");
+
+int rows = await refresh.ExecuteNonQueryAsync();
+```
+
+A rebuild reads its source at one pinned snapshot and swaps the result in atomically, so readers never
+block and never observe a half-built materialized view. `WITH NO DATA` creates (or empties) one without
+running the query; **reading an unpopulated materialized view is an error, not an empty result**, so a
+forgotten refresh cannot pass for a correct answer. `REFRESH … CONCURRENTLY` is refused — the ordinary
+form already leaves readers unblocked, and incremental refresh is not implemented.
+
 ### Concurrency Tokens
 
 The provider supports EF Core optimistic concurrency. When a tracked entity has a concurrency token,
@@ -1207,6 +1316,7 @@ await ctx.SaveChangesAsync();                    // throws DbUpdateConcurrencyEx
 - No `decimal`/exact-numeric store type — use `double` (`float64`), accepting binary floating-point rounding.
 - Key CLR types must be one of: `string`, `int`, `long`, `short`, or `Guid`.
 - `[ConcurrencyCheck]` is supported on `short`/`int`/`long`; `[Timestamp]`/`IsRowVersion()` is supported on `byte[]` (provider-managed). A stale write raises `DbUpdateConcurrencyException`.
+- Views are read-only (no writes through a view) and are not scaffolded into a model. `WithCache(...)` on a query that reads through a view is accepted but inert — the response reports `bypass` / `derived-source` and the rows come from live storage. Materialized views are writable only by `REFRESH`, and do cache.
 - `WithCache(...)` only takes effect on single-table, autocommit reads; the hint is inert on queries with a join or run inside an explicit transaction (they read live storage).
 
 ---

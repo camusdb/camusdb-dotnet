@@ -94,4 +94,36 @@ public class TestConnectionString : BaseTest
         Assert.Equal("http://localhost:8082", builder.GetEndpoint());
         Assert.Equal("http://localhost:8086", builder.GetEndpoint());
     }
-} 
+
+    [Fact]
+    public void TestConnectionStringBatchOptionsDefaults()
+    {
+        CamusConnectionStringBuilder builder = new("Endpoint=http://localhost:8082;Database=test");
+
+        Assert.Equal(2, builder.BatchOptions.ChannelPoolSize);
+        Assert.Equal(10, builder.BatchOptions.CoalescingThreshold);
+        Assert.Equal(2, builder.BatchOptions.CoalescingDelayMs);
+    }
+
+    [Fact]
+    public void TestConnectionStringBatchOptionsOverridden()
+    {
+        CamusConnectionStringBuilder builder = new(
+            "Endpoint=http://localhost:8082;Database=test;ChannelPoolSize=8;CoalescingThreshold=32;CoalescingDelay=0");
+
+        Assert.Equal(8, builder.BatchOptions.ChannelPoolSize);
+        Assert.Equal(32, builder.BatchOptions.CoalescingThreshold);
+        Assert.Equal(0, builder.BatchOptions.CoalescingDelayMs);
+    }
+
+    [Fact]
+    public void TestConnectionStringBatchOptionsIgnoresOutOfRangeValues()
+    {
+        CamusConnectionStringBuilder builder = new(
+            "Endpoint=http://localhost:8082;Database=test;ChannelPoolSize=0;CoalescingThreshold=nope;CoalescingDelay=-1");
+
+        Assert.Equal(2, builder.BatchOptions.ChannelPoolSize);
+        Assert.Equal(10, builder.BatchOptions.CoalescingThreshold);
+        Assert.Equal(2, builder.BatchOptions.CoalescingDelayMs);
+    }
+}

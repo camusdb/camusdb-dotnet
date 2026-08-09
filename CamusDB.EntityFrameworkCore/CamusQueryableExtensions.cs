@@ -28,9 +28,12 @@ public static class CamusQueryableExtensions
     /// (same shape, same bound values, same schema) can be served from the server's in-memory cache.
     /// </summary>
     /// <remarks>
-    /// The cache only serves single-table, autocommit reads: a query with a join, or one run inside an
-    /// explicit transaction, reads live storage and the hint is inert. Cache resolution is reported on
-    /// each query's response — see <see cref="CamusCacheMetadata"/>.
+    /// The cache only serves single-table, autocommit reads: a query with a join, one run inside an
+    /// explicit transaction, or one reading through a view expands to something the cache cannot fence,
+    /// so it reads live storage and the hint is inert. That is reported rather than silent — cache
+    /// resolution, including why a hint was bypassed, is on each query's response
+    /// (see <see cref="CamusCacheMetadata"/>). A materialized view is a physical relation and caches
+    /// like a table.
     /// </remarks>
     /// <param name="source">The query to cache.</param>
     /// <param name="name">The cache family name. Case-insensitive.</param>

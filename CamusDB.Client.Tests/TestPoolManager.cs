@@ -15,6 +15,9 @@ public class TestPoolManager
         //FlurlHttp.ConfigureClient("https://localhost:7141", cli => cli.Settings.HttpClientFactory = new UntrustedCertClientFactory());
     }
 
+    // The session-pool types are obsolete no-ops kept for source compatibility with Spanner-shaped code;
+    // this test pins that they still compile and that a connection built through them works normally.
+#pragma warning disable CS0618
     [Fact]
     public async Task TestCreatePoolManager()
     {
@@ -43,4 +46,5 @@ public class TestPoolManager
 
         Assert.Equal(1, await ping.ExecuteNonQueryAsync());
     }
+#pragma warning restore CS0618
 }

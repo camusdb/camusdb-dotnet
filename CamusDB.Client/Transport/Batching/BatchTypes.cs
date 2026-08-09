@@ -77,6 +77,9 @@ internal sealed class BatchNonQueryResult(int affectedRows, BatchCausalToken tok
 /// </summary>
 internal sealed class GrpcBatchOptions
 {
+    /// <summary>The defaults, as the source of the fallbacks used when a connection string omits a knob.</summary>
+    public static GrpcBatchOptions Default { get; } = new();
+
     /// <summary>Number of long-lived <c>BatchExecute</c> streams multiplexed per endpoint.</summary>
     public int ChannelPoolSize { get; init; } = 2;
 

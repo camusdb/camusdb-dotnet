@@ -135,6 +135,18 @@ public class CamusCommand : DbCommand, ICloneable
 
     protected string GetEndpoint() => transaction?.Endpoint ?? builder.GetEndpoint();
 
+    /// <summary>
+    /// The schema statements that go to the server's DDL endpoint rather than its data endpoint.
+    ///
+    /// <para>The data endpoint forwards a schema statement to the same implementation, so a statement
+    /// missing from this list still executes; what it loses is the direct route, taking an extra parse
+    /// and dispatch on the way. Older servers do <em>not</em> forward and reject the statement as an
+    /// unknown AST node, so the list is also what keeps this driver working against them.</para>
+    ///
+    /// <para><c>REFRESH MATERIALIZED VIEW</c> is deliberately absent: it is a write, not schema — it
+    /// replaces a relation's contents and reports how many rows it wrote, which the DDL endpoint has no
+    /// shape to return.</para>
+    /// </summary>
     private static readonly string[] DdlPrefixes =
     [
         "CREATE TABLE",
@@ -143,6 +155,16 @@ public class CamusCommand : DbCommand, ICloneable
         "CREATE UNIQUE INDEX",
         "CREATE INDEX",
         "DROP INDEX",
+        // Views. "CREATE VIEW" does not cover "CREATE OR REPLACE VIEW" — the match is a prefix test,
+        // so each spelling needs its own entry. The IF EXISTS / IF NOT EXISTS variants do fall under
+        // the base prefixes, since the condition follows the object keyword.
+        "CREATE VIEW",
+        "CREATE OR REPLACE VIEW",
+        "DROP VIEW",
+        "ALTER VIEW",
+        "CREATE MATERIALIZED VIEW",
+        "DROP MATERIALIZED VIEW",
+        "ALTER MATERIALIZED VIEW",
     ];
 
     private static readonly string[] DmlPrefixes =

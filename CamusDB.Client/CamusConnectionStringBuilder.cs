@@ -8,6 +8,7 @@
 
 using CamusDB.Client.Auth;
 using CamusDB.Client.Transport;
+using CamusDB.Client.Transport.Batching;
 
 namespace CamusDB.Client;
 
@@ -18,6 +19,7 @@ public class CamusConnectionStringBuilder
 {
     private readonly string connectionString;
 
+    [Obsolete("CamusDB has no server-side sessions to pool; this property is never consulted. Tune the gRPC stream pool with the ChannelPoolSize= connection-string key instead.")]
     public SessionPoolManager? SessionPoolManager { get; set; }
 
     public Dictionary<string, string> Config { get; } = new();
@@ -79,6 +81,31 @@ public class CamusConnectionStringBuilder
         Mode = ParseEnum<CamusTransactionMode>("TransactionMode"),
         Locking = ParseEnum<CamusLocking>("Locking"),
     };
+
+    /// <summary>
+    /// Batcher tuning for gRPC connections, from <c>ChannelPoolSize=</c>, <c>CoalescingThreshold=</c> and
+    /// <c>CoalescingDelay=</c> (milliseconds). Ignored by the REST transport.
+    ///
+    /// <para><c>ChannelPoolSize</c> is the CamusDB analogue of Spanner's <c>NumChannels</c>: how many
+    /// long-lived <c>BatchExecute</c> streams exist per endpoint. It is <i>not</i> a cap on in-flight
+    /// transactions — many transactions hash onto the same streams and interleave — so the default of 2 is
+    /// right for most workloads. Raise it when many long-running streaming queries per endpoint would
+    /// otherwise queue behind each other on a shared stream.</para>
+    ///
+    /// <para>Out-of-range values (a pool below 1, a threshold below 1, a negative delay) fall back to the
+    /// default rather than throwing, matching how the other keys treat unparseable input.</para>
+    /// </summary>
+    internal GrpcBatchOptions BatchOptions => new()
+    {
+        ChannelPoolSize = ParseInt("ChannelPoolSize", 1, GrpcBatchOptions.Default.ChannelPoolSize),
+        CoalescingThreshold = ParseInt("CoalescingThreshold", 1, GrpcBatchOptions.Default.CoalescingThreshold),
+        CoalescingDelayMs = ParseInt("CoalescingDelay", 0, GrpcBatchOptions.Default.CoalescingDelayMs),
+    };
+
+    private int ParseInt(string key, int minimum, int fallback)
+        => Config.TryGetValue(key, out string? raw) && int.TryParse(raw, out int value) && value >= minimum
+            ? value
+            : fallback;
 
     private T? ParseEnum<T>(string key) where T : struct, Enum
         => Config.TryGetValue(key, out string? raw) && Enum.TryParse(raw, ignoreCase: true, out T value)
@@ -248,7 +275,7 @@ public class CamusConnectionStringBuilder
             CamusTokenProvider auth = TokenProvider;
 
             ICamusTransport inner = Protocol == CamusProtocol.Grpc
-                ? new GrpcTransport(auth)
+                ? new GrpcTransport(auth, BatchOptions)
                 : new RestTransport(this, auth);
 
             return transport = new AuthenticatingTransport(inner, auth);

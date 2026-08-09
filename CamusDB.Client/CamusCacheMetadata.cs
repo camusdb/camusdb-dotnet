@@ -25,7 +25,8 @@ public sealed class CamusCacheMetadata
 
     /// <summary>
     /// Why the cache was bypassed or the entry was not published — e.g. <c>in-flight-write</c>,
-    /// <c>cache-disabled</c>, <c>oversized-result</c>, <c>dependency-limit</c>. Null otherwise.
+    /// <c>cache-disabled</c>, <c>oversized-result</c>, <c>dependency-limit</c>, <c>join</c>, or
+    /// <c>derived-source</c> for a read through a view. Null otherwise.
     /// </summary>
     public string? BypassReason { get; }
 
@@ -91,11 +92,19 @@ public sealed class CamusCacheMetadata
         if (root.TryGetProperty("cachedAtHlc", out JsonElement hlc) && hlc.ValueKind == JsonValueKind.Object)
             cachedAt = new CamusHlcTimestamp
             {
-                L = hlc.TryGetProperty("l", out JsonElement l) && l.TryGetInt64(out long lv) ? lv : 0,
-                C = hlc.TryGetProperty("c", out JsonElement c) && c.TryGetUInt32(out uint cv) ? cv : 0,
+                L = hlc.TryGetProperty("l", out JsonElement l) && l.ValueKind == JsonValueKind.Number
+                    && l.TryGetInt64(out long lv) ? lv : 0,
+                C = hlc.TryGetProperty("c", out JsonElement c) && c.ValueKind == JsonValueKind.Number
+                    && c.TryGetUInt32(out uint cv) ? cv : 0,
             };
 
-        long? ageMs = root.TryGetProperty("ageMs", out JsonElement age) && age.TryGetInt64(out long a) ? a : null;
+        // The kind is checked before the read: the server emits "ageMs": null on every response that is
+        // not a hit, and TryGetInt64 throws on a null element rather than returning false — so reading
+        // it unguarded turns an ordinary miss or bypass into a failed query.
+        long? ageMs = root.TryGetProperty("ageMs", out JsonElement age) && age.ValueKind == JsonValueKind.Number
+            && age.TryGetInt64(out long a)
+                ? a
+                : null;
 
         return new CamusCacheMetadata(status, ReadString(root, "cacheBypassReason"), name, cachedAt, ageMs);
     }

@@ -27,22 +27,9 @@ public class BaseTest
             return cmConnection;
         }
 
-        SessionPoolOptions options = new()
-        {
-            MinimumPooledSessions = 100,
-            MaximumActiveSessions = 200,
-        };
-
         string connectionString = "Endpoint=http://localhost:5095;Database=test";
 
-        SessionPoolManager manager = SessionPoolManager.Create(options);
-
-        builder = new(connectionString)
-        {
-            SessionPoolManager = manager
-        };
-
-        Assert.Equal(builder.SessionPoolManager, manager);
+        builder = new(connectionString);
 
         cmConnection = new(builder);
 

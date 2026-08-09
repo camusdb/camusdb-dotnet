@@ -46,7 +46,8 @@ namespace CamusDB.Client.Transport;
 /// provider (Login has no token yet, Logout is handed the one to revoke), which is what keeps the
 /// provider from re-entering itself while it holds its login gate.</para>
 /// </summary>
-internal sealed class GrpcTransport(CamusTokenProvider auth) : ICamusTransport, ICamusLoginClient, IDisposable
+internal sealed class GrpcTransport(CamusTokenProvider auth, GrpcBatchOptions? batchOptions = null)
+    : ICamusTransport, ICamusLoginClient, IDisposable
 {
     static GrpcTransport()
     {
@@ -55,7 +56,9 @@ internal sealed class GrpcTransport(CamusTokenProvider auth) : ICamusTransport, 
         AppContext.SetSwitch("System.Net.Http.SocketsHttpHandler.Http2UnencryptedSupport", true);
     }
 
-    private static readonly GrpcBatchOptions BatchOptions = new();
+    // Per-transport rather than static: the stream pool and coalescing window are tuned from the
+    // connection string, so two connection strings against different deployments size them independently.
+    private readonly GrpcBatchOptions batchOptions = batchOptions ?? GrpcBatchOptions.Default;
 
     private readonly ConcurrentDictionary<string, ChannelEntry> channels = new(StringComparer.OrdinalIgnoreCase);
 
@@ -70,7 +73,11 @@ internal sealed class GrpcTransport(CamusTokenProvider auth) : ICamusTransport, 
 
     public CamusProtocol Protocol => CamusProtocol.Grpc;
 
-    private sealed class ChannelEntry(GrpcChannel channel, CamusSql.CamusSqlClient client, Func<global::Grpc.Core.Metadata?> headers)
+    private sealed class ChannelEntry(
+        GrpcChannel channel,
+        CamusSql.CamusSqlClient client,
+        Func<global::Grpc.Core.Metadata?> headers,
+        GrpcBatchOptions batchOptions)
     {
         public GrpcChannel Channel { get; } = channel;
         public CamusSql.CamusSqlClient Client { get; } = client;
@@ -80,7 +87,7 @@ internal sealed class GrpcTransport(CamusTokenProvider auth) : ICamusTransport, 
         // only logs in, pings, or runs DDL never needs them, and — since a stream carries the token it
         // was opened with — opening them before the first login would open them unauthenticated.
         private readonly Lazy<GrpcBatcher> batcher = new(
-            () => new GrpcBatcher(BatchOptions, id => new GrpcBatchTransport(id, client, headers())),
+            () => new GrpcBatcher(batchOptions, id => new GrpcBatchTransport(id, client, headers())),
             LazyThreadSafetyMode.ExecutionAndPublication);
 
         // The batcher rebuilds a faulted stream on its own, so the factory reads the current token on
@@ -95,7 +102,7 @@ internal sealed class GrpcTransport(CamusTokenProvider auth) : ICamusTransport, 
         => channels.GetOrAdd(endpoint, ep =>
         {
             GrpcChannel channel = CreateChannel(ep);
-            return new ChannelEntry(channel, new CamusSql.CamusSqlClient(channel), CurrentCallHeaders);
+            return new ChannelEntry(channel, new CamusSql.CamusSqlClient(channel), CurrentCallHeaders, this.batchOptions);
         });
 
     private CamusSql.CamusSqlClient GetClient(string endpoint) => GetEntry(endpoint).Client;
