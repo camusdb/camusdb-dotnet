@@ -26,11 +26,15 @@ public class CamusConnectionStringBuilder
 
     private CamusEndpointPool? endpointPool;
 
-    private ICamusTransport? transport;
+    private volatile ICamusTransport? transport;
 
-    private CamusTokenProvider? tokenProvider;
+    private volatile CamusTokenProvider? tokenProvider;
 
     private CamusPreparedStatementPolicy? preparedStatements;
+
+    /// <summary>Set when this connection string must keep its own identity — see
+    /// <see cref="DetachForExplicitLogin"/>. Read on the lock-free fast paths, so volatile.</summary>
+    private volatile bool privateAuth;
 
     private readonly object transportLock = new();
 
@@ -119,6 +123,41 @@ public class CamusConnectionStringBuilder
     /// <c>Endpoint=</c> must address the server's gRPC port.
     /// </summary>
     public CamusProtocol Protocol => ParseEnum<CamusProtocol>("Protocol") ?? CamusProtocol.Rest;
+
+    /// <summary>
+    /// Timeout in seconds for the backup admin API, from <c>BackupTimeout=</c>. Defaults to 300 (5
+    /// minutes) rather than <see cref="CommandTimeout"/>: taking a full or coordinated backup copies a
+    /// whole node's base image, which routinely outlasts a statement timeout of ten seconds.
+    /// </summary>
+    public int BackupTimeout
+        => Config.TryGetValue("BackupTimeout", out string? raw) && int.TryParse(raw, out int seconds) && seconds > 0
+            ? seconds
+            : 300;
+
+    /// <summary>
+    /// Where the backup admin API lives, from <c>BackupEndpoint=</c>, falling back to <c>Endpoint=</c>.
+    ///
+    /// <para>The backup endpoints are REST/JSON only — they have no SQL form and no gRPC service — so a
+    /// <c>Protocol=grpc</c> connection, whose <c>Endpoint=</c> addresses the gRPC port, must say where the
+    /// HTTP port is. Rather than send HTTP at a gRPC port and fail obscurely, that case is refused with a
+    /// message naming the key to set.</para>
+    ///
+    /// <para>A <c>BackupEndpoint=</c> is used verbatim, with no round-robin: backups are node-level, and a
+    /// coordinated backup must reach the coordinator specifically. Falling back to <c>Endpoint=</c> draws
+    /// from the usual pool.</para>
+    /// </summary>
+    public string GetBackupEndpoint()
+    {
+        if (TryGetSetting(out string? backupEndpoint, "BackupEndpoint"))
+            return backupEndpoint;
+
+        if (Protocol != CamusProtocol.Rest)
+            throw new CamusException(
+                "CADB0000",
+                "The backup admin API is REST-only; a Protocol=grpc connection must set BackupEndpoint= to the server's HTTP endpoint");
+
+        return GetEndpoint();
+    }
 
     /// <summary>
     /// How many distinct statements this connection string keeps prepared on the server, from
@@ -244,23 +283,30 @@ public class CamusConnectionStringBuilder
                     () => CommandTimeout,
                     TokenLifetime);
 
-                // Configured credentials are shared process-wide so repeatedly-rebuilt connections (EF
-                // opens one per operation) reuse a single token. With nothing configured the provider is
-                // inert and stays private to this builder, so a later CamusConnection.LoginAsync only
-                // affects the connections built from this connection string.
-                return tokenProvider = credentials.IsSet
-                    ? CamusTokenProvider.Shared(CamusTokenProvider.SharingKey(credentials, DeploymentKey), Create)
-                    : Create();
+                // Shared process-wide by identity so repeatedly-rebuilt connections (EF opens one per
+                // operation) reuse a single token — and, with nothing configured, a single inert provider,
+                // so the transport keyed beside it can be shared too. A connection string that logs in
+                // explicitly having configured no credentials detaches first, which is what keeps that
+                // login from reaching connections built from another connection string.
+                return tokenProvider = privateAuth
+                    ? Create()
+                    : CamusTokenProvider.Shared(CamusTokenProvider.SharingKey(credentials, DeploymentKey), Create);
             }
         }
     }
 
     /// <summary>
-    /// The transport this builder's connections use, chosen once from <see cref="Protocol"/> and cached
-    /// for the builder's lifetime (a gRPC transport pools long-lived channels, so it must be shared, not
-    /// recreated per call). It is always wrapped in <see cref="AuthenticatingTransport"/>: with no
-    /// credentials configured that wrapper is inert, and wrapping unconditionally means a connection
-    /// authenticated later — via <see cref="CamusConnection.LoginAsync"/> — is covered too.
+    /// The transport this builder's connections use, chosen once from <see cref="Protocol"/>.
+    ///
+    /// <para>Shared process-wide by deployment, identity and transport tuning rather than owned by this
+    /// builder — see <see cref="CamusTransportPool"/> for why: a transport holds the prepared-statement
+    /// registrations, and EF Core builds a builder per <c>DbConnection</c>, so a builder-owned transport
+    /// re-registered every hot statement on every request and never closed the ones it replaced.</para>
+    ///
+    /// <para>It is always wrapped in <see cref="AuthenticatingTransport"/>: with no credentials configured
+    /// that wrapper is inert, and wrapping unconditionally means a connection authenticated later — via
+    /// <see cref="CamusConnection.LoginAsync"/>, which detaches this builder onto a transport of its own
+    /// first — is covered too.</para>
     /// </summary>
     internal ICamusTransport GetTransport()
     {
@@ -274,12 +320,76 @@ public class CamusConnectionStringBuilder
 
             CamusTokenProvider auth = TokenProvider;
 
-            ICamusTransport inner = Protocol == CamusProtocol.Grpc
-                ? new GrpcTransport(auth, BatchOptions)
-                : new RestTransport(this, auth);
+            ICamusTransport Create()
+            {
+                ICamusTransport inner = Protocol == CamusProtocol.Grpc
+                    ? new GrpcTransport(auth, BatchOptions)
+                    : new RestTransport(EndpointPool, auth);
 
-            return transport = new AuthenticatingTransport(inner, auth);
+                return new AuthenticatingTransport(inner, auth);
+            }
+
+            return transport = privateAuth ? Create() : CamusTransportPool.Shared(TransportKey, Create);
         }
+    }
+
+    /// <summary>
+    /// Which transport this connection string may share. The deployment and the identity presented to it,
+    /// so a transport is never reused across servers, protocols or users — the credentials are hashed by
+    /// <see cref="CamusTokenProvider.SharingKey"/> rather than held in a long-lived dictionary key — plus
+    /// the batch tuning, which sizes a gRPC transport's stream pool and so cannot be retrofitted onto one
+    /// that already exists.
+    /// </summary>
+    private string TransportKey
+    {
+        get
+        {
+            GrpcBatchOptions batch = BatchOptions;
+
+            return string.Join(
+                '|',
+                CamusTokenProvider.SharingKey(Credentials, DeploymentKey),
+                batch.ChannelPoolSize,
+                batch.CoalescingThreshold,
+                batch.CoalescingDelayMs);
+        }
+    }
+
+    /// <summary>
+    /// Gives this connection string a token provider and transport of its own, and returns the provider to
+    /// log in with.
+    ///
+    /// <para>Connections that configured no credentials share one inert provider per deployment, so that
+    /// the transport keyed beside it can be shared too. An explicit
+    /// <see cref="CamusConnection.LoginAsync"/> would otherwise authenticate every other connection string
+    /// pointed at the same server that also configured nothing — connections whose caller deliberately
+    /// presented no identity. Detaching first keeps the login where the caller aimed it: at the
+    /// connections built from this connection string, which is exactly what it did when every builder had
+    /// a provider to itself.</para>
+    ///
+    /// <para>Configured credentials are unaffected. Those already share a provider by identity, and a
+    /// login that switches identity has always applied to all of them.</para>
+    /// </summary>
+    internal CamusTokenProvider DetachForExplicitLogin()
+    {
+        if (Credentials.IsSet)
+            return TokenProvider;
+
+        // Same order as GetTransport takes them, which reaches authLock through the TokenProvider getter.
+        lock (transportLock)
+        {
+            lock (authLock)
+            {
+                if (!privateAuth)
+                {
+                    privateAuth = true;
+                    tokenProvider = null;
+                    transport = null;
+                }
+            }
+        }
+
+        return TokenProvider;
     }
 
     private bool TryGetSetting([System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out string? value, params string[] keys)
@@ -294,14 +404,26 @@ public class CamusConnectionStringBuilder
         return false;
     }
 
-    internal string GetEndpoint()
+    internal string GetEndpoint() => EndpointPool.GetNextEndpoint();
+
+    /// <summary>
+    /// The rotation this connection string draws from, shared with every other connection string carrying
+    /// the same <c>Endpoint=</c> list. Sharing is what makes the rotation and the endpoint health it
+    /// depends on mean anything under EF Core, which rebuilds the builder per connection — see
+    /// <see cref="CamusEndpointPool"/>.
+    /// </summary>
+    internal CamusEndpointPool EndpointPool
     {
-        if (!Config.TryGetValue("Endpoint", out string? endpoint) || string.IsNullOrWhiteSpace(endpoint))
-            throw new CamusException("CADB0000", "Endpoint is required");
+        get
+        {
+            if (endpointPool is not null)
+                return endpointPool;
 
-        endpointPool ??= new CamusEndpointPool(endpoint);
+            if (!Config.TryGetValue("Endpoint", out string? endpoint) || string.IsNullOrWhiteSpace(endpoint))
+                throw new CamusException("CADB0000", "Endpoint is required");
 
-        return endpointPool.GetNextEndpoint();
+            return endpointPool ??= CamusEndpointPool.Shared(endpoint);
+        }
     }
 
     /// <summary>
@@ -323,7 +445,7 @@ public class CamusConnectionStringBuilder
 
     internal void MarkEndpointUnreachable(string endpoint)
     {
-        endpointPool?.MarkUnreachable(endpoint);
+        EndpointPool.MarkUnreachable(endpoint);
     }
 
     public override string ToString() => connectionString;

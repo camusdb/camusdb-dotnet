@@ -81,18 +81,20 @@ public class TestConnectionString : BaseTest
     [Fact]
     public void TestConnectionStringEndpointPoolSkipsUnreachableEndpoints()
     {
-        CamusConnectionStringBuilder builder = new("Endpoint=http://localhost:8082,http://localhost:8084,http://localhost:8086;Database=test")
+        // A pool is shared by every builder carrying the same Endpoint= list, so a test that advances the
+        // rotation or quarantines a node needs an endpoint list no other test draws from.
+        CamusConnectionStringBuilder builder = new("Endpoint=http://localhost:8182,http://localhost:8184,http://localhost:8186;Database=test")
         {
 
         };
 
-        Assert.Equal("http://localhost:8082", builder.GetEndpoint());
+        Assert.Equal("http://localhost:8182", builder.GetEndpoint());
 
-        builder.MarkEndpointUnreachable("http://localhost:8084");
+        builder.MarkEndpointUnreachable("http://localhost:8184");
 
-        Assert.Equal("http://localhost:8086", builder.GetEndpoint());
-        Assert.Equal("http://localhost:8082", builder.GetEndpoint());
-        Assert.Equal("http://localhost:8086", builder.GetEndpoint());
+        Assert.Equal("http://localhost:8186", builder.GetEndpoint());
+        Assert.Equal("http://localhost:8182", builder.GetEndpoint());
+        Assert.Equal("http://localhost:8186", builder.GetEndpoint());
     }
 
     [Fact]

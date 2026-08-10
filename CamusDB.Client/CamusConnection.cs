@@ -95,7 +95,9 @@ public sealed class CamusConnection : DbConnection
         ArgumentException.ThrowIfNullOrWhiteSpace(user);
         ArgumentNullException.ThrowIfNull(password);
 
-        return builder.TokenProvider.LoginAsync(user, password, cancellationToken);
+        // Detaches first when the connection string configured no credentials, so the identity minted here
+        // reaches this connection string's connections and no others — see DetachForExplicitLogin.
+        return builder.DetachForExplicitLogin().LoginAsync(user, password, cancellationToken);
     }
 
     /// <summary>
@@ -111,6 +113,19 @@ public sealed class CamusConnection : DbConnection
     /// connection is unauthenticated). Reading it never triggers a login.
     /// </summary>
     public string? AccessToken => builder.TokenProvider.CurrentToken;
+
+    /// <summary>
+    /// The node's online backup administration API: take full/incremental/coordinated backups, list the
+    /// catalog, resolve and validate a restore chain, and run retention.
+    ///
+    /// <para>Server-level and node-wide, not scoped to this connection's <see cref="Database"/> — every
+    /// database on the server shares one storage node, so a backup captures all of them. Requires a
+    /// superuser token when authentication is enabled. Restore is an offline operator procedure and is
+    /// deliberately not exposed here; see <see cref="CamusBackupClient"/>.</para>
+    /// </summary>
+    public CamusBackupClient Backups => backups ??= new CamusBackupClient(builder, builder.TokenProvider);
+
+    private CamusBackupClient? backups;
 
     public override void ChangeDatabase(string databaseName)
     {

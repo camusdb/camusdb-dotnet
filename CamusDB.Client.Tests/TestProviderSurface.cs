@@ -225,23 +225,25 @@ public class TestProviderSurface
     {
         using HttpTest httpTest = new();
 
+        // Its own endpoint list: pools are shared per Endpoint= value, and this test depends on drawing
+        // the first endpoint, which a test that had already rotated or quarantined one would deny it.
         httpTest
-            .ForCallsTo("http://localhost:8082/start-transaction")
+            .ForCallsTo("http://localhost:8282/start-transaction")
             .RespondWithJson(new { status = "ok", txnIdPT = 10, txnIdCounter = 20u });
 
         httpTest
-            .ForCallsTo("http://localhost:8082/execute-sql-non-query")
+            .ForCallsTo("http://localhost:8282/execute-sql-non-query")
             .RespondWithJson(new { status = "ok", rows = 1 });
 
         httpTest
-            .ForCallsTo("http://localhost:8082/commit-transaction")
+            .ForCallsTo("http://localhost:8282/commit-transaction")
             .RespondWithJson(new { status = "ok", txnIdPT = 10, txnIdCounter = 20u });
 
         httpTest
-            .ForCallsTo("http://localhost:8084/*")
+            .ForCallsTo("http://localhost:8284/*")
             .RespondWithJson(new { status = "ok", rows = 1 });
 
-        CamusConnectionStringBuilder builder = new("Endpoint=http://localhost:8082,http://localhost:8084;Database=test");
+        CamusConnectionStringBuilder builder = new("Endpoint=http://localhost:8282,http://localhost:8284;Database=test");
         using CamusConnection connection = new(builder);
 
         CamusTransaction transaction = await connection.BeginTransactionAsync();
@@ -253,10 +255,10 @@ public class TestProviderSurface
         Assert.Equal(1, await command.ExecuteNonQueryAsync());
         await transaction.CommitAsync();
 
-        httpTest.ShouldHaveCalled("http://localhost:8082/start-transaction").Times(1);
-        httpTest.ShouldHaveCalled("http://localhost:8082/execute-sql-non-query").Times(1);
-        httpTest.ShouldHaveCalled("http://localhost:8082/commit-transaction").Times(1);
-        httpTest.ShouldNotHaveCalled("http://localhost:8084/execute-sql-non-query");
+        httpTest.ShouldHaveCalled("http://localhost:8282/start-transaction").Times(1);
+        httpTest.ShouldHaveCalled("http://localhost:8282/execute-sql-non-query").Times(1);
+        httpTest.ShouldHaveCalled("http://localhost:8282/commit-transaction").Times(1);
+        httpTest.ShouldNotHaveCalled("http://localhost:8284/execute-sql-non-query");
     }
 
     [Theory]

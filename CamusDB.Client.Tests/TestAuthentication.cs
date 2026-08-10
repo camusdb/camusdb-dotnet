@@ -109,6 +109,49 @@ public class TestAuthentication
     }
 
     [Fact]
+    public void ConnectionsWithNoCredentialsShareOneInertProvider()
+    {
+        // Sharing the inert provider is what lets the transport keyed beside it be shared, which is what
+        // keeps prepared statements registered once per deployment rather than once per DbContext.
+        CamusConnectionStringBuilder first = new("Endpoint=http://localhost:5395;Database=one");
+        CamusConnectionStringBuilder second = new("Endpoint=http://localhost:5395;Database=two");
+
+        Assert.Same(first.TokenProvider, second.TokenProvider);
+        Assert.False(first.TokenProvider.IsEnabled);
+    }
+
+    [Fact]
+    public void ExplicitLoginDetachesAConnectionStringThatConfiguredNoCredentials()
+    {
+        // Otherwise a LoginAsync would authenticate every other connection string pointed at the same
+        // server that also presented no identity.
+        CamusConnectionStringBuilder loggingIn = new("Endpoint=http://localhost:5495;Database=one");
+        CamusConnectionStringBuilder anonymous = new("Endpoint=http://localhost:5495;Database=two");
+
+        Assert.Same(loggingIn.TokenProvider, anonymous.TokenProvider);
+        Assert.Same(loggingIn.GetTransport(), anonymous.GetTransport());
+
+        CamusTokenProvider detached = loggingIn.DetachForExplicitLogin();
+
+        Assert.Same(detached, loggingIn.TokenProvider);
+        Assert.NotSame(detached, anonymous.TokenProvider);
+        Assert.NotSame(loggingIn.GetTransport(), anonymous.GetTransport());
+    }
+
+    [Fact]
+    public void ExplicitLoginKeepsSharingWhenCredentialsWereConfigured()
+    {
+        // Those already share a provider by identity, and switching identity has always applied to all of
+        // the connection strings presenting it.
+        const string credentials = "User=shared-user;Password=shared-secret";
+
+        CamusConnectionStringBuilder first = new($"Endpoint=http://localhost:5595;Database=one;{credentials}");
+        CamusConnectionStringBuilder second = new($"Endpoint=http://localhost:5595;Database=two;{credentials}");
+
+        Assert.Same(second.TokenProvider, first.DetachForExplicitLogin());
+    }
+
+    [Fact]
     public void DifferentDeploymentsDoNotShareAProvider()
     {
         const string credentials = "User=shared-user;Password=shared-secret";

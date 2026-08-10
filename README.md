@@ -55,6 +55,8 @@ Supported connection string keys:
 | `ChannelPoolSize` | No | gRPC only: long-lived `BatchExecute` streams per endpoint (default: `2`). See [Transport](#transport-rest--grpc). |
 | `CoalescingThreshold` | No | gRPC only: ops a drain must produce before the pump stops waiting for more (default: `10`; `1` disables coalescing). |
 | `CoalescingDelay` | No | gRPC only: milliseconds the pump waits to accumulate a larger batch (default: `2`; `0` disables coalescing). |
+| `BackupEndpoint` | No | HTTP endpoint for the backup admin API. Defaults to `Endpoint`; required with `Protocol=grpc`. See [Backups](#backups). |
+| `BackupTimeout` | No | Backup admin request timeout in seconds (default: `300`). See [Backups](#backups). |
 
 `Endpoint` also supports a comma-separated pool. The client selects endpoints with round-robin routing:
 
@@ -63,7 +65,7 @@ CamusConnectionStringBuilder builder = new(
     "Endpoint=http://localhost:8082,http://localhost:8084,http://localhost:8086;Database=test");
 ```
 
-When a request fails because an endpoint is unreachable, that endpoint is marked unavailable and skipped by later requests made through the same `CamusConnectionStringBuilder`.
+When a request fails because an endpoint is unreachable, that endpoint is set aside for 30 seconds and skipped meanwhile; a node that is still down is set aside again by the next request that draws it. The rotation and that health are shared by every connection carrying the same `Endpoint` value, so they still mean something under EF Core, which builds a connection-string builder per connection.
 
 ### Authentication
 
@@ -227,8 +229,46 @@ Things worth knowing:
 - **Preparing never causes a failure.** If the server declines to register a statement — an older node with no prepared-statement support, or a full server-side cap — it runs inline exactly as before, and a node that has no support at all is only asked once.
 - **Handles are node-local and expire.** The driver treats "unknown statement" as routine, re-registers, and replays the execution once; a load-balanced deployment settles at one registration per node per statement. Under gRPC a handle belongs to the `BatchExecute` stream that minted it, so a rebuilt stream is re-registered transparently.
 - **`MaxAutoPrepare` bounds both sides.** The least recently used statement is dropped and its server-side handle closed, so a workload that generates unbounded distinct SQL — string-concatenated queries, or EF's `IN (…)` expansion, whose text changes with the list length — degrades to inline execution instead of exhausting the server's per-principal cap.
+- **Registrations belong to the deployment, not to the connection.** The driver holds one transport per endpoint, protocol and identity for the life of the process, so a statement is registered once no matter how many connections a request-scoped `DbContext` opens. `MaxAutoPrepare` is a ceiling on what is registered, not a quota each connection spends. Note that the server's cap is per *principal*, spanning every database that principal opens: a deployment with many databases under one login should size `MaxAutoPrepare` against that shared budget.
 
 `CamusConnectionStringBuilder.PreparedStatementCount` and `IsPrepared(sql)` report what is currently registered, for diagnostics.
+
+### Backups
+
+`connection.Backups` exposes the server's **online** backup and point-in-time-recovery administration: taking backups, listing the catalog, resolving a restore chain, and running retention. All of these are safe while the server serves traffic.
+
+```csharp
+// Take a full backup, then an incremental chained onto it.
+CamusBackupInfo full = await connection.Backups.TakeFullBackupAsync();
+CamusBackupInfo incremental = await connection.Backups.TakeIncrementalBackupAsync(full.BackupId);
+
+// Resolve and validate the chain ending at a leaf. Returned root-first.
+IReadOnlyList<CamusBackupInfo> chain = await connection.Backups.GetChainAsync(incremental.BackupId);
+
+// The chain's restorable window is reported on the ROOT entry, not the leaf.
+long? from = chain[0].MinRecoverablePhysicalMs;   // Unix epoch milliseconds
+long? to   = chain[0].MaxRecoverablePhysicalMs;
+
+// List everything in the catalog.
+IReadOnlyList<CamusBackupInfo> catalog = await connection.Backups.ListBackupsAsync();
+
+// Retention: preview first, then apply.
+CamusBackupGcResult preview = await connection.Backups.PreviewGarbageCollectionAsync();   // Applied == false
+CamusBackupGcResult applied = await connection.Backups.CollectGarbageAsync();
+```
+
+Things worth knowing before you use it:
+
+- **Backups are node-wide, not per-database.** Every database on a CamusDB server shares one storage node, so a backup captures all of them at once. Nothing here is scoped to the connection's `Database`.
+- **The server must opt in.** Backups are off until `kahuna.backup_dir` is set in the server's `config.yml`; until then every call fails with `BackupNotConfigured` (HTTP 503).
+- **Superuser only.** With authentication enabled, every call needs a superuser bearer token — authenticate the connection with a superuser account. With authentication *disabled* the server restricts this surface to loopback callers, so a remote client is refused rather than allowed to take an anonymous node-wide backup.
+- **An incremental can silently become a full.** If the parent has aged past the retention floor, the server takes a full backup instead. The call still succeeds; check `WasSubstituted` and `SubstitutionReason` if you want that in an operator log.
+- **`TakeCoordinatedBackupAsync` must reach the coordinator.** Another node refuses with `BackupNotCoordinator`. Pin `BackupEndpoint=` to the coordinator when `Endpoint=` is a multi-node pool.
+- **`GetChainAsync` is the validating read.** A chain that could not be assembled is rejected here rather than at restore time, so it doubles as a "would this backup actually restore?" check.
+- **`BackupTimeout` defaults to 300s**, not the 10s statement `Timeout` — a full backup copies a whole node's base image.
+- **REST only.** These endpoints have no SQL form and no gRPC service, so a `Protocol=grpc` connection must set `BackupEndpoint=` to the server's HTTP endpoint; otherwise the call is refused with a message naming the key.
+
+**Restore is not exposed here.** `POST /v1/restore` rebuilds into a *fresh* data root, after which the operator stops the server and boots a new one against it — there is no hot in-place restore, so it is not an operation an application can drive to completion. It remains an operator runbook step; see the server's `backups-and-point-in-time-recovery` guide.
 
 ### Usage
 

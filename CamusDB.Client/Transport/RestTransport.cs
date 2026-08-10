@@ -19,7 +19,7 @@ namespace CamusDB.Client.Transport;
 /// bookkeeping the ADO surface used before the transport seam existed. Behavior is byte-identical to the
 /// previous inlined code; it now lives behind <see cref="ICamusTransport"/> so gRPC can sit beside it.
 /// </summary>
-internal sealed class RestTransport(CamusConnectionStringBuilder builder, CamusTokenProvider auth) : ICamusTransport
+internal sealed class RestTransport(CamusEndpointPool endpoints, CamusTokenProvider auth) : ICamusTransport
 {
     public CamusProtocol Protocol => CamusProtocol.Rest;
 
@@ -640,7 +640,7 @@ internal sealed class RestTransport(CamusConnectionStringBuilder builder, CamusT
     /// </summary>
     private async Task<CamusException> TranslateAsync(FlurlHttpException ex, string endpoint)
     {
-        CamusEndpointHealth.MarkUnreachableIfTransportFailed(builder, endpoint, ex);
+        CamusEndpointHealth.MarkUnreachableIfTransportFailed(endpoints, endpoint, ex);
 
         return await RestErrorTranslator.TranslateAsync(ex).ConfigureAwait(false);
     }

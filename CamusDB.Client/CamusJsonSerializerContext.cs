@@ -34,4 +34,11 @@ namespace CamusDB.Client;
 [JsonSerializable(typeof(CamusShowBranchesResponse))]
 [JsonSerializable(typeof(CamusShowAncestorsRequest))]
 [JsonSerializable(typeof(CamusShowAncestorsResponse))]
+[JsonSerializable(typeof(CamusBackupInfo))]
+[JsonSerializable(typeof(CamusTakeBackupRequest))]
+[JsonSerializable(typeof(CamusBackupResponse))]
+[JsonSerializable(typeof(CamusBackupListResponse))]
+[JsonSerializable(typeof(CamusBackupGcResponse))]
+[JsonSerializable(typeof(CamusBackupGcDeletion))]
+[JsonSerializable(typeof(CamusBackupGcOrphan))]
 internal sealed partial class CamusJsonSerializerContext : JsonSerializerContext;
