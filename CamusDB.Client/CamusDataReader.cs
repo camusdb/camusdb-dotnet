@@ -222,6 +222,28 @@ public class CamusDataReader : DbDataReader
         return CopyBuffer(data, dataOffset, buffer, bufferOffset, length);
     }
 
+    /// <summary>
+    /// Reads a <c>bytes</c> column as a float32 vector.
+    ///
+    /// <para>A vector is stored as tightly packed little-endian float32 elements with no header (see
+    /// <see cref="CamusVector"/>), so this is the read side of that layout. A <c>NULL</c> embedding
+    /// raises <see cref="InvalidCastException"/> like every other typed accessor; test it with
+    /// <see cref="IsDBNull"/> first.</para>
+    /// </summary>
+    /// <exception cref="CamusException">
+    /// <c>CADB0410</c> when the stored byte count is not a multiple of four.
+    /// </exception>
+    public float[] GetVector(int ordinal)
+    {
+        ref readonly ColumnValue value = ref Cell(ordinal);
+
+        if (value.Type != ColumnType.Bytes)
+            throw new InvalidCastException(
+                $"Column {ordinal} is {value.Type}, not Bytes; a vector is read from a bytes column.");
+
+        return CamusVector.ToFloats(value.BytesValue ?? []);
+    }
+
     public override char GetChar(int ordinal)
     {
         string value = GetString(ordinal);

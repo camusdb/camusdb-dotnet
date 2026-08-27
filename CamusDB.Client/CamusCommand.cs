@@ -152,6 +152,10 @@ public class CamusCommand : DbCommand, ICloneable
         "CREATE TABLE",
         "DROP TABLE",
         "ALTER TABLE",
+        // TRUNCATE is schema, not DML: the server retires the table's whole key-space and commits a
+        // replicated schema entry instead of deleting rows. The TABLE keyword is optional, so the
+        // prefix stops at the verb and covers both "TRUNCATE TABLE t" and "TRUNCATE t".
+        "TRUNCATE",
         "CREATE UNIQUE INDEX",
         "CREATE INDEX",
         "DROP INDEX",
@@ -177,6 +181,22 @@ public class CamusCommand : DbCommand, ICloneable
     private static bool IsDdlStatement(string sql) => StartsWithAny(sql, DdlPrefixes);
 
     private static bool IsDmlStatement(string sql) => StartsWithAny(sql, DmlPrefixes);
+
+    /// <summary>
+    /// The statements that own their internal transaction, which the server refuses inside an explicit
+    /// one with <c>CADB0538</c> (<c>StatementNotAllowedInTransaction</c>).
+    ///
+    /// <para><c>TRUNCATE</c> is the only member today. It commits a replicated schema entry, and a later
+    /// <c>ROLLBACK</c> of the caller's transaction cannot undo that entry — so the server refuses the
+    /// statement rather than promise a rollback it cannot deliver. The driver refuses it before the round
+    /// trip, because the outcome is already known and the local message can name the fix.</para>
+    /// </summary>
+    private static readonly string[] OwnTransactionPrefixes =
+    [
+        "TRUNCATE",
+    ];
+
+    private static bool RunsInOwnTransaction(string sql) => StartsWithAny(sql, OwnTransactionPrefixes);
 
     private static bool StartsWithAny(string sql, string[] prefixes)
     {
@@ -546,6 +566,13 @@ public class CamusCommand : DbCommand, ICloneable
     /// <inheritdoc />
     public async Task<bool> ExecuteDDLAsync(CancellationToken cancellationToken)
     {
+        if (transaction is not null && RunsInOwnTransaction(CommandText))
+            throw new CamusException(
+                "CADB0538",
+                "TRUNCATE runs in its own internal transaction and is refused inside an explicit transaction. " +
+                "It commits a replicated schema entry that a ROLLBACK cannot undo. " +
+                "Commit or roll back this transaction first, then run TRUNCATE.");
+
         TransportSqlRequest request = new()
         {
             Endpoint = GetEndpoint(),

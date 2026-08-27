@@ -5,7 +5,7 @@ using Microsoft.EntityFrameworkCore.Migrations.Operations.Builders;
 namespace CamusDB.EntityFrameworkCore;
 
 /// <summary>
-/// View DDL for migrations.
+/// View DDL, and <c>TRUNCATE TABLE</c>, for migrations.
 /// </summary>
 /// <remarks>
 /// <para>EF Core has no migration operation for views, so a provider that wants them has to emit raw
@@ -95,20 +95,35 @@ public static class CamusMigrationBuilderExtensions
     }
 
     /// <summary>
-    /// Quotes an identifier the way <see cref="CamusSqlGenerationHelper"/> does. A backtick inside the
-    /// name is rejected rather than escaped: CamusDB's lexer trims the delimiters instead of decoding a
-    /// doubled backtick, so there is no spelling that would survive, and emitting one anyway would fail
-    /// midway through the migration as a parse error naming neither the view nor the column.
+    /// Emits <c>TRUNCATE TABLE</c>, which empties a base table without a read or a delete of a single
+    /// row. The table keeps its name, its id, its columns, its indexes and its grants; only its contents
+    /// generation moves. The cost is the same on an empty table and on a billion-row one.
     /// </summary>
-    private static string Delimit(string identifier, string parameterName)
+    /// <remarks>
+    /// <para>The command suppresses the migration transaction, and it has to. <c>TRUNCATE</c> commits a
+    /// replicated schema entry that a <c>ROLLBACK</c> cannot undo, so CamusDB refuses the statement
+    /// inside an explicit transaction (<c>CADB0538</c>) — which is the transaction EF Core wraps a
+    /// migration in. A failure after this step therefore leaves the table emptied.</para>
+    ///
+    /// <para>The previous contents are retained as recoverable retired contents for the server's
+    /// retention window: <c>SHOW ORPHAN TABLES</c> lists them, and
+    /// <c>CREATE TABLE t_before RELINK TO '&lt;id&gt;'</c> brings them back as a separate table. Write the
+    /// migration's <c>Down</c> with that in mind — a truncate has no automatic inverse.</para>
+    ///
+    /// <para>The optimizer's statistics for the new contents start out unmeasured, so run <c>ANALYZE</c>
+    /// once the table is repopulated.</para>
+    /// </remarks>
+    public static OperationBuilder<SqlOperation> TruncateTable(
+        this MigrationBuilder migrationBuilder,
+        string name)
     {
-        if (string.IsNullOrWhiteSpace(identifier))
-            throw new ArgumentException("An identifier cannot be empty.", parameterName);
+        ArgumentNullException.ThrowIfNull(migrationBuilder);
 
-        if (identifier.Contains('`', StringComparison.Ordinal))
-            throw new ArgumentException(
-                $"The identifier '{identifier}' contains a backtick, which CamusDB cannot quote.", parameterName);
-
-        return $"`{identifier}`";
+        return migrationBuilder.Sql(
+            $"TRUNCATE TABLE {Delimit(name, nameof(name))}",
+            suppressTransaction: true);
     }
+
+    private static string Delimit(string identifier, string parameterName)
+        => CamusIdentifier.Delimit(identifier, parameterName);
 }

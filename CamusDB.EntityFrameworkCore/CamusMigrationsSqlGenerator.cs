@@ -359,6 +359,11 @@ public class CamusMigrationsSqlGenerator : MigrationsSqlGenerator
         if (storeType.StartsWith("ARRAY(", StringComparison.Ordinal))
             return storeType;
 
+        // An explicitly sized BYTES(N) — the usual way to declare an embedding column — carries its own
+        // width already. Pass it through rather than fall to the CLR-type arm, which would drop the size.
+        if (storeType.StartsWith("BYTES(", StringComparison.Ordinal))
+            return storeType;
+
         return storeType switch
         {
             "ID" or "OID"          => "OID",
@@ -368,14 +373,14 @@ public class CamusMigrationsSqlGenerator : MigrationsSqlGenerator
             "INT64"                => "INT64",
             "FLOAT64"              => "FLOAT64",
             "FLOAT32" or "REAL"    => "FLOAT32",
-            "BYTES" or "BLOB"      => "BYTES",
+            "BYTES" or "BLOB"      => BytesDdl(col),
             "DATE"                 => "DATE",
             "DATETIME" or "TIMESTAMP" => "DATETIME",
             _ => col.ClrType == typeof(bool) ? "BOOL"
                 : col.ClrType == typeof(float) ? "FLOAT32"
                 : col.ClrType == typeof(double) ? "FLOAT64"
                 : col.ClrType == typeof(int) || col.ClrType == typeof(long) || col.ClrType == typeof(short) ? "INT64"
-                : col.ClrType == typeof(byte[]) ? "BYTES"
+                : col.ClrType == typeof(byte[]) ? BytesDdl(col)
                 : col.ClrType == typeof(DateOnly) ? "DATE"
                 : col.ClrType == typeof(DateTime) || col.ClrType == typeof(DateTimeOffset) ? "DATETIME"
                 : StringDdl(col)
@@ -384,6 +389,15 @@ public class CamusMigrationsSqlGenerator : MigrationsSqlGenerator
 
     private static string StringDdl(ColumnOperation col)
         => col.MaxLength is int n and > 0 ? $"STRING({n.ToString(CultureInfo.InvariantCulture)})" : "STRING";
+
+    /// <summary>
+    /// <c>BYTES(N)</c> from <c>HasMaxLength(n)</c>, where <c>N</c> is a maximum byte count rather than a
+    /// fixed width. A vector column is declared this way — a 768-element float32 embedding is
+    /// <c>bytes(3072)</c> — so dropping the size would leave every embedding column at the server's
+    /// default maximum. The size does not pin a dimension; a <c>CHECK (vector_dims(c) = 768)</c> does.
+    /// </summary>
+    private static string BytesDdl(ColumnOperation col)
+        => col.MaxLength is int n and > 0 ? $"BYTES({n.ToString(CultureInfo.InvariantCulture)})" : "BYTES";
 
     private static string FormatDefaultValue(object value) => value switch
     {

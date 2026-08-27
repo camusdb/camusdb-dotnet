@@ -144,6 +144,11 @@ public class CamusDatabaseCreator : RelationalDatabaseCreator
         if (storeType.StartsWith("ARRAY(", StringComparison.Ordinal))
             return storeType;
 
+        // An explicitly sized BYTES(N) — the usual way to declare an embedding column — carries its own
+        // width already. Pass it through rather than fall to the CLR-type arm, which would drop the size.
+        if (storeType.StartsWith("BYTES(", StringComparison.Ordinal))
+            return storeType;
+
         return storeType switch
         {
             "ID" or "OID"             => "OID",
@@ -153,14 +158,14 @@ public class CamusDatabaseCreator : RelationalDatabaseCreator
             "INT64"                   => "INT64",
             "FLOAT64"                 => "FLOAT64",
             "FLOAT32" or "REAL"       => "FLOAT32",
-            "BYTES" or "BLOB"         => "BYTES",
+            "BYTES" or "BLOB"         => BytesDdl(property),
             "DATE"                    => "DATE",
             "DATETIME" or "TIMESTAMP" => "DATETIME",
             _ => clrType == typeof(bool) ? "BOOL"
                 : clrType == typeof(float) ? "FLOAT32"
                 : clrType == typeof(double) ? "FLOAT64"
                 : clrType == typeof(int) || clrType == typeof(long) || clrType == typeof(short) ? "INT64"
-                : clrType == typeof(byte[]) ? "BYTES"
+                : clrType == typeof(byte[]) ? BytesDdl(property)
                 : clrType == typeof(DateOnly) ? "DATE"
                 : clrType == typeof(DateTime) || clrType == typeof(DateTimeOffset) ? "DATETIME"
                 : StringDdl(property)
@@ -169,4 +174,13 @@ public class CamusDatabaseCreator : RelationalDatabaseCreator
 
     private static string StringDdl(IProperty property)
         => property.GetMaxLength() is int n and > 0 ? $"STRING({n})" : "STRING";
+
+    /// <summary>
+    /// <c>BYTES(N)</c> from <c>HasMaxLength(n)</c>, where <c>N</c> is a maximum byte count rather than a
+    /// fixed width. A vector column is declared this way — a 768-element float32 embedding is
+    /// <c>bytes(3072)</c> — so dropping the size would leave every embedding column at the server's
+    /// default maximum. The size does not pin a dimension; a <c>CHECK (vector_dims(c) = 768)</c> does.
+    /// </summary>
+    private static string BytesDdl(IProperty property)
+        => property.GetMaxLength() is int n and > 0 ? $"BYTES({n})" : "BYTES";
 }
