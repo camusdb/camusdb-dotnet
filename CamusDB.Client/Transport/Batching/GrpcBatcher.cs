@@ -132,10 +132,12 @@ internal sealed class GrpcBatcher : IAsyncDisposable
     // ─── Prepared statements ──────────────────────────────────────────────────
 
     /// <summary>
-    /// The cache key for a statement on a slot. Database and SQL together, separated by a character
-    /// neither can contain, so two different statements can never collide into one entry.
+    /// The cache key for a statement on a slot: the (database, sql) pair itself. Holding the two strings
+    /// rather than a joined copy keeps the components distinct — so two different statements can never
+    /// collide into one entry — and spends no allocation per lookup, which a warm prepared execution
+    /// performs on every call.
     /// </summary>
-    private static string StatementKey(string database, string sql) => database + "\n" + sql;
+    private readonly record struct StatementKey(string Database, string Sql);
 
     /// <summary>
     /// Returns this slot's registration for the statement, preparing it first if the slot has none for
@@ -153,7 +155,7 @@ internal sealed class GrpcBatcher : IAsyncDisposable
         int slotIndex, string database, string sql, CancellationToken ct)
     {
         Slot slot = slots[slotIndex];
-        string key = StatementKey(database, sql);
+        StatementKey key = new(database, sql);
 
         while (true)
         {
@@ -213,7 +215,7 @@ internal sealed class GrpcBatcher : IAsyncDisposable
     public void InvalidatePrepared(int slotIndex, string database, string sql, PreparedSlotEntry stale)
     {
         Slot slot = slots[slotIndex];
-        string key = StatementKey(database, sql);
+        StatementKey key = new(database, sql);
 
         if (slot.Prepared.TryGetValue(key, out Task<PreparedSlotEntry>? existing)
             && existing.IsCompletedSuccessfully
@@ -228,7 +230,7 @@ internal sealed class GrpcBatcher : IAsyncDisposable
     /// releasing it.</summary>
     public IReadOnlyList<(int SlotIndex, PreparedSlotEntry Entry)> TakePrepared(string database, string sql)
     {
-        string key = StatementKey(database, sql);
+        StatementKey key = new(database, sql);
         List<(int, PreparedSlotEntry)> taken = [];
 
         foreach (Slot slot in slots)
@@ -258,8 +260,8 @@ internal sealed class GrpcBatcher : IAsyncDisposable
         }
     }
 
-    private static void Forget(Slot slot, string key, Task<PreparedSlotEntry> expected)
-        => slot.Prepared.TryRemove(new KeyValuePair<string, Task<PreparedSlotEntry>>(key, expected));
+    private static void Forget(Slot slot, StatementKey key, Task<PreparedSlotEntry> expected)
+        => slot.Prepared.TryRemove(new KeyValuePair<StatementKey, Task<PreparedSlotEntry>>(key, expected));
 
     // ─── Pump ─────────────────────────────────────────────────────────────────
 
@@ -498,7 +500,7 @@ internal sealed class GrpcBatcher : IAsyncDisposable
         /// finished registration rather than the result, so concurrent first executions of the same
         /// statement await one PREPARE instead of each sending their own.
         /// </summary>
-        public readonly ConcurrentDictionary<string, Task<PreparedSlotEntry>> Prepared = new(StringComparer.Ordinal);
+        public readonly ConcurrentDictionary<StatementKey, Task<PreparedSlotEntry>> Prepared = new();
     }
 
     private readonly record struct QueuedItem(

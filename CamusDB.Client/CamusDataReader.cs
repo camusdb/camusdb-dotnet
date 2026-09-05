@@ -8,6 +8,7 @@
 using System.Collections;
 using System.Data.Common;
 using System.Globalization;
+using System.Runtime.InteropServices;
 
 namespace CamusDB.Client;
 
@@ -170,13 +171,111 @@ public class CamusDataReader : DbDataReader
 
     private static object?[] ConvertArray(in ColumnValue value)
     {
-        List<ColumnValue> elements = value.ArrayValues ?? [];
-        object?[] result = new object?[elements.Count];
+        ReadOnlySpan<ColumnValue> elements = CollectionsMarshal.AsSpan(value.ArrayValues);
+        object?[] result = new object?[elements.Length];
 
-        for (int i = 0; i < elements.Count; i++)
-            result[i] = elements[i].Type == ColumnType.Null ? null : ConvertToClr(elements[i]);
+        for (int i = 0; i < elements.Length; i++)
+            result[i] = elements[i].Type == ColumnType.Null ? null : ConvertToClr(in elements[i]);
 
         return result;
+    }
+
+    /// <summary>
+    /// Builds a common typed array straight from the stored cells, with no boxed intermediate array and
+    /// no reflective element assignment. Returns null — meaning "use the general conversion" — for any
+    /// element type the fast path does not represent exactly, so numeric conversion, overflow, null and
+    /// nested-array behaviour stay the responsibility of the one general path.
+    /// </summary>
+    private static object? MaterializeTypedArray(in ColumnValue column, Type target)
+    {
+        ReadOnlySpan<ColumnValue> elements = CollectionsMarshal.AsSpan(column.ArrayValues);
+
+        if (target == typeof(long[]))
+        {
+            long[] result = new long[elements.Length];
+
+            for (int i = 0; i < elements.Length; i++)
+            {
+                if (elements[i].Type != ColumnType.Integer64)
+                    return null;
+
+                result[i] = elements[i].LongValue;
+            }
+
+            return result;
+        }
+
+        if (target == typeof(double[]))
+        {
+            double[] result = new double[elements.Length];
+
+            for (int i = 0; i < elements.Length; i++)
+            {
+                if (elements[i].Type != ColumnType.Float64)
+                    return null;
+
+                result[i] = elements[i].FloatValue;
+            }
+
+            return result;
+        }
+
+        if (target == typeof(bool[]))
+        {
+            bool[] result = new bool[elements.Length];
+
+            for (int i = 0; i < elements.Length; i++)
+            {
+                if (elements[i].Type != ColumnType.Bool)
+                    return null;
+
+                result[i] = elements[i].BoolValue;
+            }
+
+            return result;
+        }
+
+        if (target == typeof(Guid[]))
+        {
+            Guid[] result = new Guid[elements.Length];
+
+            for (int i = 0; i < elements.Length; i++)
+            {
+                if (elements[i].Type != ColumnType.Uuid)
+                    return null;
+
+                result[i] = elements[i].AsGuid();
+            }
+
+            return result;
+        }
+
+        if (target == typeof(string[]))
+        {
+            // A null element is representable here, and the general path stores it as null too.
+            string?[] result = new string?[elements.Length];
+
+            for (int i = 0; i < elements.Length; i++)
+            {
+                switch (elements[i].Type)
+                {
+                    case ColumnType.String or ColumnType.Id:
+                        result[i] = elements[i].StrValue ?? "";
+                        break;
+
+                    case ColumnType.Null:
+                        result[i] = null;
+                        break;
+
+                    default:
+                        return null;
+                }
+            }
+
+            return result;
+        }
+
+        return null;
     }
 
     public override int GetValues(object[] values)
@@ -254,10 +353,31 @@ public class CamusDataReader : DbDataReader
         return value[0];
     }
 
+    /// <summary>
+    /// Copies characters out of a text column. The chunked contract invites repeated calls over one
+    /// value, so the range is copied straight out of the string: materializing the whole value as a
+    /// <c>char</c>[] per call made a full read of an <c>N</c>-character column in <c>K</c> chunks copy
+    /// roughly <c>N × K</c> characters through <c>K</c> temporary arrays.
+    /// </summary>
     public override long GetChars(int ordinal, long dataOffset, char[]? buffer, int bufferOffset, int length)
     {
-        char[] data = GetString(ordinal).ToCharArray();
-        return CopyBuffer(data, dataOffset, buffer, bufferOffset, length);
+        string data = GetString(ordinal);
+
+        if (dataOffset < 0)
+            throw new ArgumentOutOfRangeException(nameof(dataOffset));
+
+        if (dataOffset >= data.Length)
+            return 0;
+
+        int available = data.Length - (int)dataOffset;
+        int copied = Math.Min(available, length);
+
+        // Spans rather than string.CopyTo: these raise the same exception types Array.Copy raised on the
+        // previous implementation, so an invalid destination range still fails the way it always did.
+        if (buffer is not null)
+            data.AsSpan((int)dataOffset, copied).CopyTo(buffer.AsSpan(bufferOffset));
+
+        return copied;
     }
 
     public override DateTime GetDateTime(int ordinal)
@@ -323,6 +443,15 @@ public class CamusDataReader : DbDataReader
         if (target.IsArray && Cell(ordinal) is { Type: ColumnType.Array })
         {
             ref readonly ColumnValue arrayColumn = ref Cell(ordinal);
+
+            // The requested type is what the boxed conversion already produces; hand it over rather than
+            // copying it into a second array of the same shape.
+            if (target == typeof(object[]))
+                return (T)(object)ConvertArray(in arrayColumn);
+
+            if (MaterializeTypedArray(in arrayColumn, target) is { } fast)
+                return (T)fast;
+
             Type elementType = target.GetElementType()!;
             object?[] source = ConvertArray(in arrayColumn);
             Array typed = Array.CreateInstance(elementType, source.Length);

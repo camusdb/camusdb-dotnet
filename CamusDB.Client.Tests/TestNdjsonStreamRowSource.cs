@@ -135,4 +135,70 @@ public class TestNdjsonStreamRowSource
         public bool Disposed { get; private set; }
         public void Dispose() => Disposed = true;
     }
+
+    // ─── Reused row storage ───────────────────────────────────────────────────
+    //
+    // The source decodes into two alternating arrays instead of allocating one per row. These tests pin
+    // the behaviour that reuse could otherwise break: cells a later row omits, values a caller kept from
+    // an earlier row, and a row that fails to decode after a good one.
+
+    [Fact]
+    public async Task ShortRowAfterFullRowLeavesNoCellsFromTheRowBefore()
+    {
+        await using CamusDataReader reader = await ReaderFor(
+            Header + "\n" +
+            """["6849f3aa", 42, true]""" + "\n" +
+            """["6849f3bb"]""" + "\n" +
+            """{"status":"ok","total":2}""" + "\n");
+
+        Assert.True(await reader.ReadAsync());
+        Assert.Equal(42L, reader.GetInt64(1));
+        Assert.True(reader.GetBoolean(2));
+
+        Assert.True(await reader.ReadAsync());
+        Assert.Equal("6849f3bb", reader.GetString(0));
+        Assert.True(reader.IsDBNull(1));
+        Assert.True(reader.IsDBNull(2));
+    }
+
+    [Fact]
+    public async Task ValuesKeptFromAnEarlierRowStayIntact()
+    {
+        // Bytes=7, Array=10: both carry a reference the reader hands out. Reusing the outer cell array
+        // must not disturb what an earlier row's value points at.
+        const string schema =
+            """{"status":"ok","columns":[{"name":"b","type":7},{"name":"a","type":10}]}""";
+
+        await using CamusDataReader reader = await ReaderFor(
+            schema + "\n" +
+            """["AQID", [1, 2, 3]]""" + "\n" +
+            """["BAUG", [9]]""" + "\n" +
+            """{"status":"ok","total":2}""" + "\n");
+
+        Assert.True(await reader.ReadAsync());
+        byte[] firstBytes = (byte[])reader.GetValue(0);
+        object?[] firstArray = (object?[])reader.GetValue(1);
+
+        Assert.True(await reader.ReadAsync());
+        Assert.Equal(new byte[] { 4, 5, 6 }, (byte[])reader.GetValue(0));
+
+        // The values taken from the first row are unchanged by the second read.
+        Assert.Equal(new byte[] { 1, 2, 3 }, firstBytes);
+        Assert.Equal(new object?[] { 1L, 2L, 3L }, firstArray);
+    }
+
+    [Fact]
+    public async Task MalformedRowAfterAValidRowThrowsAndLeavesTheStreamReadable()
+    {
+        await using CamusDataReader reader = await ReaderFor(
+            Header + "\n" +
+            """["a", 1, true]""" + "\n" +
+            """["b", 2, tru""" + "\n" +
+            """{"status":"ok","total":2}""" + "\n");
+
+        Assert.True(await reader.ReadAsync());
+        Assert.Equal("a", reader.GetString(0));
+
+        await Assert.ThrowsAnyAsync<Exception>(async () => await reader.ReadAsync());
+    }
 }

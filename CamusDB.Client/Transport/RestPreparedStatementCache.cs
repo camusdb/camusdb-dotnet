@@ -33,11 +33,14 @@ internal sealed class RestPreparedStatement(string statementId, IReadOnlyList<st
 /// </summary>
 internal sealed class RestPreparedStatementCache
 {
-    private readonly ConcurrentDictionary<string, Task<RestPreparedStatement>> statements = new(StringComparer.Ordinal);
+    /// <summary>
+    /// The key is the (endpoint, database, sql) triple itself rather than a joined string. The three
+    /// components hash and compare ordinally exactly as the joined form did, and no lookup copies the SQL
+    /// into a temporary key — which a warm prepared execution would otherwise do on every statement.
+    /// </summary>
+    private readonly ConcurrentDictionary<StatementKey, Task<RestPreparedStatement>> statements = new();
 
-    /// <summary>Database and SQL cannot contain a newline boundary that would let two different statements
-    /// collide into one entry, and the endpoint is a URL, so the parts are unambiguous joined this way.</summary>
-    private static string Key(string endpoint, string database, string sql) => $"{endpoint}\n{database}\n{sql}";
+    private readonly record struct StatementKey(string Endpoint, string Database, string Sql);
 
     /// <summary>
     /// Returns the registration for a statement, creating it via <paramref name="prepare"/> if this
@@ -47,7 +50,7 @@ internal sealed class RestPreparedStatementCache
     public async Task<RestPreparedStatement> GetOrAddAsync(
         string endpoint, string database, string sql, Func<Task<RestPreparedStatement>> prepare)
     {
-        string key = Key(endpoint, database, sql);
+        StatementKey key = new(endpoint, database, sql);
 
         while (true)
         {
@@ -93,7 +96,7 @@ internal sealed class RestPreparedStatementCache
     /// </summary>
     public void Invalidate(string endpoint, string database, string sql, RestPreparedStatement stale)
     {
-        string key = Key(endpoint, database, sql);
+        StatementKey key = new(endpoint, database, sql);
 
         if (statements.TryGetValue(key, out Task<RestPreparedStatement>? existing)
             && existing.IsCompletedSuccessfully
@@ -107,21 +110,23 @@ internal sealed class RestPreparedStatementCache
     /// closing it.</summary>
     public IReadOnlyList<(string Endpoint, RestPreparedStatement Statement)> Take(string database, string sql)
     {
-        string suffix = $"\n{database}\n{sql}";
         List<(string, RestPreparedStatement)> taken = [];
 
-        foreach (KeyValuePair<string, Task<RestPreparedStatement>> entry in statements)
+        foreach (KeyValuePair<StatementKey, Task<RestPreparedStatement>> entry in statements)
         {
-            if (!entry.Key.EndsWith(suffix, StringComparison.Ordinal))
+            // Component comparison, not a suffix match: the endpoint is whatever the key already holds,
+            // so nothing has to be sliced back out of a joined string.
+            if (!string.Equals(entry.Key.Database, database, StringComparison.Ordinal) ||
+                !string.Equals(entry.Key.Sql, sql, StringComparison.Ordinal))
                 continue;
 
             if (statements.TryRemove(entry.Key, out Task<RestPreparedStatement>? removed) && removed.IsCompletedSuccessfully)
-                taken.Add((entry.Key[..^suffix.Length], removed.Result));
+                taken.Add((entry.Key.Endpoint, removed.Result));
         }
 
         return taken;
     }
 
-    private void Remove(string key, Task<RestPreparedStatement> expected)
-        => statements.TryRemove(new KeyValuePair<string, Task<RestPreparedStatement>>(key, expected));
+    private void Remove(StatementKey key, Task<RestPreparedStatement> expected)
+        => statements.TryRemove(new KeyValuePair<StatementKey, Task<RestPreparedStatement>>(key, expected));
 }

@@ -212,7 +212,17 @@ public class CamusCommand : DbCommand, ICloneable
 
     /// <summary>Bound parameters as the transport-neutral dictionary, or null when the command has none —
     /// the common case for EF-generated reads, which would otherwise allocate an empty dictionary each.</summary>
-    protected Dictionary<string, ColumnValue>? GetCommandParameters()
+    protected Dictionary<string, ColumnValue>? GetCommandParameters() => BuildCommandParameters(uuidAsString: true);
+
+    /// <summary>
+    /// The same dictionary, built for one protocol. A UUID reaches REST as its canonical string, so that
+    /// path keeps the string form; the gRPC codec serializes the raw big-endian halves and never reads it,
+    /// so that path skips formatting a 36-character string per bound <see cref="Guid"/>.
+    /// </summary>
+    internal Dictionary<string, ColumnValue>? GetCommandParameters(CamusProtocol protocol)
+        => BuildCommandParameters(uuidAsString: protocol != CamusProtocol.Grpc);
+
+    private Dictionary<string, ColumnValue>? BuildCommandParameters(bool uuidAsString)
     {
         if (Parameters.Count == 0)
             return null;
@@ -226,13 +236,13 @@ public class CamusCommand : DbCommand, ICloneable
 
             commandParameters.Add(
                 parameter.ParameterName,
-                BuildColumnValue(parameter.ParameterName, parameter.ColumnType, parameter.Value, parameter.ArrayElementType));
+                BuildColumnValue(parameter.ParameterName, parameter.ColumnType, parameter.Value, parameter.ArrayElementType, uuidAsString));
         }
 
         return commandParameters;
     }
 
-    private static ColumnValue BuildColumnValue(string name, ColumnType columnType, object? value, ColumnType arrayElementType)
+    private static ColumnValue BuildColumnValue(string name, ColumnType columnType, object? value, ColumnType arrayElementType, bool uuidAsString = true)
     {
         if (value is null or DBNull || columnType == ColumnType.Null)
             return new() { Type = ColumnType.Null };
@@ -252,7 +262,7 @@ public class CamusCommand : DbCommand, ICloneable
             // the big-endian halves on its side (see ColumnValue's JsonConstructor). The raw halves are
             // carried too so the gRPC codec serializes them directly instead of re-parsing the string.
             case ColumnType.Uuid when value is Guid gu:
-                return UuidColumnValue(gu);
+                return UuidColumnValue(gu, uuidAsString);
 
             case ColumnType.Uuid when value is string us:
                 return new() { Type = columnType, StrValue = us };
@@ -276,7 +286,7 @@ public class CamusCommand : DbCommand, ICloneable
                 return new() { Type = columnType, LongValue = ToDateTimeUtc(name, value).Ticks };
 
             case ColumnType.Array:
-                return BuildArrayColumnValue(name, value, arrayElementType);
+                return BuildArrayColumnValue(name, value, arrayElementType, uuidAsString);
 
             case ColumnType.String:
                 return new() { Type = ColumnType.String, StrValue = Convert.ToString(value, CultureInfo.InvariantCulture) ?? "" };
@@ -286,10 +296,13 @@ public class CamusCommand : DbCommand, ICloneable
         }
     }
 
-    private static ColumnValue BuildArrayColumnValue(string name, object value, ColumnType arrayElementType)
+    private static ColumnValue BuildArrayColumnValue(string name, object value, ColumnType arrayElementType, bool uuidAsString = true)
     {
         if (value is string || value is not IEnumerable enumerable)
             throw new CamusException("CADB0400", $"Array parameter '{name}' requires an IEnumerable value (got {value.GetType().Name})");
+
+        if (BuildTypedArrayColumnValue(name, value, arrayElementType, uuidAsString) is { } typed)
+            return typed;
 
         List<object?> items = [];
         foreach (object? item in enumerable)
@@ -315,13 +328,125 @@ public class CamusCommand : DbCommand, ICloneable
         {
             elements.Add(item is null or DBNull
                 ? new() { Type = ColumnType.Null }
-                : BuildColumnValue(name, elementType, item, ColumnType.Null));
+                : BuildColumnValue(name, elementType, item, ColumnType.Null, uuidAsString));
         }
 
         return new() { Type = ColumnType.Array, ArrayElementType = elementType, ArrayValues = elements };
     }
 
-    private static ColumnValue UuidColumnValue(in Guid guid)
+    /// <summary>
+    /// Builds the value for an array parameter held in a CLR array of a known element type, or returns
+    /// null so the caller takes the general path.
+    ///
+    /// <para>Only arrays are eligible, and only of element types whose runtime type is their declared
+    /// type. That restriction is what makes the shortcut equivalent: the general path stages every item
+    /// in a <see cref="List{T}"/> first because an arbitrary <see cref="IEnumerable"/> may be single-use,
+    /// may throw part way, or may have side effects, and because it infers the element type from the
+    /// first non-null item's runtime type. An array has none of those properties, so its elements convert
+    /// straight into the final list — one pre-sized list instead of a staging list plus a boxed element
+    /// per item.</para>
+    /// </summary>
+    private static ColumnValue? BuildTypedArrayColumnValue(string name, object value, ColumnType arrayElementType, bool uuidAsString) => value switch
+    {
+        long[] items => BuildScalarArray(name, items, arrayElementType, ColumnType.Integer64, uuidAsString,
+            static v => new ColumnValue { Type = ColumnType.Integer64, LongValue = v }),
+
+        int[] items => BuildScalarArray(name, items, arrayElementType, ColumnType.Integer64, uuidAsString,
+            static v => new ColumnValue { Type = ColumnType.Integer64, LongValue = v }),
+
+        double[] items => BuildScalarArray(name, items, arrayElementType, ColumnType.Float64, uuidAsString,
+            static v => new ColumnValue { Type = ColumnType.Float64, FloatValue = v }),
+
+        bool[] items => BuildScalarArray(name, items, arrayElementType, ColumnType.Bool, uuidAsString,
+            static v => new ColumnValue { Type = ColumnType.Bool, BoolValue = v }),
+
+        Guid[] items => BuildScalarArray(name, items, arrayElementType, ColumnType.Uuid, uuidAsString,
+            uuidAsString ? UuidWithStringForm : UuidWithoutStringForm),
+
+        string?[] items => BuildStringArray(name, items, arrayElementType, uuidAsString),
+
+        _ => null
+    };
+
+    // Held as fields so the Guid element encoder is one cached delegate per form, rather than a closure
+    // built per array parameter.
+    private static readonly Func<Guid, ColumnValue> UuidWithStringForm = static v => UuidColumnValue(v);
+
+    private static readonly Func<Guid, ColumnValue> UuidWithoutStringForm = static v => UuidColumnValue(v, includeStringForm: false);
+
+    /// <summary>
+    /// The typed path for an array of a non-nullable element type. Every element carries a value, so the
+    /// inferred type is the array's own element type — the same answer the general path reaches from the
+    /// first item's runtime type. An empty array infers nothing, exactly as before.
+    /// </summary>
+    private static ColumnValue BuildScalarArray<T>(
+        string name, T[] items, ColumnType declaredElementType, ColumnType naturalElementType, bool uuidAsString, Func<T, ColumnValue> encode)
+        where T : struct
+    {
+        ColumnType elementType = declaredElementType != ColumnType.Null
+            ? declaredElementType
+            : items.Length > 0 ? naturalElementType : ColumnType.Null;
+
+        List<ColumnValue> elements = new(items.Length);
+
+        // A declared type other than the array's own still converts through the general element builder,
+        // so an explicitly typed parameter keeps its conversion and overflow behaviour.
+        if (elementType == naturalElementType)
+        {
+            foreach (T item in items)
+                elements.Add(encode(item));
+        }
+        else
+        {
+            foreach (T item in items)
+                elements.Add(BuildColumnValue(name, elementType, item, ColumnType.Null, uuidAsString));
+        }
+
+        return new() { Type = ColumnType.Array, ArrayElementType = elementType, ArrayValues = elements };
+    }
+
+    /// <summary>
+    /// The typed path for <see cref="string"/>[], whose elements can be null — so it infers from the
+    /// first non-null element and reports an all-null array the same way the general path does.
+    /// </summary>
+    private static ColumnValue BuildStringArray(string name, string?[] items, ColumnType declaredElementType, bool uuidAsString)
+    {
+        ColumnType elementType = declaredElementType;
+
+        if (elementType == ColumnType.Null)
+        {
+            foreach (string? item in items)
+            {
+                if (item is null)
+                    continue;
+
+                elementType = ColumnType.String;
+                break;
+            }
+
+            if (elementType == ColumnType.Null && items.Length > 0)
+                throw new CamusException("CADB0400", $"Cannot infer element type for array parameter '{name}'; set CamusParameter.ArrayElementType explicitly");
+        }
+
+        List<ColumnValue> elements = new(items.Length);
+
+        foreach (string? item in items)
+        {
+            elements.Add(item is null
+                ? new() { Type = ColumnType.Null }
+                : BuildColumnValue(name, elementType, item, ColumnType.Null, uuidAsString));
+        }
+
+        return new() { Type = ColumnType.Array, ArrayElementType = elementType, ArrayValues = elements };
+    }
+
+    /// <summary>
+    /// The wire form of a <see cref="Guid"/> parameter: always the raw big-endian halves, plus the
+    /// canonical string when the destination transport reads one. REST sends the string and the server
+    /// re-splits it; the gRPC codec writes the halves straight into the request, so
+    /// <paramref name="includeStringForm"/> is false there and no string is formatted.
+    /// </summary>
+    private static ColumnValue UuidColumnValue(in Guid guid, bool includeStringForm = true)
     {
         Span<byte> bytes = stackalloc byte[16];
         guid.TryWriteBytes(bytes, bigEndian: true, out _);
@@ -329,7 +454,7 @@ public class CamusCommand : DbCommand, ICloneable
         return new()
         {
             Type = ColumnType.Uuid,
-            StrValue = guid.ToString(),
+            StrValue = includeStringForm ? guid.ToString() : null,
             UuidHigh = System.Buffers.Binary.BinaryPrimitives.ReadInt64BigEndian(bytes[..8]),
             LongValue = System.Buffers.Binary.BinaryPrimitives.ReadInt64BigEndian(bytes[8..]),
         };
@@ -439,7 +564,7 @@ public class CamusCommand : DbCommand, ICloneable
             Endpoint = endpoint,
             Database = builder.Config["Database"],
             Sql = GetRequestTarget(),
-            Parameters = GetCommandParameters(),
+            Parameters = GetCommandParameters(builder.GetTransport().Protocol),
             TxnIdPT = transaction?.TxnIdPT,
             TxnIdCounter = transaction?.TxnIdCounter,
             StreamSlot = transaction?.StreamSlot,
@@ -472,7 +597,7 @@ public class CamusCommand : DbCommand, ICloneable
             Endpoint = endpoint,
             Database = builder.Config["Database"],
             Sql = GetRequestTarget(),
-            Parameters = GetCommandParameters(),
+            Parameters = GetCommandParameters(builder.GetTransport().Protocol),
             TxnIdPT = transaction?.TxnIdPT,
             TxnIdCounter = transaction?.TxnIdCounter,
             StreamSlot = transaction?.StreamSlot,
@@ -508,7 +633,7 @@ public class CamusCommand : DbCommand, ICloneable
             Endpoint = endpoint,
             Database = builder.Config["Database"],
             Sql = GetRequestTarget(),
-            Parameters = GetCommandParameters(),
+            Parameters = GetCommandParameters(builder.GetTransport().Protocol),
             TxnIdPT = transaction?.TxnIdPT,
             TxnIdCounter = transaction?.TxnIdCounter,
             StreamSlot = transaction?.StreamSlot,

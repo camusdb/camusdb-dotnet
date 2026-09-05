@@ -71,6 +71,37 @@ internal static class PreparedStatementBinder
     }
 
     /// <summary>
+    /// Binds in the same order and with the same rules as <see cref="Bind"/>, but hands each value to
+    /// <paramref name="emit"/> instead of collecting them, for a transport whose wire representation is
+    /// not a list of <see cref="ColumnValue"/>.
+    ///
+    /// <para>Every declared placeholder is resolved before the first value is emitted, so a missing
+    /// parameter is still reported before any value fails to encode — the order the list-building
+    /// overload produced, and the order that decides whether a command falls back to inline execution or
+    /// reports a bad value.</para>
+    /// </summary>
+    public static void BindInto<TState>(
+        IReadOnlyList<string> parameterNames,
+        IReadOnlyDictionary<string, ColumnValue>? parameters,
+        TState state,
+        Action<TState, ColumnValue> emit)
+    {
+        foreach (string name in parameterNames)
+        {
+            if (!TryLookup(parameters, name, out _))
+                throw new CamusException(
+                    "CADB0400",
+                    $"Prepared statement declares parameter '{name}' but no value was bound for it");
+        }
+
+        foreach (string name in parameterNames)
+        {
+            TryLookup(parameters, name, out ColumnValue value);
+            emit(state, value);
+        }
+    }
+
+    /// <summary>
     /// Finds the value for a published placeholder name.
     ///
     /// <para>Matching is exact, and deliberately so. The server publishes names verbatim, including the

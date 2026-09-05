@@ -26,6 +26,12 @@ internal sealed class Utf8LineReader(Stream stream, int initialCapacity = 8192) 
     private byte[] buffer = ArrayPool<byte>.Shared.Rent(initialCapacity);
     private int start;    // first unconsumed byte
     private int end;      // one past the last valid byte
+
+    // First byte no search has looked at yet. Without it, every read of an incomplete line rescanned the
+    // whole line from 'start' again, so a line of N bytes arriving in fragments of b cost O(N² / b)
+    // scanning — which short reads from a network stream produce routinely.
+    private int searched;
+
     private bool eof;
 
     /// <summary>Next line as a slice of the internal buffer, or null at end of stream.</summary>
@@ -70,15 +76,19 @@ internal sealed class Utf8LineReader(Stream stream, int initialCapacity = 8192) 
 
     private bool TryTakeBufferedLine(out ReadOnlyMemory<byte> line)
     {
-        int newline = Array.IndexOf(buffer, (byte)'\n', start, end - start);
+        int newline = Array.IndexOf(buffer, (byte)'\n', searched, end - searched);
         if (newline < 0)
         {
+            // Everything up to 'end' has now been examined; the next search resumes at whatever the next
+            // read appends.
+            searched = end;
             line = default;
             return false;
         }
 
         line = Slice(start, newline);
         start = newline + 1;
+        searched = start;
         return true;
     }
 
@@ -90,6 +100,7 @@ internal sealed class Utf8LineReader(Stream stream, int initialCapacity = 8192) 
 
         ReadOnlyMemory<byte> line = Slice(start, end);
         start = end;
+        searched = end;
         return line;
     }
 
@@ -112,6 +123,7 @@ internal sealed class Utf8LineReader(Stream stream, int initialCapacity = 8192) 
         {
             Buffer.BlockCopy(buffer, start, buffer, 0, end - start);
             end -= start;
+            searched -= start;
             start = 0;
             return;
         }
@@ -126,7 +138,7 @@ internal sealed class Utf8LineReader(Stream stream, int initialCapacity = 8192) 
     {
         byte[] rented = buffer;
         buffer = [];
-        start = end = 0;
+        start = end = searched = 0;
         if (rented.Length > 0)
             ArrayPool<byte>.Shared.Return(rented);
     }

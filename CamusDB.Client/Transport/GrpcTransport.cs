@@ -623,8 +623,13 @@ internal sealed class GrpcTransport(CamusTokenProvider auth, GrpcBatchOptions? b
     {
         SqlRequest wire = new() { StatementId = entry.StatementId };
 
-        foreach (ColumnValue value in PreparedStatementBinder.Bind(entry.ParameterNames, request.Parameters, static v => v))
-            wire.PositionalParameters.Add(GrpcValueCodec.Encode(value));
+        // Encoded straight into the repeated field: a List<ColumnValue> in between is not the wire
+        // representation here, and ColumnValue is a large struct, so the list was pure copying.
+        PreparedStatementBinder.BindInto(
+            entry.ParameterNames,
+            request.Parameters,
+            wire.PositionalParameters,
+            static (positional, value) => positional.Add(GrpcValueCodec.Encode(value)));
 
         return ApplyExecutionContext(wire, request);
     }

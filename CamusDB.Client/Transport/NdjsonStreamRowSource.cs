@@ -24,7 +24,7 @@ namespace CamusDB.Client.Transport;
 ///
 /// Lines are distinguished by their first JSON token: objects are the header / trailer, arrays are rows.
 /// Row cells use the identical compact-raw positional encoding as the buffered endpoint, so decoding is
-/// shared through <see cref="CamusResultSet.DecodeRow"/>.
+/// shared through <see cref="CamusResultSet.DecodeRowInto"/>.
 ///
 /// <para><b>In-band failure:</b> because the 200 header (and possibly rows) can already be on the wire
 /// before an autocommit transaction commits, a conflict that surfaces mid-stream cannot change the HTTP
@@ -59,6 +59,14 @@ internal sealed class NdjsonStreamRowSource : CamusRowSource
     private ColumnValue[]? current;
     private bool finished;
 
+    // Row storage, reused across rows so a long result does not leave one ColumnValue[] of garbage per
+    // row behind it. Two arrays rather than one: a decode always fills 'scratch', which is never the
+    // array a caller is currently reading through, so a row that fails to decode cannot half-overwrite
+    // the row before it. Only the outer array is reused — byte arrays and nested lists a cell points at
+    // are freshly decoded values and keep their contents after later reads.
+    private ColumnValue[] scratch;
+    private ColumnValue[] spare;
+
     private NdjsonStreamRowSource(
         IDisposable? responseHandle, Stream stream, Utf8LineReader reader, string[] names, ColumnType[] types)
     {
@@ -67,6 +75,8 @@ internal sealed class NdjsonStreamRowSource : CamusRowSource
         this.reader = reader;
         this.names = names;
         this.types = types;
+        scratch = new ColumnValue[types.Length];
+        spare = new ColumnValue[types.Length];
     }
 
     public override string[] ColumnNames => names;
@@ -150,7 +160,9 @@ internal sealed class NdjsonStreamRowSource : CamusRowSource
         return ref current[ordinal];
     }
 
-    private async Task<ColumnValue[]?> ReadNextRowAsync(CancellationToken cancellationToken)
+    // ValueTask, not Task: a line is often already in the reader's buffer, and that read completes
+    // synchronously — a Task there is one allocation per row for a result that never suspended.
+    private async ValueTask<ColumnValue[]?> ReadNextRowAsync(CancellationToken cancellationToken)
         => ReadNextRow(await ReadNonEmptyLineAsync(reader, cancellationToken).ConfigureAwait(false));
 
     /// <summary>
@@ -172,7 +184,15 @@ internal sealed class NdjsonStreamRowSource : CamusRowSource
         JsonElement root = doc.RootElement;
 
         if (root.ValueKind == JsonValueKind.Array)
-            return CamusResultSet.DecodeRow(root, types);
+        {
+            CamusResultSet.DecodeRowInto(root, types, scratch);
+
+            // Publish the array just filled and keep the other one for the next decode, so the row the
+            // caller is reading is never the row being written.
+            ColumnValue[] decoded = scratch;
+            (scratch, spare) = (spare, scratch);
+            return decoded;
+        }
 
         // Object => trailer. This is the terminal line; a failed status is an in-band error.
         finished = true;

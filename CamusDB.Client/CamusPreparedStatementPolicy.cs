@@ -81,7 +81,10 @@ internal sealed class CamusPreparedStatementPolicy
     public static CamusPreparedStatementPolicy Shared(string key, Func<CamusPreparedStatementPolicy> factory)
         => SharedPolicies.GetOrAdd(key, _ => factory());
 
-    private readonly Dictionary<string, Entry> entries = new(StringComparer.Ordinal);
+    // Keyed by the (database, sql) pair itself rather than by a joined string: the pair hashes and
+    // compares the same two strings ordinally, without copying the SQL into a temporary key on every
+    // lookup — and a hot statement is looked up on every execution.
+    private readonly Dictionary<(string Database, string Sql), Entry> entries = [];
 
     private readonly LinkedList<Entry> recency = new();
 
@@ -110,7 +113,7 @@ internal sealed class CamusPreparedStatementPolicy
     public bool IsPrepared(string database, string sql)
     {
         lock (mutex)
-            return entries.TryGetValue(Key(database, sql), out Entry? entry) && entry.State == EntryState.Prepared;
+            return entries.TryGetValue((database, sql), out Entry? entry) && entry.State == EntryState.Prepared;
     }
 
     /// <summary>Statements currently registered. For tests and diagnostics.</summary>
@@ -201,7 +204,7 @@ internal sealed class CamusPreparedStatementPolicy
     {
         lock (mutex)
         {
-            if (entries.TryGetValue(Key(database, sql), out Entry? entry))
+            if (entries.TryGetValue((database, sql), out Entry? entry))
                 entry.State = EntryState.Prepared;
         }
     }
@@ -215,7 +218,7 @@ internal sealed class CamusPreparedStatementPolicy
     {
         lock (mutex)
         {
-            if (entries.TryGetValue(Key(database, sql), out Entry? entry))
+            if (entries.TryGetValue((database, sql), out Entry? entry))
                 entry.State = EntryState.Refused;
         }
     }
@@ -232,12 +235,10 @@ internal sealed class CamusPreparedStatementPolicy
     {
         lock (mutex)
         {
-            if (entries.Remove(Key(database, sql), out Entry? entry))
+            if (entries.Remove((database, sql), out Entry? entry))
                 recency.Remove(entry.Node!);
         }
     }
-
-    private static string Key(string database, string sql) => database + "\n" + sql;
 
     /// <summary>
     /// Finds or creates the entry for a statement and moves it to the most-recent end, evicting the
@@ -245,7 +246,7 @@ internal sealed class CamusPreparedStatementPolicy
     /// </summary>
     private Entry Touch(string database, string sql, ref (string Database, string Sql)? evicted)
     {
-        string key = Key(database, sql);
+        (string Database, string Sql) key = (database, sql);
 
         if (entries.TryGetValue(key, out Entry? entry))
         {
@@ -257,7 +258,7 @@ internal sealed class CamusPreparedStatementPolicy
         if (entries.Count >= MaxAutoPrepare && recency.First is { } oldest)
         {
             recency.RemoveFirst();
-            entries.Remove(Key(oldest.Value.Database, oldest.Value.Sql));
+            entries.Remove((oldest.Value.Database, oldest.Value.Sql));
 
             // Only a registered statement is worth telling the caller about; the rest were never more
             // than a counter.
