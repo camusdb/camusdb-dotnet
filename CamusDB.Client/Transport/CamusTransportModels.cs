@@ -70,6 +70,37 @@ internal sealed class TransportSqlRequest
     public bool HasTransaction => TxnIdPT.HasValue && TxnIdCounter.HasValue;
 }
 
+/// <summary>
+/// A protocol-neutral row insert handed to an <see cref="ICamusTransport"/>. The typed row-level
+/// insert (<see cref="CamusInsertCommand"/>) names a table and a column-to-value map rather than SQL
+/// text, so it cannot ride <see cref="TransportSqlRequest"/> — but it is otherwise an ordinary
+/// statement, and goes through the same transport (and therefore the same authorization, endpoint
+/// health and error translation) as everything else.
+/// </summary>
+internal sealed class TransportInsertRequest
+{
+    public required string Endpoint { get; init; }
+
+    public required string Database { get; init; }
+
+    public required string Table { get; init; }
+
+    /// <summary>The row, keyed by column name. Values are typed wire objects, never SQL text.</summary>
+    public IReadOnlyDictionary<string, ColumnValue>? Values { get; init; }
+
+    /// <summary>Explicit transaction to join; see <see cref="TransportSqlRequest.TxnIdPT"/>.</summary>
+    public long? TxnIdPT { get; init; }
+
+    public uint? TxnIdCounter { get; init; }
+
+    /// <summary>See <see cref="TransportSqlRequest.StreamSlot"/>.</summary>
+    public int? StreamSlot { get; init; }
+
+    public int TimeoutSeconds { get; init; }
+
+    public bool HasTransaction => TxnIdPT.HasValue && TxnIdCounter.HasValue;
+}
+
 /// <summary>A statement registered with the server: the placeholder names it declares, in binding order,
 /// verbatim including the leading <c>@</c>.</summary>
 internal sealed class PreparedStatementInfo(IReadOnlyList<string> parameterNames)

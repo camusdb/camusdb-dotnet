@@ -6,7 +6,7 @@
  * file that was distributed with this source code.
  */
 
-using System.Security;
+using System.Security.Cryptography;
 using System.Runtime.CompilerServices;
 
 namespace CamusDB.Core.Util.ObjectIds;
@@ -17,69 +17,29 @@ namespace CamusDB.Core.Util.ObjectIds;
  * The 12-byte ObjectId value consists of:
  * 
  * a 4-byte timestamp value, representing the ObjectId's creation, measured in seconds since the Unix epoch
- * a 5-byte random value generated once per process. This random value is unique to the machine and process.
- * a 3-byte incrementing counter, initialized to a random value
+ * a 5-byte random value generated once per process
+ * a 3-byte counter, initialized to a random value
  * 
  * https://docs.mongodb.com/manual/reference/method/ObjectId/
+ *
+ * The 5-byte per-process value and the counter's starting point come from the cryptographic random
+ * number generator. They used to be derived from the machine name's hash, the process id and
+ * System.Random, all of which an outsider can guess or enumerate — so a row's identifier disclosed the
+ * neighbouring identifiers. It is still an identifier and not a secret: the timestamp is in plain sight
+ * and the counter is sequential by design. Nothing should treat one as a capability. But what can be
+ * predicted from outside is now only what the format itself publishes.
  */
 public sealed class CamusObjectIdGenerator
 {
-    private static readonly int __staticMachine = (GetMachineHash() + GetAppDomainId()) & 0x00ffffff;
+    /// <summary>The 5-byte per-process value, split the way it is laid out: 3 bytes in <c>b</c>'s high
+    /// bits and 2 bytes spanning <c>b</c>'s low byte and <c>c</c>'s high byte.</summary>
+    private static readonly int __staticMachine = RandomNumberGenerator.GetInt32(0x01000000);
 
-    private static readonly short __staticPid = GetPid();
+    private static readonly short __staticPid = (short)RandomNumberGenerator.GetInt32(0x00010000);
 
-    private static int __staticIncrement = (new System.Random()).Next();
-
-    private static int processId;
-
-    private static int currentDomainId;
-
-    private static int machineHash;
+    private static int __staticIncrement = RandomNumberGenerator.GetInt32(int.MaxValue);
 
     private static readonly DateTime epoch = new(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc);
-
-    [MethodImpl(MethodImplOptions.NoInlining)]
-    private static int GetCurrentProcessId()
-    {
-        if (processId == 0)
-            processId = Environment.ProcessId;
-        return processId;
-    }
-
-    private static int GetAppDomainId()
-    {
-        if (currentDomainId == 0)
-            currentDomainId = AppDomain.CurrentDomain.Id;
-        return currentDomainId;
-    }
-
-    private static int GetMachineHash()
-    {
-        if (machineHash == 0)
-        {
-            string machineName = GetMachineName();
-            machineHash = 0x00ffffff & machineName.GetHashCode(); // use first 3 bytes of hash
-        }
-        return machineHash;
-    }
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static string GetMachineName()
-    {
-        return Environment.MachineName;
-    }
-
-    private static short GetPid()
-    {
-        try
-        {
-            return (short)GetCurrentProcessId(); // use low order two bytes only
-        }
-        catch (SecurityException)
-        {
-            return 0;
-        }
-    }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static int GetTimestampFromDateTime(DateTime dateTime)

@@ -57,6 +57,7 @@ Supported connection string keys:
 | `CoalescingDelay` | No | gRPC only: milliseconds the pump waits to accumulate a larger batch (default: `2`; `0` disables coalescing). |
 | `BackupEndpoint` | No | HTTP endpoint for the backup admin API. Defaults to `Endpoint`; required with `Protocol=grpc`. See [Backups](#backups). |
 | `BackupTimeout` | No | Backup admin request timeout in seconds (default: `300`). See [Backups](#backups). |
+| `AllowInsecureCredentials` | No | `true` waives the client-side refusal to send credentials to a remote plaintext endpoint. See [TLS](#tls). |
 
 `Endpoint` also supports a comma-separated pool. The client selects endpoints with round-robin routing:
 
@@ -66,6 +67,20 @@ CamusConnectionStringBuilder builder = new(
 ```
 
 When a request fails because an endpoint is unreachable, that endpoint is set aside for 30 seconds and skipped meanwhile; a node that is still down is set aside again by the next request that draws it. The rotation and that health are shared by every connection carrying the same `Endpoint` value, so they still mean something under EF Core, which builds a connection-string builder per connection.
+
+**How the string is parsed.** Keys are matched without regard to case and are trimmed, so `password=`, `Password=` and ` Password ` all reach the same key. A repeated key is an error rather than a silent first-wins.
+
+An unquoted value is trimmed and ends at the next `;`. Wrap a value in single or double quotes to keep a semicolon or surrounding spaces, and double the quote character to include one:
+
+```csharp
+CamusConnectionStringBuilder builder = new(
+    "Endpoint=https://db.example:5095;Database=test;User=app;Password='pa;ss''word'");
+// Password is: pa;ss'word
+```
+
+`builder.ToString()` returns the string as written, credentials included. Use `builder.ToRedactedString()` — or the static `CamusConnectionStringBuilder.Redact(...)` — for anything that is logged: it masks `Password`, `Pwd` and `AccessToken` and leaves everything else readable. The EF Core provider reports the redacted form in its options debug info.
+
+A `CamusConnection` keeps the connection string it was built from. Assigning a different one throws `NotSupportedException`, because nothing re-reads the property: the connection would keep authenticating with the original credentials while reporting the new ones. Build a new connection instead.
 
 ### Authentication
 
@@ -125,6 +140,15 @@ One consequence worth knowing: the token is attached when a `BatchExecute` strea
 With authentication enabled the server refuses credential-bearing requests over plaintext (`RequireTlsWhenAuthEnabled`, on by default), exempting loopback so single-host development works without certificates. Against any non-loopback deployment use `https://` endpoints, or the server answers `CADB0519`.
 
 When TLS terminates in front of the node (ingress, sidecar, service mesh) that hop is invisible to the server, so it would otherwise reject every forwarded request. Start it with `--require-tls-when-auth-enabled false`, or set `require_tls_when_auth_enabled: false` in `config.yml`, and keep the plaintext hop inside the trust boundary.
+
+**The client refuses first.** A connection string that carries credentials — `Password=` or `AccessToken=` — against an endpoint that is neither `https://` nor loopback is rejected when the builder is constructed, with `CADB0519`. The server's own check is the right one, but it only fires after the password has crossed the wire, and a deployment can switch it off; this one fires before anything leaves the process. `BackupEndpoint` is held to the same rule — it receives the connection's own token, which the backup admin API requires to be superuser-grade — and must name the same deployment as `Endpoint`, since a token is only meaningful to the deployment that minted it.
+
+Set `AllowInsecureCredentials=true` for the terminating-proxy case above, where the plaintext hop is inside the trust boundary:
+
+```csharp
+CamusConnectionStringBuilder builder = new(
+    "Endpoint=http://camus.internal:5095;Database=test;User=app;Password=app-secret;AllowInsecureCredentials=true");
+```
 
 #### Error codes
 
@@ -406,6 +430,15 @@ DateOnly  day      = reader.GetFieldValue<DateOnly>(reader.GetOrdinal("day"));
 object?[] tags     = (object?[])reader.GetValue(reader.GetOrdinal("tags"));
 ```
 
+#### Identifiers and inline literals
+
+The driver never puts a parameter value into SQL text: values travel as typed wire objects and the server binds them. A few places do compose text — the admin DDL the gRPC transport builds (`CREATE DATABASE`, `DROP DATABASE`, `SHOW BRANCHES`), the EF Core migration and `EnsureCreated` DDL, and the cache hints — and those follow two rules that come from CamusDB's lexer:
+
+- **An identifier is delimited with backticks, and a name carrying a backtick is refused.** The server trims the delimiters rather than decoding a doubled backtick, so doubling would neutralize nothing.
+- **A string literal doubles its quotes, and a value with a backslash immediately before a quote, or a trailing backslash, is refused.** The lexer reads a backslash and the character after it as one unit, so neither shape can be spelled: the value's own text would end the literal and the rest would parse as SQL.
+
+Both raise `ArgumentException` naming the offending value. They apply to identifiers and seed data that an application derives at runtime — tenant provisioning, a dynamic schema, a data-driven migration — which is the case where a name is not something the developer wrote.
+
 #### Insert Rows
 
 ```csharp
@@ -441,6 +474,8 @@ insert.Parameters.Add("@enabled", ColumnType.Bool, true);
 
 int insertedRows = await insert.ExecuteNonQueryAsync();
 ```
+
+`CreateInsertCommand` names a table and binds its columns, so no SQL is composed. It runs through the connection's transport like every other statement — carrying the bearer token, replaying a rejected one, and marking an unreachable endpoint — and works on both `Protocol=rest` and `Protocol=grpc`.
 
 See [Data Types](#data-types) above for inserting `bytes`, `float32`, `date`, `datetime` and `array(T)` values.
 
@@ -537,6 +572,8 @@ query that carried no hint, so ordinary queries are unaffected.
 Both transports report it. Over gRPC the verdict rides the query terminator rather than a response
 envelope — the server only knows it once the result set has been produced — so it is available on the
 buffered `ExecuteReaderAsync` path, not on `ExecuteStreamReaderAsync` (see the streaming caveats above).
+
+A cache family name is emitted into the SQL as text, where nothing can be escaped, so it is held to a safe character set: letters, digits and `_ - . :`, at most 128 characters. Anything else raises `ArgumentException` rather than being composed into the statement — which matters when the name comes from request-derived text, such as a tenant name keying a cache family.
 
 Evict entries manually — both are scoped to the current database:
 

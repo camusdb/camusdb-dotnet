@@ -16,6 +16,11 @@ namespace CamusDB.Client.Transport;
 /// layer keys its retry/refresh decisions off — falling back to the raw response text and finally the
 /// exception message. Shared by every REST caller (the transport and the login client) so all of them
 /// surface identical exceptions.
+///
+/// <para>Every message the far end supplies goes through <see cref="CamusErrorText.Sanitize"/> first.
+/// The text ends up in an exception that applications log verbatim, and none of it is this driver's:
+/// it comes from the server, from an intermediary, or from the HTTP client — which puts the full
+/// request URL in its own message.</para>
 /// </summary>
 internal static class RestErrorTranslator
 {
@@ -30,15 +35,15 @@ internal static class RestErrorTranslator
                 CamusErrorResponse? errorResponse = JsonSerializer.Deserialize(response, CamusJsonSerializerContext.Default.CamusErrorResponse);
 
                 if (errorResponse is not null)
-                    return new CamusException(errorResponse.Code ?? "CADB0000", errorResponse.Message ?? "");
+                    return new CamusException(errorResponse.Code ?? "CADB0000", CamusErrorText.Sanitize(errorResponse.Message));
             }
             catch (JsonException)
             {
             }
 
-            return new CamusException("CADB0000", response);
+            return new CamusException("CADB0000", CamusErrorText.Sanitize(response));
         }
 
-        return new CamusException("CADB0000", ex.Message);
+        return new CamusException("CADB0000", CamusErrorText.Sanitize(ex.Message));
     }
 }

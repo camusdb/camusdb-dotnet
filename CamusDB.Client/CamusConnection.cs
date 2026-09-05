@@ -34,8 +34,31 @@ public sealed class CamusConnection : DbConnection
 
     private ConnectionState state = ConnectionState.Closed;
 
+    /// <summary>
+    /// The connection string this connection was built from.
+    ///
+    /// <para>It cannot be changed to a different one. The credentials, endpoints and transport are
+    /// resolved from the <see cref="CamusConnectionStringBuilder"/> handed to the constructor, and
+    /// nothing re-reads this property — so assigning a new string used to leave the connection
+    /// authenticating with the original credentials while reporting the new ones. Build a new
+    /// <see cref="CamusConnection"/> instead. Assigning the same value is accepted, which is what
+    /// Entity Framework does when it configures a connection it created.</para>
+    /// </summary>
+    /// <exception cref="NotSupportedException">The value differs from the one this connection was built with.</exception>
     [AllowNull]
-    public override string ConnectionString { get; set; }
+    public override string ConnectionString
+    {
+        get => connectionString;
+        set
+        {
+            if (!string.Equals(value ?? "", connectionString, StringComparison.Ordinal))
+                throw new NotSupportedException(
+                    "A CamusConnection's connection string is fixed when the connection is created. " +
+                    "Create a new CamusConnection from a new CamusConnectionStringBuilder instead.");
+        }
+    }
+
+    private readonly string connectionString;
 
     public override string Database => builder.Config.TryGetValue("Database", out string? database) ? database : "";
 
@@ -56,7 +79,9 @@ public sealed class CamusConnection : DbConnection
 
     public CamusConnection(CamusConnectionStringBuilder builder)
     {
-        ConnectionString = builder.ToString();
+        ArgumentNullException.ThrowIfNull(builder);
+
+        connectionString = builder.ToString();
         this.builder = builder;
     }
 

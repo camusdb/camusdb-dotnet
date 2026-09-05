@@ -156,8 +156,10 @@ public class TestAuthentication
     {
         const string credentials = "User=shared-user;Password=shared-secret";
 
-        CamusConnectionStringBuilder first = new($"Endpoint=http://host-b:5095;Database=db;{credentials}");
-        CamusConnectionStringBuilder second = new($"Endpoint=http://host-c:5095;Database=db;{credentials}");
+        // https, not http: a connection string that carries credentials to a remote plaintext endpoint is
+        // refused outright — see CamusConnectionStringBuilder.EnsureCredentialsAreNotSentInClear.
+        CamusConnectionStringBuilder first = new($"Endpoint=https://host-b:5095;Database=db;{credentials}");
+        CamusConnectionStringBuilder second = new($"Endpoint=https://host-c:5095;Database=db;{credentials}");
 
         Assert.NotSame(first.TokenProvider, second.TokenProvider);
     }
@@ -500,6 +502,18 @@ public class TestAuthentication
 
         public Task<CamusRowSource> ExecuteQueryStreamAsync(TransportSqlRequest request, CancellationToken cancellationToken)
             => throw new NotSupportedException();
+
+        // Shares the counter with ExecuteNonQueryAsync: the insert route is an ordinary statement as far
+        // as the authenticating decorator is concerned, and is covered by the same replay rules.
+        public Task<int> InsertAsync(TransportInsertRequest request, CancellationToken cancellationToken)
+        {
+            Calls++;
+
+            if (Calls <= FailuresBeforeSuccess)
+                throw new CamusException(FailureCode, "rejected");
+
+            return Task.FromResult(1);
+        }
 
         public Task<bool> ExecuteDdlAsync(TransportSqlRequest request, CancellationToken cancellationToken)
             => throw new NotSupportedException();

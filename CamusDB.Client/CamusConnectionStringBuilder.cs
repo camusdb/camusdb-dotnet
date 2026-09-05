@@ -22,7 +22,12 @@ public class CamusConnectionStringBuilder
     [Obsolete("CamusDB has no server-side sessions to pool; this property is never consulted. Tune the gRPC stream pool with the ChannelPoolSize= connection-string key instead.")]
     public SessionPoolManager? SessionPoolManager { get; set; }
 
-    public Dictionary<string, string> Config { get; } = new();
+    /// <summary>
+    /// The parsed keys. Keys are matched without regard to case, so <c>password=</c> reaches the same
+    /// entry as <c>Password=</c> — a lowercase key used to be dropped silently, which left the driver
+    /// connecting with no credentials at all against a server that happened to allow it.
+    /// </summary>
+    public Dictionary<string, string> Config { get; } = new(StringComparer.OrdinalIgnoreCase);
 
     private CamusEndpointPool? endpointPool;
 
@@ -40,6 +45,24 @@ public class CamusConnectionStringBuilder
 
     private readonly object authLock = new();
 
+    /// <summary>
+    /// Parses a <c>key=value;key=value</c> connection string.
+    ///
+    /// <para>Keys are matched without regard to case and are trimmed, so <c>password=</c> and
+    /// <c> Password =</c> both reach the <c>Password</c> entry. A repeated key is an error rather than a
+    /// silent first-wins: the two spellings usually disagree, and the one that lost used to disappear
+    /// without a diagnostic.</para>
+    ///
+    /// <para>An unquoted value is trimmed and ends at the next <c>;</c>. A value that must carry a
+    /// semicolon, or leading or trailing spaces, is written in single or double quotes
+    /// (<c>Password='p;w'</c>), doubling the quote character to include it (<c>Password='p''w'</c>).
+    /// Without quoting such a password had no spelling at all — it was silently truncated at the
+    /// semicolon.</para>
+    ///
+    /// <para>A segment with no <c>=</c> is ignored, which is what an empty or whitespace-only connection
+    /// string relies on.</para>
+    /// </summary>
+    /// <exception cref="CamusException">CADB0000 when a key appears twice, or a quoted value is unclosed.</exception>
     public CamusConnectionStringBuilder(string connectionString)
     {
         this.connectionString = connectionString;
@@ -47,16 +70,142 @@ public class CamusConnectionStringBuilder
         if (string.IsNullOrWhiteSpace(connectionString))
             return;
 
-        string[] settings = connectionString.Split(";");        
-
-        foreach (string setting in settings)
+        foreach (Setting setting in EnumerateSettings(connectionString))
         {
-            string[] varParts = setting.Split("=", 2);
-            if (varParts.Length != 2)
-                continue;
+            string key = connectionString.Substring(setting.KeyStart, setting.KeyLength);
 
-            Config.TryAdd(varParts[0], varParts[1]);
+            if (!Config.TryAdd(key, setting.Value(connectionString)))
+                throw new CamusException(
+                    "CADB0000",
+                    $"The connection string sets '{key}' more than once. Keys are matched without regard to case; remove the duplicate.");
         }
+
+        EnsureCredentialsAreNotSentInClear();
+    }
+
+    /// <summary>One parsed key/value pair, as positions in the connection string. Spans rather than
+    /// substrings so parsing a builder — which Entity Framework does once per connection — allocates only
+    /// the strings that are kept.</summary>
+    private readonly struct Setting(int keyStart, int keyLength, int valueStart, int valueLength, bool quoted, char quote)
+    {
+        public int KeyStart { get; } = keyStart;
+
+        public int KeyLength { get; } = keyLength;
+
+        public int ValueStart { get; } = valueStart;
+
+        public int ValueLength { get; } = valueLength;
+
+        /// <summary>True when the value was written in quotes, so its text still carries doubled quotes.</summary>
+        public bool Quoted { get; } = quoted;
+
+        public char Quote { get; } = quote;
+
+        public string Value(string source)
+        {
+            string raw = source.Substring(ValueStart, ValueLength);
+
+            return Quoted ? raw.Replace(new string(Quote, 2), Quote.ToString(), StringComparison.Ordinal) : raw;
+        }
+    }
+
+    private static List<Setting> EnumerateSettings(string source)
+    {
+        List<Setting> settings = [];
+        int position = 0;
+
+        while (position < source.Length)
+        {
+            // Key: up to the next '=' or ';'.
+            int keyStart = position;
+            while (position < source.Length && source[position] != '=' && source[position] != ';')
+                position++;
+
+            if (position >= source.Length || source[position] == ';')
+            {
+                // A segment with no '=' carries nothing to set. Skip it and continue with the next.
+                position++;
+                continue;
+            }
+
+            int keyEnd = position;       // at '='
+            position++;                  // past '='
+
+            (int keyTrimmedStart, int keyTrimmedLength) = Trim(source, keyStart, keyEnd);
+
+            // Value: quoted, or up to the next ';'.
+            while (position < source.Length && source[position] is ' ' or '\t')
+                position++;
+
+            int valueStart;
+            int valueLength;
+            bool quoted = false;
+            char quote = '\0';
+
+            if (position < source.Length && source[position] is '\'' or '"')
+            {
+                quote = source[position];
+                quoted = true;
+                position++;
+                valueStart = position;
+
+                while (true)
+                {
+                    if (position >= source.Length)
+                        throw new CamusException(
+                            "CADB0000",
+                            $"The connection string has an unclosed {quote} quoted value. Double the quote character to include one in a value.");
+
+                    if (source[position] == quote)
+                    {
+                        // A doubled quote is one literal quote, not the end of the value.
+                        if (position + 1 < source.Length && source[position + 1] == quote)
+                        {
+                            position += 2;
+                            continue;
+                        }
+
+                        break;
+                    }
+
+                    position++;
+                }
+
+                valueLength = position - valueStart;
+                position++;              // past the closing quote
+
+                // Anything between the closing quote and the ';' is whitespace or a typo; skip to the ';'.
+                while (position < source.Length && source[position] != ';')
+                    position++;
+            }
+            else
+            {
+                valueStart = position;
+
+                while (position < source.Length && source[position] != ';')
+                    position++;
+
+                (valueStart, valueLength) = Trim(source, valueStart, position);
+            }
+
+            position++;                  // past the ';'
+
+            if (keyTrimmedLength > 0)
+                settings.Add(new Setting(keyTrimmedStart, keyTrimmedLength, valueStart, valueLength, quoted, quote));
+        }
+
+        return settings;
+    }
+
+    private static (int Start, int Length) Trim(string source, int start, int end)
+    {
+        while (start < end && char.IsWhiteSpace(source[start]))
+            start++;
+
+        while (end > start && char.IsWhiteSpace(source[end - 1]))
+            end--;
+
+        return (start, end - start);
     }
 
     /// <summary>
@@ -145,6 +294,12 @@ public class CamusConnectionStringBuilder
     /// <para>A <c>BackupEndpoint=</c> is used verbatim, with no round-robin: backups are node-level, and a
     /// coordinated backup must reach the coordinator specifically. Falling back to <c>Endpoint=</c> draws
     /// from the usual pool.</para>
+    ///
+    /// <para>It must name the same deployment as <c>Endpoint=</c>. The backup admin API is authorized with
+    /// this connection's own token — superuser-grade, since that is what the surface requires — and a token
+    /// is only meaningful to the deployment that minted it, so pointing this key elsewhere hands a
+    /// superuser credential to a host that cannot use it and should never see it. It is held to the same
+    /// transport rule as <c>Endpoint=</c>; see <see cref="EnsureCredentialsAreNotSentInClear"/>.</para>
     /// </summary>
     public string GetBackupEndpoint()
     {
@@ -273,6 +428,8 @@ public class CamusConnectionStringBuilder
             {
                 if (tokenProvider is not null)
                     return tokenProvider;
+
+                EnsureCredentialsAreNotSentInClear();
 
                 CamusCredentials credentials = Credentials;
 
@@ -448,5 +605,134 @@ public class CamusConnectionStringBuilder
         EndpointPool.MarkUnreachable(endpoint);
     }
 
+    /// <summary>
+    /// The connection string as given, credentials included. Use <see cref="ToRedactedString"/> for
+    /// anything that is logged, printed or reported as diagnostics.
+    /// </summary>
     public override string ToString() => connectionString;
+
+    /// <summary>
+    /// The connection string with every secret replaced by <c>***</c> — the value of <c>Password</c>,
+    /// <c>Pwd</c> and <c>AccessToken</c>. Everything else, including the original spelling and order of
+    /// the keys, is left as written, so the result still identifies the connection.
+    /// </summary>
+    public string ToRedactedString() => Redact(connectionString);
+
+    /// <summary>The secret-bearing keys, by the same case-insensitive matching the parser uses.</summary>
+    private static readonly string[] SecretKeys = ["Password", "Pwd", "AccessToken"];
+
+    /// <summary>What a redacted secret is replaced with. Not the empty string: an empty value reads as
+    /// "no password was configured", which is a different fact.</summary>
+    private const string RedactedValue = "***";
+
+    /// <summary>
+    /// Masks the secret values in a connection string. Static and self-contained so a caller holding only
+    /// the string — the EF Core options extension reporting its debug info, say — can redact without
+    /// building anything.
+    /// </summary>
+    public static string Redact(string? connectionString)
+    {
+        if (string.IsNullOrWhiteSpace(connectionString))
+            return connectionString ?? "";
+
+        List<Setting> settings;
+
+        try
+        {
+            settings = EnumerateSettings(connectionString);
+        }
+        catch (CamusException)
+        {
+            // An unparseable string cannot be masked reliably, and printing it might disclose the secret
+            // it failed to parse. Report nothing rather than guess.
+            return RedactedValue;
+        }
+
+        System.Text.StringBuilder redacted = new(connectionString.Length);
+        int copied = 0;
+
+        foreach (Setting setting in settings)
+        {
+            if (!IsSecretKey(connectionString, setting))
+                continue;
+
+            // Replace the value's text in place, keeping any quotes around it — a quoted secret stays
+            // quoted, so the shape of the string is unchanged.
+            redacted.Append(connectionString, copied, setting.ValueStart - copied).Append(RedactedValue);
+            copied = setting.ValueStart + setting.ValueLength;
+        }
+
+        return redacted.Append(connectionString, copied, connectionString.Length - copied).ToString();
+    }
+
+    private static bool IsSecretKey(string source, in Setting setting)
+    {
+        ReadOnlySpan<char> key = source.AsSpan(setting.KeyStart, setting.KeyLength);
+
+        foreach (string secret in SecretKeys)
+        {
+            if (key.Equals(secret, StringComparison.OrdinalIgnoreCase))
+                return true;
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// The connection-string key that waives <see cref="EnsureCredentialsAreNotSentInClear"/>.
+    /// </summary>
+    public const string AllowInsecureCredentialsKey = "AllowInsecureCredentials";
+
+    /// <summary>
+    /// Refuses to carry credentials to an endpoint that cannot protect them.
+    ///
+    /// <para>A password is posted to <c>/login</c> and a bearer token rides every later request. On an
+    /// <c>http://</c> endpoint both cross the network in the clear, and the server's own
+    /// <c>CADB0519 InsecureTransport</c> check — which the deployment can switch off — only fires after
+    /// the password has already been sent. So the client refuses first, before anything leaves the
+    /// process.</para>
+    ///
+    /// <para>A loopback endpoint is allowed: the traffic never reaches a network, and that is how the
+    /// documented local examples and the test suite connect. Everything else must be <c>https://</c>,
+    /// unless the connection string sets <c>AllowInsecureCredentials=true</c> — for a deployment whose
+    /// endpoint is reached over a private link that terminates TLS elsewhere.</para>
+    ///
+    /// <para><c>BackupEndpoint=</c> is held to the same rule, and deliberately: the token it receives is
+    /// the connection's own, which the backup admin API requires to be superuser-grade. It must name the
+    /// same deployment as <c>Endpoint=</c>, since that token is minted by, and only meaningful to, that
+    /// deployment.</para>
+    /// </summary>
+    /// <exception cref="CamusException">CADB0519 when credentials are configured against an endpoint that
+    /// is neither <c>https</c> nor loopback.</exception>
+    internal void EnsureCredentialsAreNotSentInClear()
+    {
+        if (!Credentials.IsSet)
+            return;
+
+        if (Config.TryGetValue(AllowInsecureCredentialsKey, out string? allow) &&
+            bool.TryParse(allow, out bool allowed) && allowed)
+            return;
+
+        if (Config.TryGetValue("Endpoint", out string? endpoints) && !string.IsNullOrWhiteSpace(endpoints))
+        {
+            foreach (string endpoint in endpoints.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+                EnsureEndpointIsSecure(endpoint, "Endpoint");
+        }
+
+        if (Config.TryGetValue("BackupEndpoint", out string? backupEndpoint) && !string.IsNullOrWhiteSpace(backupEndpoint))
+            EnsureEndpointIsSecure(backupEndpoint, "BackupEndpoint");
+    }
+
+    private static void EnsureEndpointIsSecure(string endpoint, string key)
+    {
+        if (Uri.TryCreate(endpoint, UriKind.Absolute, out Uri? uri) &&
+            (uri.IsLoopback || string.Equals(uri.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase)))
+            return;
+
+        throw new CamusException(
+            CamusAuthErrorCodes.InsecureTransport,
+            $"This connection string configures credentials against the {key} '{endpoint}', which is neither https " +
+            $"nor loopback. The password and the bearer token would cross the network in the clear. Use https, or set " +
+            $"{AllowInsecureCredentialsKey}=true if the endpoint is reached over a link that protects them.");
+    }
 }

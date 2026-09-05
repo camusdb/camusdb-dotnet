@@ -5,6 +5,8 @@
  * file that was distributed with this source code.
  */
 
+using CamusDB.Client;
+
 namespace CamusDB.EntityFrameworkCore;
 
 /// <summary>
@@ -14,20 +16,13 @@ namespace CamusDB.EntityFrameworkCore;
 internal static class CamusIdentifier
 {
     /// <summary>
-    /// Quotes an identifier the way <see cref="CamusSqlGenerationHelper"/> does. A backtick inside the
-    /// name is rejected rather than escaped: CamusDB's lexer trims the delimiters instead of decoding a
-    /// doubled backtick, so there is no spelling that would survive, and emitting one anyway would fail
-    /// midway through the statement as a parse error naming neither the table nor the column.
+    /// Quotes an identifier the way <see cref="CamusSqlGenerationHelper"/> does — both go through
+    /// <see cref="CamusSqlSyntax.DelimitIdentifier"/>, so the provider has one rule for identifiers, not
+    /// several. A backtick inside the name is rejected rather than escaped: CamusDB's lexer trims the
+    /// delimiters instead of decoding a doubled backtick, so there is no spelling that would survive, and
+    /// emitting one anyway would fail midway through the statement as a parse error naming neither the
+    /// table nor the column.
     /// </summary>
     internal static string Delimit(string identifier, string parameterName)
-    {
-        if (string.IsNullOrWhiteSpace(identifier))
-            throw new ArgumentException("An identifier cannot be empty.", parameterName);
-
-        if (identifier.Contains('`', StringComparison.Ordinal))
-            throw new ArgumentException(
-                $"The identifier '{identifier}' contains a backtick, which CamusDB cannot quote.", parameterName);
-
-        return $"`{identifier}`";
-    }
+        => CamusSqlSyntax.DelimitIdentifier(identifier, parameterName);
 }

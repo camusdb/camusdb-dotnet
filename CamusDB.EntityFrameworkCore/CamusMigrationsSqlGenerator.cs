@@ -1,4 +1,5 @@
 using System.Globalization;
+using CamusDB.Client;
 using Microsoft.EntityFrameworkCore.Metadata;
 using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Migrations.Operations;
@@ -399,21 +400,34 @@ public class CamusMigrationsSqlGenerator : MigrationsSqlGenerator
     private static string BytesDdl(ColumnOperation col)
         => col.MaxLength is int n and > 0 ? $"BYTES({n.ToString(CultureInfo.InvariantCulture)})" : "BYTES";
 
+    /// <summary>
+    /// Renders a column default as an inline SQL literal.
+    ///
+    /// <para>A string goes through <see cref="CamusSqlSyntax.Literal"/> rather than a local
+    /// quote-doubling: CamusDB's lexer reads a backslash and the character after it as one unit, so a
+    /// default containing <c>\'</c> would end its own literal and leave the remainder to parse as SQL.
+    /// The shared formatter refuses that shape and names the column, which is also what keeps a
+    /// data-driven migration from composing a statement nobody wrote.</para>
+    /// </summary>
     private static string FormatDefaultValue(object value) => value switch
     {
         bool b           => b ? "true" : "false",
-        string s         => $"'{s.Replace("'", "''")}'",
+        string s         => CamusSqlSyntax.Literal(s, "a column default value"),
         int i            => i.ToString(CultureInfo.InvariantCulture),
         long l           => l.ToString(CultureInfo.InvariantCulture),
         float f          => f.ToString(CultureInfo.InvariantCulture),
         double d         => d.ToString(CultureInfo.InvariantCulture),
         byte[] bytes     => ToHexLiteral(bytes),
-        DateOnly d       => $"'{d:yyyy-MM-dd}'",
+        DateOnly d       => $"'{d.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture)}'",
         DateTime dt      => $"'{ToIso(dt)}'",
-        DateTimeOffset o => $"'{o.UtcDateTime:yyyy-MM-ddTHH:mm:ss.fffffffZ}'",
+        DateTimeOffset o => $"'{o.UtcDateTime.ToString("yyyy-MM-ddTHH:mm:ss.fffffffZ", CultureInfo.InvariantCulture)}'",
         _                => value.ToString() ?? "null"
     };
 
+    /// <summary>
+    /// Renders one seed-data value as an inline SQL literal. Strings share the one validated formatter —
+    /// see <see cref="FormatDefaultValue"/> for why quote-doubling alone is not enough here.
+    /// </summary>
     private static string FormatLiteral(object? value) => value switch
     {
         null or DBNull => "NULL",
@@ -424,12 +438,12 @@ public class CamusMigrationsSqlGenerator : MigrationsSqlGenerator
         float f        => f.ToString(CultureInfo.InvariantCulture),
         double d       => d.ToString(CultureInfo.InvariantCulture),
         byte[] bytes   => ToHexLiteral(bytes),
-        DateOnly d     => $"'{d:yyyy-MM-dd}'",
+        DateOnly d     => $"'{d.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture)}'",
         DateTime dt    => $"'{ToIso(dt)}'",
-        DateTimeOffset o => $"'{o.UtcDateTime:yyyy-MM-ddTHH:mm:ss.fffffffZ}'",
-        Guid g         => $"'{g}'",
-        string s       => $"'{s.Replace("'", "''")}'",
-        _              => $"'{value.ToString()?.Replace("'", "''") ?? ""}'"
+        DateTimeOffset o => $"'{o.UtcDateTime.ToString("yyyy-MM-ddTHH:mm:ss.fffffffZ", CultureInfo.InvariantCulture)}'",
+        Guid g         => $"'{g.ToString("D", CultureInfo.InvariantCulture)}'",
+        string s       => CamusSqlSyntax.Literal(s, "a seed data value"),
+        _              => CamusSqlSyntax.Literal(value.ToString() ?? "", "a seed data value")
     };
 
     // SQL bytes literals are 0x-prefixed hex (the JSON path uses base64 instead).

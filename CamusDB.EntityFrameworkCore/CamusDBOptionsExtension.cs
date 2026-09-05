@@ -122,12 +122,20 @@ public sealed class CamusDBOptionsExtension : RelationalOptionsExtension
         // Service provider configuration is identical for all CamusDB contexts — share it
         public override int GetServiceProviderHashCode() => 0;
 
+        /// <summary>
+        /// Fills EF Core's options debug view.
+        ///
+        /// <para>The connection string is reported with its secrets masked. This dictionary reaches
+        /// <c>DbContextOptions.ToDebugString()</c>, the options-diff tooling and any log that prints
+        /// extension info, so the raw value put the database password — or the access token — into
+        /// ordinary diagnostics output.</para>
+        /// </summary>
         public override void PopulateDebugInfo(IDictionary<string, string> debugInfo)
         {
             if (Extension.Connection is not null)
                 debugInfo["CamusDB:Connection"] = Extension.Connection.GetType().Name;
             else
-                debugInfo["CamusDB:ConnectionString"] = Extension.ConnectionString ?? "";
+                debugInfo["CamusDB:ConnectionString"] = CamusConnectionStringBuilder.Redact(Extension.ConnectionString);
 
             debugInfo["CamusDB:RetryOnFailureEnabled"] = Extension.RetryOnFailureEnabled.ToString();
             debugInfo["CamusDB:RetryOnFailureCount"] = Extension.RetryOnFailureCount.ToString();

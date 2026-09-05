@@ -246,6 +246,52 @@ internal sealed class RestTransport(CamusEndpointPool endpoints, CamusTokenProvi
         }
     }
 
+    /// <summary>
+    /// Posts one row to <c>/insert</c>, the server's typed row-level route.
+    ///
+    /// <para>It goes through <see cref="AuthorizeAsync"/> like every other route here. It once did not —
+    /// the row-level insert built its own request — which meant the one public API that skipped the
+    /// bearer token was the one that carries row data.</para>
+    /// </summary>
+    public async Task<int> InsertAsync(TransportInsertRequest request, CancellationToken cancellationToken)
+    {
+        string endpoint = request.Endpoint;
+
+        try
+        {
+            CamusInsertRequest wire = new()
+            {
+                DatabaseName = request.Database,
+                TableName = request.Table,
+                Values = request.Values as Dictionary<string, ColumnValue>
+                    ?? (request.Values is null ? null : new Dictionary<string, ColumnValue>(request.Values)),
+            };
+
+            if (request.HasTransaction)
+            {
+                wire.TxnIdPT = request.TxnIdPT!.Value;
+                wire.TxnIdCounter = request.TxnIdCounter!.Value;
+            }
+
+            byte[] responseBytes = await (await AuthorizeAsync(endpoint, "application/json", cancellationToken).ConfigureAwait(false))
+                .WithTimeout(request.TimeoutSeconds)
+                .AppendPathSegments("insert")
+                .PostAsync(CamusJsonContent.Create(wire, CamusJsonSerializerContext.Default.CamusInsertRequest), cancellationToken: cancellationToken)
+                .ReceiveBytes();
+
+            CamusExecuteSqlNonQueryResponse? response = JsonSerializer.Deserialize(responseBytes, CamusJsonSerializerContext.Default.CamusExecuteSqlNonQueryResponse);
+
+            if (response is null)
+                throw new CamusException("CADB0000", "Empty result returned");
+
+            return response.Rows;
+        }
+        catch (FlurlHttpException ex)
+        {
+            throw await TranslateAsync(ex, endpoint).ConfigureAwait(false);
+        }
+    }
+
     public async Task<bool> ExecuteDdlAsync(TransportSqlRequest request, CancellationToken cancellationToken)
     {
         string endpoint = request.Endpoint;

@@ -53,6 +53,13 @@ internal interface ICamusTransport
     /// <summary>Runs an <c>INSERT</c>/<c>UPDATE</c>/<c>DELETE</c> and returns the affected-row count.</summary>
     Task<int> ExecuteNonQueryAsync(TransportSqlRequest request, CancellationToken cancellationToken);
 
+    /// <summary>
+    /// Inserts one row through the server's typed row-level surface — the same operation
+    /// <c>INSERT INTO</c> performs, expressed as a table plus a column-to-value map instead of SQL text.
+    /// Returns the affected-row count.
+    /// </summary>
+    Task<int> InsertAsync(TransportInsertRequest request, CancellationToken cancellationToken);
+
     /// <summary>Runs a DDL statement (<c>CREATE</c>/<c>ALTER</c>/<c>DROP TABLE</c>, indexes). Returns success.</summary>
     Task<bool> ExecuteDdlAsync(TransportSqlRequest request, CancellationToken cancellationToken);
 

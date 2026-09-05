@@ -432,7 +432,7 @@ internal sealed class GrpcBatcher : IAsyncDisposable
                 Complete(op, null);
                 break;
             case BatchExecuteResponse.PayloadOneofCase.Error:
-                Fault(op, new CamusException(resp.Error.Code, resp.Error.Message));
+                Fault(op, new CamusException(resp.Error.Code, CamusErrorText.Sanitize(resp.Error.Message)));
                 break;
         }
     }

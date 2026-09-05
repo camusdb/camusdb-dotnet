@@ -39,7 +39,23 @@ internal static class CamusTransportPool
 {
     private static readonly ConcurrentDictionary<string, ICamusTransport> Transports = new(StringComparer.Ordinal);
 
+    /// <summary>
+    /// How many distinct deployment-and-identity transports the process shares. Past this, a caller gets
+    /// an unshared transport rather than growing a dictionary nothing empties. Sharing is an optimization
+    /// — an unshared transport is correct, it simply registers its own prepared statements — so the cap
+    /// trades that optimization for a bound on a process that connects as unboundedly many identities.
+    /// </summary>
+    private const int MaxTransports = 1024;
+
     /// <summary>The transport for <paramref name="key"/>, created once per process.</summary>
     public static ICamusTransport Shared(string key, Func<ICamusTransport> factory)
-        => Transports.GetOrAdd(key, _ => factory());
+    {
+        if (Transports.TryGetValue(key, out ICamusTransport? existing))
+            return existing;
+
+        if (Transports.Count >= MaxTransports)
+            return factory();
+
+        return Transports.GetOrAdd(key, _ => factory());
+    }
 }

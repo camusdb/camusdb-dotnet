@@ -49,13 +49,6 @@ namespace CamusDB.Client.Transport;
 internal sealed class GrpcTransport(CamusTokenProvider auth, GrpcBatchOptions? batchOptions = null)
     : ICamusTransport, ICamusLoginClient, IDisposable
 {
-    static GrpcTransport()
-    {
-        // Allow plaintext HTTP/2 (h2c) so an `http://host:port` endpoint works in local/dev without TLS,
-        // mirroring the REST transport's tolerance of plain http. `https://` endpoints are unaffected.
-        AppContext.SetSwitch("System.Net.Http.SocketsHttpHandler.Http2UnencryptedSupport", true);
-    }
-
     // Per-transport rather than static: the stream pool and coalescing window are tuned from the
     // connection string, so two connection strings against different deployments size them independently.
     private readonly GrpcBatchOptions batchOptions = batchOptions ?? GrpcBatchOptions.Default;
@@ -83,6 +76,9 @@ internal sealed class GrpcTransport(CamusTokenProvider auth, GrpcBatchOptions? b
         public CamusSql.CamusSqlClient Client { get; } = client;
         public CamusAuth.CamusAuthClient AuthClient { get; } = new(channel);
 
+        /// <summary>The typed row-level service, for the row insert. Same channel, same metadata.</summary>
+        public CamusRows.CamusRowsClient RowsClient { get; } = new(channel);
+
         // Lazy because the batcher eagerly opens its whole pool of BatchExecute streams: a caller that
         // only logs in, pings, or runs DDL never needs them, and — since a stream carries the token it
         // was opened with — opening them before the first login would open them unauthenticated.
@@ -107,16 +103,37 @@ internal sealed class GrpcTransport(CamusTokenProvider auth, GrpcBatchOptions? b
 
     private CamusSql.CamusSqlClient GetClient(string endpoint) => GetEntry(endpoint).Client;
 
+    private CamusRows.CamusRowsClient GetRowsClient(string endpoint) => GetEntry(endpoint).RowsClient;
+
     private GrpcBatcher GetBatcher(string endpoint) => GetEntry(endpoint).Batcher;
 
-    // A channel tuned for long-lived batch streams: keep-alive pings so an idle stream is not dropped, and
-    // multiple HTTP/2 connections so the stream pool isn't funneled through one connection's stream limit.
+    /// <summary>
+    /// A channel tuned for long-lived batch streams: keep-alive pings so an idle stream is not dropped,
+    /// and multiple HTTP/2 connections so the stream pool isn't funneled through one connection's stream
+    /// limit.
+    ///
+    /// <para><b>Connection rotation.</b> A pooled connection is retired after
+    /// <see cref="ConnectionLifetime"/>, and one that has gone idle after
+    /// <see cref="ConnectionIdleTimeout"/>. The idle timeout used to be infinite, which meant a TLS connection
+    /// established once was reused for the life of the process: a certificate revoked, rotated or
+    /// expired mid-life was never noticed, and a DNS change never took effect. Retiring a connection
+    /// does not disturb the streams on it — .NET stops routing new calls to it and closes it once its
+    /// streams end, and the batcher rebuilds a stream when it does.</para>
+    ///
+    /// <para>Plaintext HTTP/2 (h2c) on an <c>http://</c> endpoint works without any process-wide switch:
+    /// the gRPC client asks for HTTP/2 exactly, which is what tells the handler to speak h2c on a
+    /// cleartext connection. This type used to set
+    /// <c>AppContext.SetSwitch("System.Net.Http.SocketsHttpHandler.Http2UnencryptedSupport")</c> in a
+    /// static constructor, which flipped that guardrail for every other HTTP/2 client in the host
+    /// process — none of which asked for it.</para>
+    /// </summary>
     private static GrpcChannel CreateChannel(string endpoint)
     {
         SocketsHttpHandler handler = new()
         {
             ConnectTimeout = TimeSpan.FromSeconds(10),
-            PooledConnectionIdleTimeout = Timeout.InfiniteTimeSpan,
+            PooledConnectionLifetime = ConnectionLifetime,
+            PooledConnectionIdleTimeout = ConnectionIdleTimeout,
             KeepAlivePingDelay = TimeSpan.FromSeconds(30),
             KeepAlivePingTimeout = TimeSpan.FromSeconds(10),
             EnableMultipleHttp2Connections = true,
@@ -124,6 +141,13 @@ internal sealed class GrpcTransport(CamusTokenProvider auth, GrpcBatchOptions? b
 
         return GrpcChannel.ForAddress(endpoint, new GrpcChannelOptions { HttpHandler = handler });
     }
+
+    /// <summary>How long one pooled connection is used before a new call opens a fresh one. Long enough
+    /// that connection setup stays rare, short enough that a certificate or DNS change is picked up.</summary>
+    private static readonly TimeSpan ConnectionLifetime = TimeSpan.FromMinutes(30);
+
+    /// <summary>How long a connection with no streams on it is kept.</summary>
+    private static readonly TimeSpan ConnectionIdleTimeout = TimeSpan.FromMinutes(10);
 
     // ─── Transactions ─────────────────────────────────────────────────────────
 
@@ -392,6 +416,60 @@ internal sealed class GrpcTransport(CamusTokenProvider auth, GrpcBatchOptions? b
 
             // A DDL reply with no error means success; the gRPC path surfaces failure as an RpcException.
             return true;
+        }
+        catch (RpcException ex)
+        {
+            throw Translate(ex);
+        }
+    }
+
+    /// <summary>
+    /// Inserts one row through <c>CamusRows.InsertRow</c> — the gRPC form of the same row-level route
+    /// the REST transport posts to, so both transports reach the server's insert path rather than one of
+    /// them composing SQL the other does not.
+    ///
+    /// <para>Unary, like DDL and Ping: it carries the bearer token in its own call metadata and the
+    /// transaction handle in the request. Statement ordering inside a transaction is preserved by the
+    /// caller awaiting each statement before issuing the next, which is what orders the batched path
+    /// too.</para>
+    /// </summary>
+    public async Task<int> InsertAsync(TransportInsertRequest request, CancellationToken cancellationToken)
+    {
+        global::Grpc.Core.Metadata? headers = await HeadersAsync(cancellationToken).ConfigureAwait(false);
+
+        InsertRowRequest wire = new()
+        {
+            Database = request.Database,
+            Table = request.Table,
+        };
+
+        if (request.Values is { } values)
+        {
+            foreach (KeyValuePair<string, ColumnValue> value in values)
+                wire.Values[value.Key] = GrpcValueCodec.Encode(value.Value);
+        }
+
+        if (request.HasTransaction)
+        {
+            wire.TxnHandle = BuildHandle(request.TxnIdPT!.Value, request.TxnIdCounter!.Value);
+        }
+        else
+        {
+            (int n, long l, long c) = CurrentToken();
+            wire.CausalTokenN = n;
+            wire.CausalTokenL = l;
+            wire.CausalTokenC = c;
+        }
+
+        try
+        {
+            NonQueryReply reply = await GetRowsClient(request.Endpoint)
+                .InsertRowAsync(wire, CallOptions(request.TimeoutSeconds, headers, cancellationToken))
+                .ResponseAsync.ConfigureAwait(false);
+
+            ObserveToken(reply.CausalTokenN, reply.CausalTokenL, reply.CausalTokenC);
+
+            return reply.AffectedRows;
         }
         catch (RpcException ex)
         {
@@ -784,9 +862,12 @@ internal sealed class GrpcTransport(CamusTokenProvider auth, GrpcBatchOptions? b
         _ => LockingMode.Unspecified,
     };
 
-    // Database names are bare identifiers in the grammar; backtick-escape so a name is never mistaken for a
-    // keyword, doubling any embedded backtick.
-    private static string QuoteIdentifier(string name) => $"`{name.Replace("`", "``")}`";
+    // Database names are bare identifiers in the grammar; backtick-delimit so a name is never mistaken for
+    // a keyword. A name carrying a backtick is refused rather than doubled: CamusDB trims the delimiters
+    // instead of decoding a doubled backtick, so doubling neutralizes nothing and the name would break out
+    // of its quoting — which matters because these are the only statements this driver composes as text,
+    // and a database name can come from an application's own input.
+    private static string QuoteIdentifier(string name) => CamusSqlSyntax.DelimitIdentifier(name, nameof(name));
 
     /// <summary>
     /// Maps a gRPC failure to a <see cref="CamusException"/>. Domain errors carry the CamusDB code and
@@ -809,9 +890,11 @@ internal sealed class GrpcTransport(CamusTokenProvider auth, GrpcBatchOptions? b
         }
 
         if (!string.IsNullOrEmpty(code))
-            return new CamusException(code, message ?? "");
+            return new CamusException(code, CamusErrorText.Sanitize(message));
 
-        string detail = string.IsNullOrEmpty(ex.Status.Detail) ? ex.Message : ex.Status.Detail;
+        // Sanitized for the same reason the REST translator sanitizes its bodies: this text is written by
+        // the far end and is logged verbatim by the caller.
+        string detail = CamusErrorText.Sanitize(string.IsNullOrEmpty(ex.Status.Detail) ? ex.Message : ex.Status.Detail);
 
         // A rejection raised before the handler runs (the auth gate at stream open) can arrive without
         // trailers; recover the domain code from the status so the token-refresh path still triggers.

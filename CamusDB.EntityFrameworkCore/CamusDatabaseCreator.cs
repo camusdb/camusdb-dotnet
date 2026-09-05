@@ -89,14 +89,25 @@ public class CamusDatabaseCreator : RelationalDatabaseCreator
     private static bool IsTableAlreadyExistsError(CamusDB.Client.CamusException ex)
         => ex.Message.Contains("already exists", StringComparison.OrdinalIgnoreCase);
 
+    /// <summary>
+    /// Composes the <c>CREATE TABLE</c> behind <c>EnsureCreated</c>.
+    ///
+    /// <para>Every name is delimited through <see cref="CamusIdentifier"/>, the same rule the migration
+    /// generator applies. Appending a name raw would corrupt the statement for any legitimate name that
+    /// is a reserved word or carries a space, and would let a model whose identifiers are derived at
+    /// runtime (tenant provisioning, a dynamic schema) compose SQL nobody wrote. The CHECK expression
+    /// stays verbatim — it is a SQL fragment the model author wrote, not a name.</para>
+    /// </summary>
     private static string BuildCreateTableSql(IEntityType entityType, string tableName)
     {
         var sb = new StringBuilder();
-        sb.Append("CREATE TABLE ").Append(tableName).Append(" (");
+        sb.Append("CREATE TABLE ").Append(CamusIdentifier.Delimit(tableName, nameof(tableName))).Append(" (");
 
         var pk = entityType.FindPrimaryKey();
         var pkProps = pk?.Properties.ToHashSet() ?? [];
-        var pkColumns = pk?.Properties.Select(p => p.GetColumnName()).ToList() ?? [];
+        // A property always resolves to a column name here (these are mapped scalar properties); the
+        // fallback keeps a null out of the composed DDL rather than emitting an empty identifier.
+        var pkColumns = pk?.Properties.Select(p => p.GetColumnName() ?? p.Name).ToList() ?? [];
 
         bool first = true;
         foreach (var prop in entityType.GetProperties())
@@ -104,10 +115,10 @@ public class CamusDatabaseCreator : RelationalDatabaseCreator
             if (!first) sb.Append(", ");
             first = false;
 
-            var columnName = prop.GetColumnName();
+            var columnName = prop.GetColumnName() ?? prop.Name;
             var ddlType = GetDdlType(prop, pkProps.Contains(prop));
 
-            sb.Append(columnName).Append(' ').Append(ddlType);
+            sb.Append(CamusIdentifier.Delimit(columnName, "columnName")).Append(' ').Append(ddlType);
 
             if (pkProps.Contains(prop) || !prop.IsNullable)
                 sb.Append(" NOT NULL");
@@ -120,14 +131,19 @@ public class CamusDatabaseCreator : RelationalDatabaseCreator
         if (pkColumns.Count > 0)
         {
             sb.Append(", PRIMARY KEY (");
-            sb.Append(string.Join(", ", pkColumns));
+            sb.Append(string.Join(", ", pkColumns.Select(c => CamusIdentifier.Delimit(c, "primaryKeyColumn"))));
             sb.Append(')');
         }
 
         // Named CHECK constraints declared via ToTable(t => t.HasCheckConstraint(...)).
         foreach (var check in entityType.GetCheckConstraints())
         {
-            sb.Append(", CONSTRAINT ").Append(check.Name)
+            // A check constraint is always named by the time it reaches the model; the throw states that
+            // rather than letting a null reach the composed DDL as an empty constraint name.
+            string checkName = check.Name
+                ?? throw new InvalidOperationException($"The check constraint on '{tableName}' has no name.");
+
+            sb.Append(", CONSTRAINT ").Append(CamusIdentifier.Delimit(checkName, "checkConstraintName"))
               .Append(" CHECK (").Append(check.Sql).Append(')');
         }
 

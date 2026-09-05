@@ -52,12 +52,27 @@ public record struct CamusObjectIdValue : IComparable<CamusObjectIdValue>
         return a == 0 && b == 0 && c == 0;
     }
 
+    /// <summary>
+    /// Orders two ids by their 12 bytes, most significant first — which orders them by creation time,
+    /// since the first four bytes are the timestamp.
+    ///
+    /// <para>The comparison is unsigned. The three fields are the raw bytes reinterpreted as
+    /// <see cref="int"/>, so a signed comparison would sort any value whose top bit is set below every
+    /// other one. Returning a constant 1 for "not equal", as this did before, is not an ordering at all:
+    /// it makes <c>a &lt; b</c> and <c>b &lt; a</c> both true, which leaves a sort producing an arbitrary
+    /// order and can make <see cref="List{T}.Sort"/> throw for an inconsistent comparer.</para>
+    /// </summary>
     public int CompareTo(CamusObjectIdValue other)
     {
-        if (this.a == other.a && this.b == other.b && this.c == other.c)
-            return 0;
+        int comparison = ((uint)a).CompareTo((uint)other.a);
+        if (comparison != 0)
+            return comparison;
 
-        return 1;
+        comparison = ((uint)b).CompareTo((uint)other.b);
+        if (comparison != 0)
+            return comparison;
+
+        return ((uint)c).CompareTo((uint)other.c);
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -154,10 +169,15 @@ public record struct CamusObjectIdValue : IComparable<CamusObjectIdValue>
         return true;
     }
 
+    /// <summary>
+    /// Parses the 24-character hexadecimal form. The length is checked before the bytes are read: a
+    /// shorter string used to index past the end of the parsed buffer and surface as an
+    /// <see cref="IndexOutOfRangeException"/> rather than as a parse failure.
+    /// </summary>
     public static CamusObjectIdValue ToValue(string s)
     {
-        if (!TryParseHexString(s, out byte[] bytes))
-            throw new FormatException("String should contain only hexadecimal digits.");
+        if (!TryParseHexString(s, out byte[] bytes) || bytes.Length != 12)
+            throw new FormatException("An ObjectId is 24 hexadecimal digits.");
 
         int a = (bytes[0] << 24) | (bytes[1] << 16) | (bytes[2] << 8) | bytes[3];
         int b = (bytes[4] << 24) | (bytes[5] << 16) | (bytes[6] << 8) | bytes[7];

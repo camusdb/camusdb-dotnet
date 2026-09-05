@@ -44,6 +44,14 @@ internal sealed class CamusTokenProvider
     private static readonly ConcurrentDictionary<string, CamusTokenProvider> SharedProviders = new(StringComparer.Ordinal);
 
     /// <summary>
+    /// How many distinct identities the process shares providers for. Past this, a caller gets a provider
+    /// of its own instead of growing a dictionary that is never emptied — correct, only without the
+    /// sharing. It bounds a process that opens connections under an unbounded number of user names; no
+    /// ordinary deployment approaches it.
+    /// </summary>
+    private const int MaxSharedProviders = 1024;
+
+    /// <summary>
     /// Returns the process-wide provider for a set of credentials, creating it on first use. Sharing
     /// matters most for Entity Framework, which builds a fresh
     /// <see cref="CamusConnectionStringBuilder"/> for every <see cref="System.Data.Common.DbConnection"/>
@@ -52,18 +60,41 @@ internal sealed class CamusTokenProvider
     /// so connections differing only in database or timeout still share one token.
     /// </summary>
     public static CamusTokenProvider Shared(string key, Func<CamusTokenProvider> factory)
-        => SharedProviders.GetOrAdd(key, _ => factory());
+    {
+        if (SharedProviders.TryGetValue(key, out CamusTokenProvider? existing))
+            return existing;
+
+        if (SharedProviders.Count >= MaxSharedProviders)
+            return factory();
+
+        return SharedProviders.GetOrAdd(key, _ => factory());
+    }
 
     /// <summary>
-    /// A stable, non-reversible identity for a credential set + login endpoint. Hashed so a long-lived
-    /// dictionary key never holds a plaintext password.
+    /// A per-process random salt for <see cref="SharingKey"/>. The key lives in a dictionary for the life
+    /// of the process, and an unsalted hash of a password is an offline verifier for anyone who reads
+    /// process memory. The key only has to be stable within one process, so a salt costs nothing.
+    /// </summary>
+    private static readonly byte[] SharingKeySalt = RandomNumberGenerator.GetBytes(32);
+
+    /// <summary>
+    /// A stable, non-reversible identity for a credential set + login endpoint. Hashed, and salted per
+    /// process, so a long-lived dictionary key neither holds a plaintext password nor can be tested
+    /// against a guessed one outside this process.
     /// </summary>
     public static string SharingKey(CamusCredentials credentials, string authEndpointConfig)
     {
         string material = string.Join(
             '\n', credentials.User ?? "", credentials.Password ?? "", credentials.AccessToken ?? "", authEndpointConfig);
 
-        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(material)));
+        byte[] bytes = Encoding.UTF8.GetBytes(material);
+
+        byte[] hash = new byte[SHA256.HashSizeInBytes];
+        HMACSHA256.HashData(SharingKeySalt, bytes, hash);
+
+        CryptographicOperations.ZeroMemory(bytes);
+
+        return Convert.ToHexString(hash);
     }
 
     // Resolved on first use, not at construction: for gRPC the login client is the transport itself, and

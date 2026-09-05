@@ -52,6 +52,9 @@ internal sealed class AuthenticatingTransport(ICamusTransport inner, CamusTokenP
     public Task<int> ExecuteNonQueryAsync(TransportSqlRequest request, CancellationToken cancellationToken)
         => RunAsync(ct => inner.ExecuteNonQueryAsync(request, ct), cancellationToken);
 
+    public Task<int> InsertAsync(TransportInsertRequest request, CancellationToken cancellationToken)
+        => RunAsync(ct => inner.InsertAsync(request, ct), cancellationToken);
+
     public Task<bool> ExecuteDdlAsync(TransportSqlRequest request, CancellationToken cancellationToken)
         => RunAsync(ct => inner.ExecuteDdlAsync(request, ct), cancellationToken);
 
@@ -96,7 +99,7 @@ internal sealed class AuthenticatingTransport(ICamusTransport inner, CamusTokenP
         {
             return await operation(cancellationToken).ConfigureAwait(false);
         }
-        catch (CamusException ex) when (IsRenewable(ex, presented))
+        catch (CamusException ex) when (IsRenewable(ex, ref presented))
         {
             auth.Invalidate(presented);
         }
@@ -113,7 +116,7 @@ internal sealed class AuthenticatingTransport(ICamusTransport inner, CamusTokenP
             await operation(cancellationToken).ConfigureAwait(false);
             return;
         }
-        catch (CamusException ex) when (IsRenewable(ex, presented))
+        catch (CamusException ex) when (IsRenewable(ex, ref presented))
         {
             auth.Invalidate(presented);
         }
@@ -121,8 +124,27 @@ internal sealed class AuthenticatingTransport(ICamusTransport inner, CamusTokenP
         await operation(cancellationToken).ConfigureAwait(false);
     }
 
-    private bool IsRenewable(CamusException ex, string? presented)
-        => presented is not null && ex.Code == CamusAuthErrorCodes.AuthenticationFailed && auth.CanRenew;
+    /// <summary>
+    /// Whether this failure is one a fresh token can fix, and — through <paramref name="presented"/> —
+    /// which token to discard.
+    ///
+    /// <para>The cache is normally warm before the call, so the token to discard is the one read then.
+    /// On the first statement of a connection it is not: the inner transport mints the token during the
+    /// call, and the pre-call read returned null. Falling back to the token the provider holds now
+    /// discards the one that call actually presented, instead of invalidating nothing and replaying with
+    /// the same rejected token. A rejection with no token either way came from the login itself (a wrong
+    /// password), and is surfaced rather than replayed: retrying it would burn two attempts per statement
+    /// against a limit of twenty per account per minute.</para>
+    /// </summary>
+    private bool IsRenewable(CamusException ex, ref string? presented)
+    {
+        if (ex.Code != CamusAuthErrorCodes.AuthenticationFailed || !auth.CanRenew)
+            return false;
+
+        presented ??= auth.CurrentToken;
+
+        return presented is not null;
+    }
 
     public void Dispose() => (inner as IDisposable)?.Dispose();
 }

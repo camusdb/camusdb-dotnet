@@ -1,3 +1,5 @@
+using CamusDB.Client;
+
 namespace CamusDB.EntityFrameworkCore;
 
 /// <summary>
@@ -7,8 +9,9 @@ namespace CamusDB.EntityFrameworkCore;
 /// CamusDB requires that SHOW CREATE TABLE emit DDL which re-parses to the identical comment, and
 /// its string literals have no backslash-escape decoding — the lexer treats a backslash plus the
 /// following character as one unit. Two shapes therefore have no representation and are rejected by
-/// the server; we reject them here so the failure names the offending comment instead of surfacing
-/// as an opaque InvalidInput midway through a migration.
+/// the server; <see cref="CamusSqlSyntax"/> rejects them for every literal the provider renders, and
+/// this type adds the two rules that are specific to a comment: the length bound and the control
+/// characters that the metadata blob cannot carry.
 /// </remarks>
 internal static class CamusCommentSyntax
 {
@@ -21,7 +24,8 @@ internal static class CamusCommentSyntax
     public static string Literal(string comment, string target)
     {
         Validate(comment, target);
-        return $"'{comment.Replace("'", "''")}'";
+
+        return CamusSqlSyntax.Literal(comment, target);
     }
 
     private static void Validate(string comment, string target)
@@ -38,20 +42,6 @@ internal static class CamusCommentSyntax
                 throw new NotSupportedException(
                     $"The comment on {target} contains a control character (U+{(int)c:X4}) at position {i}; " +
                     "CamusDB comments cannot contain control characters such as newlines or tabs.");
-
-            if (c != '\\')
-                continue;
-
-            // A backslash at the very end, or immediately before a quote, would escape the literal's
-            // closing quote once the comment is re-emitted by SHOW CREATE TABLE.
-            if (i == comment.Length - 1)
-                throw new NotSupportedException(
-                    $"The comment on {target} ends with a backslash; CamusDB cannot round-trip that through DDL.");
-
-            if (comment[i + 1] == '\'')
-                throw new NotSupportedException(
-                    $"The comment on {target} contains a backslash immediately before a quote at position {i}; " +
-                    "CamusDB cannot round-trip that through DDL.");
         }
     }
 }

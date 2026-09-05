@@ -240,7 +240,7 @@ internal sealed class NdjsonStreamRowSource : CamusRowSource
 
         string code = meta.TryGetProperty("code", out JsonElement c) ? c.GetString() ?? "CADB0000" : "CADB0000";
         string message = meta.TryGetProperty("message", out JsonElement m) ? m.GetString() ?? "" : "";
-        throw new CamusException(code, message);
+        throw new CamusException(code, CamusErrorText.Sanitize(message));
     }
 
     // The server writes exactly one record per line (value + '\n'), but skip any blank line defensively so

@@ -33,7 +33,20 @@ internal sealed class CamusEndpointPool
     /// endpoint list alone, so connection strings differing only in database, credentials or timeouts
     /// share one rotation and one view of which nodes are answering.</summary>
     public static CamusEndpointPool Shared(string endpointConfig)
-        => SharedPools.GetOrAdd(endpointConfig, config => new CamusEndpointPool(config));
+    {
+        if (SharedPools.TryGetValue(endpointConfig, out CamusEndpointPool? existing))
+            return existing;
+
+        // Past the cap a caller gets its own pool rather than growing a dictionary nothing empties: it
+        // keeps its own rotation and health view, which is what every pool did before sharing existed.
+        if (SharedPools.Count >= MaxSharedPools)
+            return new CamusEndpointPool(endpointConfig);
+
+        return SharedPools.GetOrAdd(endpointConfig, config => new CamusEndpointPool(config));
+    }
+
+    /// <summary>How many distinct endpoint lists the process shares a pool for.</summary>
+    private const int MaxSharedPools = 1024;
 
     private readonly string[] endpoints;
 
