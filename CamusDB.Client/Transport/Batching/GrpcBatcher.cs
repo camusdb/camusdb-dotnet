@@ -408,12 +408,14 @@ internal sealed class GrpcBatcher : IAsyncDisposable
                 Complete(op, new BatchQueryResult(
                     op.Schema ?? new ResultSchema(), op.Rows ?? (IReadOnlyList<ResultRow>)[],
                     new BatchCausalToken(resp.QueryComplete.CausalTokenN, resp.QueryComplete.CausalTokenL, resp.QueryComplete.CausalTokenC),
-                    resp.QueryComplete.CacheMetadata));
+                    resp.QueryComplete.CacheMetadata,
+                    resp.QueryComplete.Routing));
                 break;
             case BatchExecuteResponse.PayloadOneofCase.NonQuery:
                 Complete(op, new BatchNonQueryResult(
                     resp.NonQuery.AffectedRows,
-                    new BatchCausalToken(resp.NonQuery.CausalTokenN, resp.NonQuery.CausalTokenL, resp.NonQuery.CausalTokenC)));
+                    new BatchCausalToken(resp.NonQuery.CausalTokenN, resp.NonQuery.CausalTokenL, resp.NonQuery.CausalTokenC),
+                    resp.NonQuery.Routing));
                 break;
             case BatchExecuteResponse.PayloadOneofCase.StartReply:
                 Complete(op, resp.StartReply);

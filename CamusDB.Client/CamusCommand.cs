@@ -63,6 +63,14 @@ public class CamusCommand : DbCommand, ICloneable
     /// </summary>
     public CamusCacheMetadata? LastCacheMetadata { get; private set; }
 
+    /// <summary>
+    /// Routing advice reported by the server for the most recent query or non-query executed through
+    /// this command, or <see langword="null"/> — advice arrives only on a connection with
+    /// <c>RoutingMode=</c> enabled, and only for statements the server judged eligible. Diagnostic:
+    /// the driver has already applied the advice to its learned-route state.
+    /// </summary>
+    public CamusRoutingAdvice? LastRoutingAdvice { get; private set; }
+
     [AllowNull]
     public override string CommandText { get; set; } = "";
 
@@ -134,6 +142,29 @@ public class CamusCommand : DbCommand, ICloneable
     protected string GetRequestTarget() => CommandText;
 
     protected string GetEndpoint() => transaction?.Endpoint ?? builder.GetEndpoint();
+
+    /// <summary>
+    /// Resolves where one statement is sent, in strict precedence order: an explicit transaction's
+    /// pinned endpoint always wins (its ops must land in one server-side ordering chain, and advice
+    /// may inform the next transaction but never relocate this one); then a fresh learned route,
+    /// when the connection enables routing; then the pool's ordinary rotation. Also reports the
+    /// router and the route entry's revision so the reply's advice can be applied conditionally —
+    /// a late reply must never overwrite a route a faster reply already refreshed. A null router in
+    /// the result means "do not negotiate": pinned statements and routing-off connections keep the
+    /// exact pre-routing request shape.
+    /// </summary>
+    private (string Endpoint, CamusStatementRouter? Router, long ObservedRevision) RouteEndpoint(CamusRouteOpKind kind)
+    {
+        if (transaction is not null)
+            return (transaction.Endpoint, null, 0);
+
+        CamusStatementRouter? router = builder.Router;
+        if (router is null)
+            return (builder.GetEndpoint(), null, 0);
+
+        string? learned = router.SelectEndpoint(builder.Config["Database"], GetRequestTarget(), kind, out long revision);
+        return (learned ?? builder.GetEndpoint(), router, revision);
+    }
 
     /// <summary>
     /// The schema statements that go to the server's DDL endpoint rather than its data endpoint.
@@ -557,7 +588,9 @@ public class CamusCommand : DbCommand, ICloneable
         if (IsDmlStatement(CommandText))
             return await ExecuteDmlAsReaderAsync(cancellationToken).ConfigureAwait(false);
 
-        string endpoint = GetEndpoint();
+        // A learned route still steers the send — reuse costs nothing here — but the streaming
+        // endpoint's trailer carries no routing metadata, so nothing is negotiated or learned.
+        (string endpoint, _, _) = RouteEndpoint(CamusRouteOpKind.Query);
 
         TransportSqlRequest request = new()
         {
@@ -576,6 +609,7 @@ public class CamusCommand : DbCommand, ICloneable
 
         // The streaming endpoint carries no cache metadata (its trailer has no cache fields).
         LastCacheMetadata = null;
+        LastRoutingAdvice = null;
 
         return new CamusDataReader(source);
     }
@@ -590,7 +624,7 @@ public class CamusCommand : DbCommand, ICloneable
         if (IsDmlStatement(CommandText))
             return await ExecuteDmlAsReaderAsync(cancellationToken).ConfigureAwait(false);
 
-        string endpoint = GetEndpoint();
+        (string endpoint, CamusStatementRouter? router, long observedRevision) = RouteEndpoint(CamusRouteOpKind.Query);
 
         TransportSqlRequest request = new()
         {
@@ -603,11 +637,14 @@ public class CamusCommand : DbCommand, ICloneable
             StreamSlot = transaction?.StreamSlot,
             TimeoutSeconds = CommandTimeout,
             Prepared = await ShouldPrepareAsync(endpoint, cancellationToken).ConfigureAwait(false),
+            RoutingAcceptVersion = router is not null ? CamusRoutingAdvice.AcceptVersion : 0,
         };
 
         QueryTransportResult result = await builder.GetTransport().ExecuteQueryAsync(request, cancellationToken).ConfigureAwait(false);
 
         LastCacheMetadata = result.CacheMetadata;
+        LastRoutingAdvice = result.Routing;
+        router?.Learn(request.Database, request.Sql, CamusRouteOpKind.Query, result.Routing, observedRevision);
 
         return new CamusDataReader(result.ResultSet, LastCacheMetadata);
     }
@@ -620,15 +657,17 @@ public class CamusCommand : DbCommand, ICloneable
     }
 
     /// <summary>
-    /// Builds the protocol-neutral request for a DML/non-query statement: joins the explicit
-    /// <see cref="Transaction"/> when present, otherwise carries the resolved autocommit concurrency
-    /// options for the short transaction the server begins for this statement.
+    /// Builds and runs the protocol-neutral request for a DML/non-query statement: joins the
+    /// explicit <see cref="Transaction"/> when present, otherwise carries the resolved autocommit
+    /// concurrency options for the short transaction the server begins for this statement. The
+    /// endpoint, negotiation flag and post-success learning follow the same routing rules as the
+    /// query path.
     /// </summary>
-    private async ValueTask<TransportSqlRequest> BuildNonQueryTransportRequestAsync(CancellationToken cancellationToken)
+    private async Task<int> ExecuteNonQueryCoreAsync(CancellationToken cancellationToken)
     {
-        string endpoint = GetEndpoint();
+        (string endpoint, CamusStatementRouter? router, long observedRevision) = RouteEndpoint(CamusRouteOpKind.NonQuery);
 
-        return new()
+        TransportSqlRequest request = new()
         {
             Endpoint = endpoint,
             Database = builder.Config["Database"],
@@ -640,14 +679,15 @@ public class CamusCommand : DbCommand, ICloneable
             AutocommitOptions = transaction is null ? ResolveAutocommitOptions() : null,
             TimeoutSeconds = CommandTimeout,
             Prepared = await ShouldPrepareAsync(endpoint, cancellationToken).ConfigureAwait(false),
+            RoutingAcceptVersion = router is not null ? CamusRoutingAdvice.AcceptVersion : 0,
         };
-    }
 
-    private async Task<int> ExecuteNonQueryCoreAsync(CancellationToken cancellationToken)
-    {
-        TransportSqlRequest request = await BuildNonQueryTransportRequestAsync(cancellationToken).ConfigureAwait(false);
+        NonQueryTransportResult result = await builder.GetTransport().ExecuteNonQueryAsync(request, cancellationToken).ConfigureAwait(false);
 
-        return await builder.GetTransport().ExecuteNonQueryAsync(request, cancellationToken).ConfigureAwait(false);
+        LastRoutingAdvice = result.Routing;
+        router?.Learn(request.Database, request.Sql, CamusRouteOpKind.NonQuery, result.Routing, observedRevision);
+
+        return result.AffectedRows;
     }
 
     /// <summary>

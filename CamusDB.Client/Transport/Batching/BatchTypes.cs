@@ -44,7 +44,8 @@ internal sealed class BatchQueryResult(
     ResultSchema schema,
     IReadOnlyList<ResultRow> rows,
     BatchCausalToken token,
-    CacheMetadata? cacheMetadata)
+    CacheMetadata? cacheMetadata,
+    RoutingAdvice? routing = null)
 {
     public ResultSchema Schema { get; } = schema;
 
@@ -58,14 +59,21 @@ internal sealed class BatchQueryResult(
     /// was bypassed still reports a value (with a bypass reason), so null means "not hinted".
     /// </summary>
     public CacheMetadata? CacheMetadata { get; } = cacheMetadata;
+
+    /// <summary>Routing advice carried by the QUERY terminator, or <see langword="null"/> — the
+    /// server emits it only for a request that negotiated (<c>routing_accept_version = 1</c>).</summary>
+    public RoutingAdvice? Routing { get; } = routing;
 }
 
 /// <summary>Result of a batched NON_QUERY: affected-row count plus the trailing causal token.</summary>
-internal sealed class BatchNonQueryResult(int affectedRows, BatchCausalToken token)
+internal sealed class BatchNonQueryResult(int affectedRows, BatchCausalToken token, RoutingAdvice? routing = null)
 {
     public int AffectedRows { get; } = affectedRows;
 
     public BatchCausalToken Token { get; } = token;
+
+    /// <inheritdoc cref="BatchQueryResult.Routing"/>
+    public RoutingAdvice? Routing { get; } = routing;
 }
 
 /// <summary>

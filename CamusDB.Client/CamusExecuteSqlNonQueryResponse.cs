@@ -17,4 +17,9 @@ internal sealed class CamusExecuteSqlNonQueryResponse
 
     [JsonPropertyName("rows")]
     public int Rows { get; set; }
+
+    /// <summary>Advisory routing metadata — absent unless the request negotiated it
+    /// (<c>routingAcceptVersion = 1</c>) and the statement produced advice.</summary>
+    [JsonPropertyName("routing")]
+    public CamusRoutingMetadataResponse? Routing { get; set; }
 }

@@ -49,7 +49,7 @@ internal sealed class AuthenticatingTransport(ICamusTransport inner, CamusTokenP
     public Task<CamusRowSource> ExecuteQueryStreamAsync(TransportSqlRequest request, CancellationToken cancellationToken)
         => RunAsync(ct => inner.ExecuteQueryStreamAsync(request, ct), cancellationToken);
 
-    public Task<int> ExecuteNonQueryAsync(TransportSqlRequest request, CancellationToken cancellationToken)
+    public Task<NonQueryTransportResult> ExecuteNonQueryAsync(TransportSqlRequest request, CancellationToken cancellationToken)
         => RunAsync(ct => inner.ExecuteNonQueryAsync(request, ct), cancellationToken);
 
     public Task<int> InsertAsync(TransportInsertRequest request, CancellationToken cancellationToken)

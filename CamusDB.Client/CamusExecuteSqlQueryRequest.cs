@@ -43,5 +43,11 @@ public sealed class CamusExecuteSqlQueryRequest
     [JsonPropertyName("positionalParameters")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public List<ColumnValue>? PositionalParameters { get; set; }
+
+    /// <summary>Highest routing-metadata version accepted on the response; 0 (omitted from the JSON)
+    /// keeps the exact pre-routing request shape and asks for none.</summary>
+    [JsonPropertyName("routingAcceptVersion")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public int RoutingAcceptVersion { get; set; }
 }
 

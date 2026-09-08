@@ -50,8 +50,9 @@ internal interface ICamusTransport
     /// </summary>
     Task<CamusRowSource> ExecuteQueryStreamAsync(TransportSqlRequest request, CancellationToken cancellationToken);
 
-    /// <summary>Runs an <c>INSERT</c>/<c>UPDATE</c>/<c>DELETE</c> and returns the affected-row count.</summary>
-    Task<int> ExecuteNonQueryAsync(TransportSqlRequest request, CancellationToken cancellationToken);
+    /// <summary>Runs an <c>INSERT</c>/<c>UPDATE</c>/<c>DELETE</c> and returns the affected-row count
+    /// plus any routing advice the response carried (absent unless the request negotiated it).</summary>
+    Task<NonQueryTransportResult> ExecuteNonQueryAsync(TransportSqlRequest request, CancellationToken cancellationToken);
 
     /// <summary>
     /// Inserts one row through the server's typed row-level surface — the same operation

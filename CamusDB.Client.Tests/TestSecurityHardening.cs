@@ -307,7 +307,7 @@ public class TestSecurityHardening
 
         AuthenticatingTransport transport = new(inner, provider);
 
-        Assert.Equal(7, await transport.ExecuteNonQueryAsync(NonQueryRequest(), default));
+        Assert.Equal(7, (await transport.ExecuteNonQueryAsync(NonQueryRequest(), default)).AffectedRows);
         Assert.Equal(2, inner.Calls);
 
         // Two logins: the cold-start mint, and the replacement for the token the server rejected.
@@ -334,7 +334,7 @@ public class TestSecurityHardening
 
         public CamusProtocol Protocol => CamusProtocol.Rest;
 
-        public async Task<int> ExecuteNonQueryAsync(TransportSqlRequest request, CancellationToken cancellationToken)
+        public async Task<NonQueryTransportResult> ExecuteNonQueryAsync(TransportSqlRequest request, CancellationToken cancellationToken)
         {
             _ = await Auth!.GetTokenAsync(cancellationToken).ConfigureAwait(false);
 
@@ -343,7 +343,7 @@ public class TestSecurityHardening
             if (Calls <= FailuresBeforeSuccess)
                 throw new CamusException(CamusAuthErrorCodes.AuthenticationFailed, "rejected");
 
-            return 7;
+            return new NonQueryTransportResult(7);
         }
 
         public Task<StartTransactionResult> StartTransactionAsync(string endpoint, string database, CamusTransactionOptions options, int timeoutSeconds, CancellationToken cancellationToken)

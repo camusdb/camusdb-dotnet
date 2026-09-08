@@ -31,6 +31,12 @@ public class CamusConnectionStringBuilder
 
     private CamusEndpointPool? endpointPool;
 
+    // Memoized separately from its null result: routing off is the common case, and re-deriving
+    // "off" per statement would re-parse the node map every time. Benign race, like endpointPool.
+    private CamusStatementRouter? router;
+
+    private bool routerResolved;
+
     private volatile ICamusTransport? transport;
 
     private volatile CamusTokenProvider? tokenProvider;
@@ -259,6 +265,116 @@ public class CamusConnectionStringBuilder
         => Config.TryGetValue(key, out string? raw) && int.TryParse(raw, out int value) && value >= minimum
             ? value
             : fallback;
+
+    /// <summary>
+    /// Learned statement routing mode, from <c>RoutingMode=</c> (case-insensitive: <c>Off</c>,
+    /// <c>Learned</c>, <c>Auto</c>). Absent or unrecognized values default to
+    /// <see cref="CamusRoutingMode.Auto"/>: routing engages by itself when <c>RoutingNodes=</c>
+    /// maps at least two distinct pool members, and a connection string with no trust map — every
+    /// pre-routing connection string — behaves exactly as <see cref="CamusRoutingMode.Off"/>,
+    /// with requests byte-identical to a pre-routing driver.
+    /// </summary>
+    public CamusRoutingMode RoutingMode => ParseEnum<CamusRoutingMode>("RoutingMode") ?? CamusRoutingMode.Auto;
+
+    /// <summary>
+    /// Client-side ceiling in milliseconds on a routing hint's advertised age, from
+    /// <c>RoutingMaxHintAge=</c>. The effective TTL of a learned route is the smaller of this and
+    /// the server's <c>maxAgeMs</c>. Out-of-range values fall back to the default of 5000,
+    /// matching how the other tuning keys treat unparseable input.
+    /// </summary>
+    public int RoutingMaxHintAgeMs => ParseInt("RoutingMaxHintAge", 1, 5_000);
+
+    /// <summary>
+    /// The trust map from server node identities to configured endpoints, from <c>RoutingNodes=</c>
+    /// (e.g. <c>RoutingNodes='camus-a:7070=http://a:5095,camus-b:7070=http://b:5095'</c> — quote the
+    /// value, it contains <c>=</c>). Advice becomes a destination only through this map, and only
+    /// when the mapped address is a member of the <c>Endpoint=</c> pool: an entry naming any other
+    /// address is dropped, so a response can never steer traffic at an address the operator did not
+    /// list — and every routable address already passed the pool's own TLS validation. Lenient like
+    /// the other keys: malformed entries are skipped, never thrown on.
+    /// </summary>
+    internal Dictionary<string, string> RoutingNodeAddresses
+    {
+        get
+        {
+            Dictionary<string, string> map = new(StringComparer.Ordinal);
+
+            if (!Config.TryGetValue("RoutingNodes", out string? raw) || string.IsNullOrWhiteSpace(raw))
+                return map;
+
+            CamusEndpointPool pool = EndpointPool;
+            foreach (string entry in raw.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+            {
+                // The node identity is "host:port" and the address is a URL, so the first '=' is
+                // the only unambiguous separator.
+                int separator = entry.IndexOf('=');
+                if (separator <= 0 || separator == entry.Length - 1)
+                    continue;
+
+                string nodeId = entry[..separator].Trim();
+                string address = entry[(separator + 1)..].Trim();
+
+                if (nodeId.Length > 0 && pool.Contains(address))
+                    map[nodeId] = address;
+            }
+
+            return map;
+        }
+    }
+
+    /// <summary>
+    /// The learned-statement router for this connection string, or null when routing is off — the
+    /// default, and also the effective state when <c>RoutingNodes=</c> maps nothing usable
+    /// (<see cref="CamusRoutingMode.Learned"/> needs at least one mapped endpoint,
+    /// <see cref="CamusRoutingMode.Auto"/> at least two distinct ones). Shared process-wide per
+    /// deployment-plus-routing-configuration, for the same reason as <see cref="EndpointPool"/>:
+    /// EF Core rebuilds this builder per connection, and a per-builder router would start cold on
+    /// every request.
+    /// </summary>
+    internal CamusStatementRouter? Router
+    {
+        get
+        {
+            if (routerResolved)
+                return router;
+
+            CamusStatementRouter? resolved = BuildRouter();
+            router = resolved;
+            routerResolved = true;
+            return resolved;
+        }
+    }
+
+    private CamusStatementRouter? BuildRouter()
+    {
+        CamusRoutingMode mode = RoutingMode;
+        if (mode == CamusRoutingMode.Off)
+            return null;
+
+        Dictionary<string, string> nodes = RoutingNodeAddresses;
+
+        bool enabled = mode switch
+        {
+            CamusRoutingMode.Learned => nodes.Count > 0,
+            CamusRoutingMode.Auto => new HashSet<string>(nodes.Values, StringComparer.OrdinalIgnoreCase).Count >= 2,
+            _ => false,
+        };
+
+        if (!enabled)
+            return null;
+
+        int maxHintAge = RoutingMaxHintAgeMs;
+        string routerKey = string.Join(
+            '|',
+            DeploymentKey,
+            mode,
+            maxHintAge,
+            string.Join(',', nodes.OrderBy(static pair => pair.Key, StringComparer.Ordinal)
+                .Select(static pair => $"{pair.Key}={pair.Value}")));
+
+        CamusEndpointPool pool = EndpointPool;
+        return CamusStatementRouter.Shared(routerKey, () => new CamusStatementRouter(nodes, pool, maxHintAge));
+    }
 
     private T? ParseEnum<T>(string key) where T : struct, Enum
         => Config.TryGetValue(key, out string? raw) && Enum.TryParse(raw, ignoreCase: true, out T value)

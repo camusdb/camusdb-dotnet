@@ -238,7 +238,8 @@ internal sealed class GrpcTransport(CamusTokenProvider auth, GrpcBatchOptions? b
             // the cursor) and is absent for an unhinted statement, which maps to null metadata just as on REST.
             return new QueryTransportResult(
                 BuildResultSet(result.Schema, result.Rows),
-                CamusCacheMetadata.FromProto(result.CacheMetadata));
+                CamusCacheMetadata.FromProto(result.CacheMetadata),
+                CamusRoutingAdvice.FromProto(result.Routing));
         }
         catch (RpcException ex)
         {
@@ -261,7 +262,7 @@ internal sealed class GrpcTransport(CamusTokenProvider auth, GrpcBatchOptions? b
         return CamusRowSource.Buffered(result.ResultSet);
     }
 
-    public async Task<int> ExecuteNonQueryAsync(TransportSqlRequest request, CancellationToken cancellationToken)
+    public async Task<NonQueryTransportResult> ExecuteNonQueryAsync(TransportSqlRequest request, CancellationToken cancellationToken)
     {
         await EnsureTokenAsync(cancellationToken).ConfigureAwait(false);
 
@@ -275,7 +276,7 @@ internal sealed class GrpcTransport(CamusTokenProvider auth, GrpcBatchOptions? b
 
             ObserveToken(result.Token);
 
-            return result.AffectedRows;
+            return new NonQueryTransportResult(result.AffectedRows, CamusRoutingAdvice.FromProto(result.Routing));
         }
         catch (RpcException ex)
         {
@@ -735,6 +736,10 @@ internal sealed class GrpcTransport(CamusTokenProvider auth, GrpcBatchOptions? b
             wire.CausalTokenL = l;
             wire.CausalTokenC = c;
         }
+
+        // Forwarded for prepared and inline requests identically — negotiation is a property of the
+        // statement's execution, not of how its text traveled. Zero (the default) asks for nothing.
+        wire.RoutingAcceptVersion = request.RoutingAcceptVersion;
 
         return wire;
     }

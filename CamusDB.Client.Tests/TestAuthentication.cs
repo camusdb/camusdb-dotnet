@@ -338,7 +338,7 @@ public class TestAuthentication
         FakeTransport inner = new() { FailuresBeforeSuccess = 1, FailureCode = "CADB0516" };
         AuthenticatingTransport transport = new(inner, provider);
 
-        Assert.Equal(7, await transport.ExecuteNonQueryAsync(Request(), default));
+        Assert.Equal(7, (await transport.ExecuteNonQueryAsync(Request(), default)).AffectedRows);
         Assert.Equal(2, inner.Calls);
 
         // The rejected token was discarded, so the next request mints a replacement. (The fake transport
@@ -419,7 +419,7 @@ public class TestAuthentication
         FakeTransport inner = new();
         AuthenticatingTransport transport = new(inner, provider);
 
-        Assert.Equal(7, await transport.ExecuteNonQueryAsync(Request(), default));
+        Assert.Equal(7, (await transport.ExecuteNonQueryAsync(Request(), default)).AffectedRows);
         Assert.Equal(1, inner.Calls);
         Assert.Equal(0, login.Logins);
     }
@@ -481,14 +481,14 @@ public class TestAuthentication
 
         public CamusProtocol Protocol => CamusProtocol.Rest;
 
-        public Task<int> ExecuteNonQueryAsync(TransportSqlRequest request, CancellationToken cancellationToken)
+        public Task<NonQueryTransportResult> ExecuteNonQueryAsync(TransportSqlRequest request, CancellationToken cancellationToken)
         {
             Calls++;
 
             if (Calls <= FailuresBeforeSuccess)
                 throw new CamusException(FailureCode, "rejected");
 
-            return Task.FromResult(7);
+            return Task.FromResult(new NonQueryTransportResult(7));
         }
 
         public Task<StartTransactionResult> StartTransactionAsync(string endpoint, string database, CamusTransactionOptions options, int timeoutSeconds, CancellationToken cancellationToken)

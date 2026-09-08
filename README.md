@@ -58,6 +58,9 @@ Supported connection string keys:
 | `BackupEndpoint` | No | HTTP endpoint for the backup admin API. Defaults to `Endpoint`; required with `Protocol=grpc`. See [Backups](#backups). |
 | `BackupTimeout` | No | Backup admin request timeout in seconds (default: `300`). See [Backups](#backups). |
 | `AllowInsecureCredentials` | No | `true` waives the client-side refusal to send credentials to a remote plaintext endpoint. See [TLS](#tls). |
+| `RoutingMode` | No | Learned statement routing: `Auto` (default), `Learned`, or `Off`. See [Learned routing](#learned-routing). |
+| `RoutingNodes` | No | Trust map from server node identities to `Endpoint` pool members. See [Learned routing](#learned-routing). |
+| `RoutingMaxHintAge` | No | Ceiling in milliseconds on how long a learned route may be reused (default: `5000`). |
 
 `Endpoint` also supports a comma-separated pool. The client selects endpoints with round-robin routing:
 
@@ -67,6 +70,25 @@ CamusConnectionStringBuilder builder = new(
 ```
 
 When a request fails because an endpoint is unreachable, that endpoint is set aside for 30 seconds and skipped meanwhile; a node that is still down is set aside again by the next request that draws it. The rotation and that health are shared by every connection carrying the same `Endpoint` value, so they still mean something under EF Core, which builds a connection-string builder per connection.
+
+### Learned routing
+
+A CamusDB server (with `sql_routing_advice_enabled`, on by default) can attach **advisory routing metadata** to a successful SQL response: which node leads the data behind that statement. With routing enabled, the driver learns from it and sends the statement's future executions straight to that node, skipping a forwarding hop. This is a latency optimization only — it changes no result, no isolation, and no commit behavior, and the server still executes correctly wherever a request lands.
+
+```csharp
+CamusConnectionStringBuilder builder = new(
+    "Endpoint=http://a:5095,http://b:5095,http://c:5095;Database=test;RoutingMode=Learned;" +
+    "RoutingNodes='camus-a:7070=http://a:5095,camus-b:7070=http://b:5095,camus-c:7070=http://c:5095'");
+```
+
+- **`RoutingNodes` is the routing authority.** The server advertises an opaque node identity (its `host:port` cluster identity); it becomes a destination only through this map, and only when the mapped address is also a member of the `Endpoint` pool. The driver never dials a server-provided address, so a response can never steer traffic anywhere the operator did not list. Quote the value — it contains `=`.
+- **Modes.** `Auto` (default) negotiates only when the map names at least two distinct endpoints — a single load-balancer URL is not a set of routable nodes — so the trust map is the opt-in: a connection string without `RoutingNodes` sends requests byte-identical to a pre-routing driver. `Learned` negotiates when at least one identity is mapped. `Off` never negotiates and is the explicit kill switch.
+- **What is learned.** Advice is cached per (database, exact SQL text, statement kind) with a TTL of `min(server maxAgeMs, RoutingMaxHintAge)`, measured monotonically from receipt. Parameterized and prepared workloads are where reuse pays; a hint never generalizes from one SQL string to another. Late replies cannot overwrite newer routes, and the cache is bounded (4096 entries / 4 MiB).
+- **Precedence.** An explicit transaction stays pinned to the endpoint it began on — advice may inform the next transaction, never relocate a live one. A learned route pointing at a quarantined endpoint falls back to rotation. Routing adds no retry of any kind.
+- Learned state is shared per deployment-and-configuration, like the endpoint pool, so it stays warm under EF Core.
+- The eligible statements and the full wire contract are documented in the server repo: `docs/sql-routing-advice.md`. Older servers ignore the negotiation field, and the driver works against them unchanged.
+
+The most recent advice a command received is exposed on `CamusCommand.LastRoutingAdvice` for diagnostics.
 
 **How the string is parsed.** Keys are matched without regard to case and are trimmed, so `password=`, `Password=` and ` Password ` all reach the same key. A repeated key is an error rather than a silent first-wins.
 

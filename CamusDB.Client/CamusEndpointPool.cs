@@ -101,6 +101,42 @@ internal sealed class CamusEndpointPool
         throw new CamusException("CADB0000", "No reachable CamusDB endpoints are available");
     }
 
+    /// <summary>
+    /// Whether an endpoint is currently set aside. Learned statement routing consults this before
+    /// preferring an endpoint: a route pointing at a quarantined node falls back to rotation
+    /// instead of steering traffic at a node that stopped answering. An address the pool does not
+    /// know reports as not quarantined — the caller's membership rules decide what to do with it.
+    /// </summary>
+    public bool IsQuarantined(string endpoint)
+    {
+        lock (sync)
+        {
+            long now = Environment.TickCount64;
+            for (int i = 0; i < endpoints.Length; i++)
+            {
+                if (string.Equals(endpoints[i], endpoint, StringComparison.OrdinalIgnoreCase))
+                    return quarantinedUntil[i] > now;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Whether an address is one of this pool's configured endpoints. The routing trust map uses
+    /// it to refuse mapping a node identity to any address the operator did not list.
+    /// </summary>
+    public bool Contains(string endpoint)
+    {
+        foreach (string candidate in endpoints)
+        {
+            if (string.Equals(candidate, endpoint, StringComparison.OrdinalIgnoreCase))
+                return true;
+        }
+
+        return false;
+    }
+
     /// <summary>Sets an endpoint aside for <see cref="QuarantinePeriod"/>, so the endpoints that are
     /// answering carry the traffic meanwhile.</summary>
     public void MarkUnreachable(string endpoint)

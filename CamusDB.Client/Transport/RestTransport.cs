@@ -141,6 +141,7 @@ internal sealed class RestTransport(CamusEndpointPool endpoints, CamusTokenProvi
                     throw new CamusException("CADB0000", "Empty result returned");
 
                 CamusCacheMetadata? cacheMetadata = CamusCacheMetadata.FromJson(root);
+                CamusRoutingAdvice? routing = CamusRoutingAdvice.FromJson(root);
 
                 // The response carries an authoritative `columns` schema plus positional `rows`. Decoding
                 // from the schema (not by peeking at the first row) means the reader reports field count,
@@ -150,7 +151,7 @@ internal sealed class RestTransport(CamusEndpointPool endpoints, CamusTokenProvi
                     root.TryGetProperty("columns", out JsonElement columns) ? columns : default,
                     root.TryGetProperty("rows", out JsonElement rows) ? rows : default);
 
-                return new QueryTransportResult(resultSet, cacheMetadata);
+                return new QueryTransportResult(resultSet, cacheMetadata, routing);
             }
             catch (JsonException)
             {
@@ -215,10 +216,10 @@ internal sealed class RestTransport(CamusEndpointPool endpoints, CamusTokenProvi
         }
     }
 
-    public Task<int> ExecuteNonQueryAsync(TransportSqlRequest request, CancellationToken cancellationToken)
+    public Task<NonQueryTransportResult> ExecuteNonQueryAsync(TransportSqlRequest request, CancellationToken cancellationToken)
         => WithPreparedAsync(request, ExecuteNonQueryCoreAsync, cancellationToken);
 
-    private async Task<int> ExecuteNonQueryCoreAsync(
+    private async Task<NonQueryTransportResult> ExecuteNonQueryCoreAsync(
         TransportSqlRequest request, PreparedBinding? binding, CancellationToken cancellationToken)
     {
         string endpoint = request.Endpoint;
@@ -238,7 +239,7 @@ internal sealed class RestTransport(CamusEndpointPool endpoints, CamusTokenProvi
             if (response is null)
                 throw new CamusException("CADB0000", "Empty result returned");
 
-            return response.Rows;
+            return new NonQueryTransportResult(response.Rows, CamusRoutingAdvice.FromResponse(response.Routing));
         }
         catch (FlurlHttpException ex)
         {
@@ -638,6 +639,8 @@ internal sealed class RestTransport(CamusEndpointPool endpoints, CamusTokenProvi
             wire.TxnIdCounter = request.TxnIdCounter!.Value;
         }
 
+        wire.RoutingAcceptVersion = request.RoutingAcceptVersion;
+
         return wire;
     }
 
@@ -667,6 +670,8 @@ internal sealed class RestTransport(CamusEndpointPool endpoints, CamusTokenProvi
             wire.TransactionMode = options.ModeWire;
             wire.Locking = options.LockingWire;
         }
+
+        wire.RoutingAcceptVersion = request.RoutingAcceptVersion;
 
         return wire;
     }

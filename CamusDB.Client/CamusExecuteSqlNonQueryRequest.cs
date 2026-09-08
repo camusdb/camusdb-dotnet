@@ -59,5 +59,11 @@ public sealed class CamusExecuteSqlNonQueryRequest
     [JsonPropertyName("locking")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? Locking { get; set; }
+
+    /// <summary>Highest routing-metadata version accepted on the response; 0 (omitted from the JSON)
+    /// keeps the exact pre-routing request shape and asks for none.</summary>
+    [JsonPropertyName("routingAcceptVersion")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public int RoutingAcceptVersion { get; set; }
 }
 

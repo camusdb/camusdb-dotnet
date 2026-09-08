@@ -67,6 +67,14 @@ internal sealed class TransportSqlRequest
     /// </summary>
     public bool Prepared { get; init; }
 
+    /// <summary>
+    /// Highest routing-metadata version the caller accepts on this statement's response; 0 — the
+    /// default — asks for none and keeps the exact pre-routing wire shape. Set by the ADO layer
+    /// only for unpinned statements of a routing-enabled connection; the transport forwards it
+    /// verbatim on both protocols.
+    /// </summary>
+    public int RoutingAcceptVersion { get; init; }
+
     public bool HasTransaction => TxnIdPT.HasValue && TxnIdCounter.HasValue;
 }
 
@@ -122,9 +130,27 @@ internal readonly struct StartTransactionResult(long txnIdPT, uint txnIdCounter,
 
 /// <summary>The decoded result of a query plus any server-reported cache metadata (REST only; gRPC has
 /// no cache-metadata channel and leaves it null).</summary>
-internal sealed class QueryTransportResult(CamusResultSet resultSet, CamusCacheMetadata? cacheMetadata)
+internal sealed class QueryTransportResult(
+    CamusResultSet resultSet, CamusCacheMetadata? cacheMetadata, CamusRoutingAdvice? routing = null)
 {
     public CamusResultSet ResultSet { get; } = resultSet;
 
     public CamusCacheMetadata? CacheMetadata { get; } = cacheMetadata;
+
+    /// <summary>Routing advice the response carried, or null — absent unless the request set
+    /// <see cref="TransportSqlRequest.RoutingAcceptVersion"/> and the statement produced advice.</summary>
+    public CamusRoutingAdvice? Routing { get; } = routing;
+}
+
+/// <summary>
+/// The result of a non-query statement: the affected-row count plus any routing advice the
+/// response carried. An envelope rather than a bare <see cref="int"/> so advisory response
+/// metadata has somewhere to travel without a second channel.
+/// </summary>
+internal sealed class NonQueryTransportResult(int affectedRows, CamusRoutingAdvice? routing = null)
+{
+    public int AffectedRows { get; } = affectedRows;
+
+    /// <inheritdoc cref="QueryTransportResult.Routing"/>
+    public CamusRoutingAdvice? Routing { get; } = routing;
 }
