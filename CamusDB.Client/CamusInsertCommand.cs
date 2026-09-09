@@ -31,10 +31,11 @@ public class CamusInsertCommand : CamusCommand
     public override async Task<int> ExecuteNonQueryAsync(CancellationToken cancellationToken)
     {
         ICamusTransport transport = builder.GetTransport();
+        string endpoint = await GetEndpointAsync(cancellationToken).ConfigureAwait(false);
 
         TransportInsertRequest request = new()
         {
-            Endpoint = GetEndpoint(),
+            Endpoint = endpoint,
             Database = builder.Config["Database"],
             Table = GetRequestTarget(),
             Values = GetCommandParameters(transport.Protocol),

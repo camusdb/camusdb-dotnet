@@ -215,6 +215,12 @@ public sealed class CamusConnection : DbConnection
     /// read/write mode, and pessimistic/optimistic locking). Any knob left <see langword="null"/> falls
     /// back to this connection's <see cref="DefaultTransactionOptions"/>, then the connection-string
     /// defaults, then the server default.
+    ///
+    /// <para>With learned routing off (no router — the default without a <c>RoutingNodes=</c> map),
+    /// <c>BEGIN</c> is sent here on the pool's next endpoint. With routing on, <c>BEGIN</c> is deferred
+    /// to the transaction's first statement, which starts it on that statement's learned endpoint —
+    /// or sent here at once when <see cref="CamusTransactionOptions.Affinity"/> names the statement to
+    /// route by. See <see cref="CamusTransaction"/> for what a caller can observe of the deferral.</para>
     /// </summary>
     public Task<CamusTransaction> BeginTransactionAsync(CamusTransactionOptions? options, CancellationToken cancellationToken = default) =>
         BeginTransactionImplAsync(options, cancellationToken);
@@ -223,16 +229,34 @@ public sealed class CamusConnection : DbConnection
     {
         string database = builder.Config["Database"];
         CamusTransactionOptions effective = ResolveTransactionOptions(options);
-        string endpoint = builder.GetEndpoint();
+        CamusStatementRouter? router = builder.Router;
 
-        StartTransactionResult result = await builder.GetTransport()
-            .StartTransactionAsync(endpoint, database, effective, builder.CommandTimeout, cancellationToken)
-            .ConfigureAwait(false);
-
-        return new CamusTransaction(result.TxnIdPT, result.TxnIdCounter, endpoint, this, builder, effective)
+        if (router is null)
         {
-            StreamSlot = result.StreamSlot,
-        };
+            // Routing off: the pre-routing behavior, byte for byte — BEGIN on rotation, right now.
+            string endpoint = builder.GetEndpoint();
+
+            StartTransactionResult result = await builder.GetTransport()
+                .StartTransactionAsync(endpoint, database, effective, builder.CommandTimeout, cancellationToken)
+                .ConfigureAwait(false);
+
+            return new CamusTransaction(result.TxnIdPT, result.TxnIdCounter, endpoint, this, builder, effective)
+            {
+                StreamSlot = result.StreamSlot,
+            };
+        }
+
+        CamusTransaction deferred = new(this, builder, effective);
+
+        // An explicit affinity starts the transaction here, on the named statement's learned endpoint
+        // (rotation when cold). Without one, the first statement chooses.
+        if (effective.Affinity is string affinity)
+        {
+            string? learned = router.SelectEndpoint(database, affinity, CamusRouteOpKind.Query, out _);
+            await deferred.EnsureStartedAsync(learned, cancellationToken).ConfigureAwait(false);
+        }
+
+        return deferred;
     }
 
     protected override DbCommand CreateDbCommand()

@@ -20,7 +20,7 @@ public class CamusPingCommand : CamusCommand
     /// <inheritdoc />
     public override async Task<int> ExecuteNonQueryAsync(CancellationToken cancellationToken)
     {
-        string endpoint = GetEndpoint();
+        string endpoint = await GetEndpointAsync(cancellationToken).ConfigureAwait(false);
 
         bool alive = await builder.GetTransport().PingAsync(endpoint, CommandTimeout, cancellationToken).ConfigureAwait(false);
 

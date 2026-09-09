@@ -141,7 +141,15 @@ public class CamusCommand : DbCommand, ICloneable
 
     protected string GetRequestTarget() => CommandText;
 
-    protected string GetEndpoint() => transaction?.Endpoint ?? builder.GetEndpoint();
+    /// <summary>
+    /// The endpoint for an operation that carries no routing metadata: the transaction's pin when the
+    /// command runs inside one — starting a deferred transaction on the pool's rotation if nothing
+    /// started it yet — else the pool's next endpoint.
+    /// </summary>
+    protected Task<string> GetEndpointAsync(CancellationToken cancellationToken)
+        => transaction is not null
+            ? transaction.EnsureStartedAsync(preferredEndpoint: null, cancellationToken)
+            : Task.FromResult(builder.GetEndpoint());
 
     /// <summary>
     /// Resolves where one statement is sent, in strict precedence order: an explicit transaction's
@@ -150,20 +158,37 @@ public class CamusCommand : DbCommand, ICloneable
     /// when the connection enables routing; then the pool's ordinary rotation. Also reports the
     /// router and the route entry's revision so the reply's advice can be applied conditionally —
     /// a late reply must never overwrite a route a faster reply already refreshed. A null router in
-    /// the result means "do not negotiate": pinned statements and routing-off connections keep the
-    /// exact pre-routing request shape.
+    /// the result means "do not negotiate": routing-off connections keep the exact pre-routing
+    /// request shape.
+    ///
+    /// <para>A deferred transaction (routing on, no statement yet) is started here by its first
+    /// statement, on that statement's learned endpoint when one is fresh and on rotation otherwise;
+    /// every later statement finds the pin already set. Statements inside a transaction still
+    /// negotiate and learn — the advice feeds the <em>next</em> transaction's start — but the route
+    /// they learn never moves this one.</para>
     /// </summary>
-    private (string Endpoint, CamusStatementRouter? Router, long ObservedRevision) RouteEndpoint(CamusRouteOpKind kind)
+    private async Task<(string Endpoint, CamusStatementRouter? Router, long ObservedRevision)> RouteEndpointAsync(
+        CamusRouteOpKind kind, CancellationToken cancellationToken)
     {
-        if (transaction is not null)
-            return (transaction.Endpoint, null, 0);
-
         CamusStatementRouter? router = builder.Router;
+
+        if (transaction is not null)
+        {
+            if (router is null)
+                return (await transaction.EnsureStartedAsync(preferredEndpoint: null, cancellationToken).ConfigureAwait(false), null, 0);
+
+            // Consulted even when the pin is already set: the observed revision is what lets the reply's
+            // advice refresh the route conditionally instead of losing to the entry it would refresh.
+            string? learned = router.SelectEndpoint(builder.Config["Database"], GetRequestTarget(), kind, out long observed);
+            string pinned = await transaction.EnsureStartedAsync(learned, cancellationToken).ConfigureAwait(false);
+            return (pinned, router, observed);
+        }
+
         if (router is null)
             return (builder.GetEndpoint(), null, 0);
 
-        string? learned = router.SelectEndpoint(builder.Config["Database"], GetRequestTarget(), kind, out long revision);
-        return (learned ?? builder.GetEndpoint(), router, revision);
+        string? route = router.SelectEndpoint(builder.Config["Database"], GetRequestTarget(), kind, out long revision);
+        return (route ?? builder.GetEndpoint(), router, revision);
     }
 
     /// <summary>
@@ -590,7 +615,7 @@ public class CamusCommand : DbCommand, ICloneable
 
         // A learned route still steers the send — reuse costs nothing here — but the streaming
         // endpoint's trailer carries no routing metadata, so nothing is negotiated or learned.
-        (string endpoint, _, _) = RouteEndpoint(CamusRouteOpKind.Query);
+        (string endpoint, _, _) = await RouteEndpointAsync(CamusRouteOpKind.Query, cancellationToken).ConfigureAwait(false);
 
         TransportSqlRequest request = new()
         {
@@ -624,7 +649,8 @@ public class CamusCommand : DbCommand, ICloneable
         if (IsDmlStatement(CommandText))
             return await ExecuteDmlAsReaderAsync(cancellationToken).ConfigureAwait(false);
 
-        (string endpoint, CamusStatementRouter? router, long observedRevision) = RouteEndpoint(CamusRouteOpKind.Query);
+        (string endpoint, CamusStatementRouter? router, long observedRevision) =
+            await RouteEndpointAsync(CamusRouteOpKind.Query, cancellationToken).ConfigureAwait(false);
 
         TransportSqlRequest request = new()
         {
@@ -665,7 +691,8 @@ public class CamusCommand : DbCommand, ICloneable
     /// </summary>
     private async Task<int> ExecuteNonQueryCoreAsync(CancellationToken cancellationToken)
     {
-        (string endpoint, CamusStatementRouter? router, long observedRevision) = RouteEndpoint(CamusRouteOpKind.NonQuery);
+        (string endpoint, CamusStatementRouter? router, long observedRevision) =
+            await RouteEndpointAsync(CamusRouteOpKind.NonQuery, cancellationToken).ConfigureAwait(false);
 
         TransportSqlRequest request = new()
         {
@@ -738,9 +765,11 @@ public class CamusCommand : DbCommand, ICloneable
                 "It commits a replicated schema entry that a ROLLBACK cannot undo. " +
                 "Commit or roll back this transaction first, then run TRUNCATE.");
 
+        string ddlEndpoint = await GetEndpointAsync(cancellationToken).ConfigureAwait(false);
+
         TransportSqlRequest request = new()
         {
-            Endpoint = GetEndpoint(),
+            Endpoint = ddlEndpoint,
             Database = builder.Config["Database"],
             Sql = GetRequestTarget(),
             TxnIdPT = transaction?.TxnIdPT,
@@ -788,7 +817,7 @@ public class CamusCommand : DbCommand, ICloneable
 
         CamusPreparedStatementPolicy policy = builder.PreparedStatements;
         string database = builder.Config["Database"];
-        string endpoint = GetEndpoint();
+        string endpoint = await GetEndpointAsync(cancellationToken).ConfigureAwait(false);
 
         if (policy.Pin(database, CommandText, out (string Database, string Sql)? evicted) == PrepareDecision.Register)
             await RegisterAsync(policy, endpoint, database, CommandText, cancellationToken).ConfigureAwait(false);

@@ -25,6 +25,17 @@ public sealed record CamusTransactionOptions
 
     public CamusLocking? Locking { get; init; }
 
+    /// <summary>
+    /// The exact SQL text of a statement whose learned route should decide where this transaction
+    /// starts. With learned routing on, <c>BEGIN</c> is normally deferred to the first statement so the
+    /// transaction starts on that statement's leader; a caller that knows the transaction's hot
+    /// statement is a later one names it here, and <c>BEGIN</c> is sent at once to that statement's
+    /// learned endpoint (the pool's rotation when nothing is learned yet). Compared as the route cache
+    /// compares: exact text, query kind. Ignored with routing off. Never a routing authority — a route
+    /// only ever names an operator-configured endpoint.
+    /// </summary>
+    public string? Affinity { get; init; }
+
     /// <summary>A pessimistic, read-write transaction at the server's default isolation level.</summary>
     public static CamusTransactionOptions Default { get; } = new();
 
@@ -46,6 +57,7 @@ public sealed record CamusTransactionOptions
             IsolationLevel = IsolationLevel ?? fallback.IsolationLevel,
             Mode = Mode ?? fallback.Mode,
             Locking = Locking ?? fallback.Locking,
+            Affinity = Affinity ?? fallback.Affinity,
         };
     }
 
