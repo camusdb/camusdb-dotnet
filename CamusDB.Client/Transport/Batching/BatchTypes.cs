@@ -91,10 +91,16 @@ internal sealed class GrpcBatchOptions
     /// <summary>Number of long-lived <c>BatchExecute</c> streams multiplexed per endpoint.</summary>
     public int ChannelPoolSize { get; init; } = 2;
 
-    /// <summary>When a pump drain produces fewer than this many ops, wait <see cref="CoalescingDelayMs"/>
-    /// to let more accumulate before the next drain. A threshold of 1 (or a zero delay) disables it.</summary>
+    /// <summary>When a pump drain produces at least two but fewer than this many ops, wait
+    /// <see cref="CoalescingDelayMs"/> to let more accumulate before the next drain. A threshold of 1 (or a
+    /// zero delay) disables it. A single-op drain never waits: that is one caller in request/response
+    /// lockstep, and a pause there is pure latency.</summary>
     public int CoalescingThreshold { get; init; } = 10;
 
-    /// <summary>Coalescing delay in milliseconds.</summary>
-    public int CoalescingDelayMs { get; init; } = 2;
+    /// <summary>Coalescing delay in milliseconds. Default 0 (off): each op is its own stream message, so the
+    /// pause only lets the transport pack frames, and measured against a real cluster the former 2 ms
+    /// default cost every statement ~3.5 ms and a 128-worker bank workload 12% of its throughput while the
+    /// server formed larger batches on its own. Set 1-2 for clients that fire genuine bursts from many
+    /// concurrent callers on one connection.</summary>
+    public int CoalescingDelayMs { get; init; } = 0;
 }

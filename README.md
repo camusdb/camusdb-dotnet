@@ -54,7 +54,7 @@ Supported connection string keys:
 | `AutoPrepareMinUsages` | No | Executions of the same SQL before it is prepared (default: `2`). |
 | `ChannelPoolSize` | No | gRPC only: long-lived `BatchExecute` streams per endpoint (default: `2`). See [Transport](#transport-rest--grpc). |
 | `CoalescingThreshold` | No | gRPC only: ops a drain must produce before the pump stops waiting for more (default: `10`; `1` disables coalescing). |
-| `CoalescingDelay` | No | gRPC only: milliseconds the pump waits to accumulate a larger batch (default: `2`; `0` disables coalescing). |
+| `CoalescingDelay` | No | gRPC only: milliseconds the pump waits after a multi-op drain to accumulate a larger burst (default: `0`, off; a single-op drain never waits). |
 | `BackupEndpoint` | No | HTTP endpoint for the backup admin API. Defaults to `Endpoint`; required with `Protocol=grpc`. See [Backups](#backups). |
 | `BackupTimeout` | No | Backup admin request timeout in seconds (default: `300`). See [Backups](#backups). |
 | `AllowInsecureCredentials` | No | `true` waives the client-side refusal to send credentials to a remote plaintext endpoint. See [TLS](#tls). |
@@ -209,7 +209,7 @@ The server exposes REST and gRPC on **separate ports** (for example `5095` for R
 
 Under gRPC the data plane — queries, non-queries, and the transaction lifecycle — is multiplexed over a small pool of long-lived `BatchExecute` duplex streams, so concurrent operations coalesce onto shared streams instead of each paying a unary round-trip. Autocommit statements fan out across the pool; a transaction's `BEGIN`/statements/`COMMIT` are pinned to one stream so the server orders them. DDL and ping stay on the unary RPCs. This is transparent — the same `CamusCommand`/`CamusTransaction` API drives it.
 
-The stream pool is sized by `ChannelPoolSize` (default `2`). It is *not* a cap on in-flight transactions — many transactions hash onto the same streams and interleave — so the default suits most workloads; raise it when many long-running streaming queries against one endpoint would otherwise queue behind each other on a shared stream. `CoalescingThreshold` and `CoalescingDelay` trade a couple of milliseconds of latency for fewer, larger writes when a burst of operations arrives together.
+The stream pool is sized by `ChannelPoolSize` (default `2`). It is *not* a cap on in-flight transactions — many transactions hash onto the same streams and interleave — so the default suits most workloads; raise it when many long-running streaming queries against one endpoint would otherwise queue behind each other on a shared stream. `CoalescingThreshold` and `CoalescingDelay` trade latency for frame packing when a burst of operations arrives together on one connection; the delay is off by default and is never applied after a single-op drain, because a caller in request/response lockstep would pay it on every round trip (measured: ~3.5 ms per statement, 12% of throughput at 128 workers).
 
 If you are coming from Cloud Spanner: `ChannelPoolSize` is the analogue of `NumChannels`. There is no analogue of `MinSessions`/`MaxSessions`, because CamusDB has no server-side session object to pool — nothing is created ahead of a statement, nothing expires while idle, and there is no per-node session ceiling. The `SessionPoolManager`/`SessionPoolOptions` types are obsolete no-ops kept only so Spanner-shaped code still compiles.
 

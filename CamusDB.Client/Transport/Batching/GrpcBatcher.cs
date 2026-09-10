@@ -284,9 +284,15 @@ internal sealed class GrpcBatcher : IAsyncDisposable
                     drained++;
                 }
 
-                // Coalesce: after writing a small batch, pause briefly so more ops accumulate before the
-                // next drain writes them together.
-                if (drained > 0 && options.CoalescingThreshold > 1
+                // Coalesce: after writing a small burst, pause briefly so more ops accumulate before the
+                // next drain writes them together. Only after a drain of TWO or more items: a one-item drain
+                // is a request/response ping-pong (one caller, whose next op cannot arrive until this one is
+                // answered), and sleeping there adds the whole delay to every round trip while gaining
+                // nothing — measured on the bank workload as ~3.5 ms per statement, 22 ms per six-statement
+                // transfer, and a fifth of the throughput at low concurrency. Each item is its own stream
+                // message either way; the pause only lets the transport pack frames, so it is worth paying
+                // only when a burst is demonstrably arriving.
+                if (drained >= 2 && options.CoalescingThreshold > 1
                     && drained < options.CoalescingThreshold && options.CoalescingDelayMs > 0)
                 {
                     try { await Task.Delay(options.CoalescingDelayMs, shutdown.Token).ConfigureAwait(false); }

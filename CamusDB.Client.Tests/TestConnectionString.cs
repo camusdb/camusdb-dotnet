@@ -104,7 +104,7 @@ public class TestConnectionString : BaseTest
 
         Assert.Equal(2, builder.BatchOptions.ChannelPoolSize);
         Assert.Equal(10, builder.BatchOptions.CoalescingThreshold);
-        Assert.Equal(2, builder.BatchOptions.CoalescingDelayMs);
+        Assert.Equal(0, builder.BatchOptions.CoalescingDelayMs);
     }
 
     [Fact]
@@ -126,6 +126,6 @@ public class TestConnectionString : BaseTest
 
         Assert.Equal(2, builder.BatchOptions.ChannelPoolSize);
         Assert.Equal(10, builder.BatchOptions.CoalescingThreshold);
-        Assert.Equal(2, builder.BatchOptions.CoalescingDelayMs);
+        Assert.Equal(0, builder.BatchOptions.CoalescingDelayMs);
     }
 }

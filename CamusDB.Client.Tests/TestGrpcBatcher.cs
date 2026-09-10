@@ -77,6 +77,31 @@ public class TestGrpcBatcher
     }
 
     [Fact]
+    public async Task SequentialSingleOpsNeverPayTheCoalescingDelay()
+    {
+        // One caller in request/response lockstep: every drain writes exactly one item. With the old
+        // rule the pump slept CoalescingDelayMs after each of them, adding the whole delay to every round
+        // trip. With a deliberately huge delay, twenty sequential ops must still finish far inside it.
+        await using GrpcBatcher batcher = new(
+            new GrpcBatchOptions { ChannelPoolSize = 1, CoalescingDelayMs = 200, CoalescingThreshold = 10 },
+            id => new FakeTransport(id));
+
+        System.Diagnostics.Stopwatch sw = System.Diagnostics.Stopwatch.StartNew();
+        for (int i = 0; i < 20; i++)
+            await batcher.EnqueueNonQueryAsync(new SqlRequest { Sql = "u" }, slotIndex: null, default);
+        sw.Stop();
+
+        Assert.True(sw.ElapsedMilliseconds < 200,
+            $"20 sequential single-op round trips took {sw.ElapsedMilliseconds} ms; a 200 ms coalescing delay was applied to single-item drains");
+    }
+
+    [Fact]
+    public async Task DefaultOptionsDoNotCoalesce()
+    {
+        Assert.Equal(0, GrpcBatchOptions.Default.CoalescingDelayMs);
+    }
+
+    [Fact]
     public async Task ConcurrentQueriesEachGetTheirOwnResponse()
     {
         await using GrpcBatcher batcher = new(new GrpcBatchOptions { ChannelPoolSize = 2 }, id => new FakeTransport(id));
