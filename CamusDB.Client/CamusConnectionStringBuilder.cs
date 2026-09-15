@@ -596,7 +596,7 @@ public class CamusConnectionStringBuilder
             ICamusTransport Create()
             {
                 ICamusTransport inner = Protocol == CamusProtocol.Grpc
-                    ? new GrpcTransport(auth, BatchOptions)
+                    ? new GrpcTransport(EndpointPool, auth, BatchOptions)
                     : new RestTransport(EndpointPool, auth);
 
                 return new AuthenticatingTransport(inner, auth);

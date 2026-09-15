@@ -46,12 +46,16 @@ namespace CamusDB.Client.Transport;
 /// provider (Login has no token yet, Logout is handed the one to revoke), which is what keeps the
 /// provider from re-entering itself while it holds its login gate.</para>
 /// </summary>
-internal sealed class GrpcTransport(CamusTokenProvider auth, GrpcBatchOptions? batchOptions = null)
+internal sealed class GrpcTransport(CamusEndpointPool endpoints, CamusTokenProvider auth, GrpcBatchOptions? batchOptions = null)
     : ICamusTransport, ICamusLoginClient, IDisposable
 {
     // Per-transport rather than static: the stream pool and coalescing window are tuned from the
     // connection string, so two connection strings against different deployments size them independently.
     private readonly GrpcBatchOptions batchOptions = batchOptions ?? GrpcBatchOptions.Default;
+
+    // The deployment's endpoint pool, so a connect-level failure sets the endpoint aside for every
+    // caller sharing this transport — the REST transport has always done this; gRPC did not.
+    private readonly CamusEndpointPool endpoints = endpoints;
 
     private readonly ConcurrentDictionary<string, ChannelEntry> channels = new(StringComparer.OrdinalIgnoreCase);
 
@@ -177,7 +181,7 @@ internal sealed class GrpcTransport(CamusTokenProvider auth, GrpcBatchOptions? b
         }
         catch (RpcException ex)
         {
-            throw Translate(ex);
+            throw Translate(endpoint, ex);
         }
         finally
         {
@@ -210,7 +214,7 @@ internal sealed class GrpcTransport(CamusTokenProvider auth, GrpcBatchOptions? b
         }
         catch (RpcException ex)
         {
-            throw Translate(ex);
+            throw Translate(endpoint, ex);
         }
         finally
         {
@@ -243,7 +247,7 @@ internal sealed class GrpcTransport(CamusTokenProvider auth, GrpcBatchOptions? b
         }
         catch (RpcException ex)
         {
-            throw Translate(ex);
+            throw Translate(request.Endpoint, ex);
         }
         finally
         {
@@ -280,7 +284,7 @@ internal sealed class GrpcTransport(CamusTokenProvider auth, GrpcBatchOptions? b
         }
         catch (RpcException ex)
         {
-            throw Translate(ex);
+            throw Translate(request.Endpoint, ex);
         }
         finally
         {
@@ -316,7 +320,7 @@ internal sealed class GrpcTransport(CamusTokenProvider auth, GrpcBatchOptions? b
         }
         catch (RpcException ex)
         {
-            throw Translate(ex);
+            throw Translate(endpoint, ex);
         }
         finally
         {
@@ -420,7 +424,7 @@ internal sealed class GrpcTransport(CamusTokenProvider auth, GrpcBatchOptions? b
         }
         catch (RpcException ex)
         {
-            throw Translate(ex);
+            throw Translate(request.Endpoint, ex);
         }
     }
 
@@ -474,7 +478,7 @@ internal sealed class GrpcTransport(CamusTokenProvider auth, GrpcBatchOptions? b
         }
         catch (RpcException ex)
         {
-            throw Translate(ex);
+            throw Translate(request.Endpoint, ex);
         }
     }
 
@@ -492,7 +496,7 @@ internal sealed class GrpcTransport(CamusTokenProvider auth, GrpcBatchOptions? b
         }
         catch (RpcException ex)
         {
-            throw Translate(ex);
+            throw Translate(endpoint, ex);
         }
     }
 
@@ -603,7 +607,7 @@ internal sealed class GrpcTransport(CamusTokenProvider auth, GrpcBatchOptions? b
         }
         catch (RpcException ex)
         {
-            throw Translate(ex);
+            throw Translate(endpoint, ex);
         }
     }
 
@@ -619,7 +623,7 @@ internal sealed class GrpcTransport(CamusTokenProvider auth, GrpcBatchOptions? b
         }
         catch (RpcException ex)
         {
-            throw Translate(ex);
+            throw Translate(endpoint, ex);
         }
     }
 
@@ -881,6 +885,37 @@ internal sealed class GrpcTransport(CamusTokenProvider auth, GrpcBatchOptions? b
     /// domain errors arrive as an in-band <c>BatchError</c> and are already surfaced as
     /// <see cref="CamusException"/> by the batcher, so they bypass this path.
     /// </summary>
+    /// <summary>Translates a gRPC failure on <paramref name="endpoint"/>, quarantining the endpoint first
+    /// when the failure is that it could not be connected to.</summary>
+    private CamusException Translate(string endpoint, RpcException ex) => TranslateFailure(endpoints, endpoint, ex);
+
+    /// <summary>
+    /// The translation with its side effect made explicit for tests: an endpoint that could not be
+    /// connected to is marked unreachable on <paramref name="pool"/> and the failure surfaces as
+    /// <see cref="CamusClientErrorCodes.EndpointUnreachable"/> — a request that was never sent, safe to
+    /// retry elsewhere. Every other failure translates as before.
+    /// </summary>
+    internal static CamusException TranslateFailure(CamusEndpointPool? pool, string endpoint, RpcException ex)
+    {
+        // The pool learns from every shape that says the node is gone; only the never-sent shape
+        // changes the code the caller sees.
+        if (pool is not null)
+            CamusEndpointHealth.MarkUnreachableIfTransportFailed(pool, endpoint, ex);
+
+        if (CamusEndpointHealth.IsEndpointUnreachable(ex))
+        {
+            string reason = CamusErrorText.Sanitize(string.IsNullOrEmpty(ex.Status.Detail) ? ex.Message : ex.Status.Detail);
+            return new CamusException(CamusClientErrorCodes.EndpointUnreachable, $"Endpoint {endpoint} could not be reached: {reason}");
+        }
+
+        CamusException translated = Translate(ex);
+        // Name the endpoint on the generic transport code too, so an error artifact can say where a
+        // burst of unknown-outcome failures went (no code and no message carried it before).
+        return translated.Code == "CADB0000"
+            ? new CamusException(translated.Code, $"Endpoint {endpoint}: {translated.Message}")
+            : translated;
+    }
+
     private static CamusException Translate(RpcException ex)
     {
         string? code = null;
