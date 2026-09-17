@@ -12,6 +12,26 @@ public class CamusRelationalAnnotationProvider : RelationalAnnotationProvider
     public CamusRelationalAnnotationProvider(RelationalAnnotationProviderDependencies dependencies)
         : base(dependencies) { }
 
+    public override IEnumerable<IAnnotation> For(IColumn column, bool designTime)
+    {
+        foreach (var annotation in base.For(column, designTime))
+            yield return annotation;
+
+        if (!designTime)
+            yield break;
+
+        // A column can be shared by several properties (TPH, table splitting); the first one carrying
+        // a storage strategy wins, as for the index comment below.
+        foreach (var mapping in column.PropertyMappings)
+        {
+            if (mapping.Property.FindAnnotation(CamusAnnotationNames.ColumnStorage) is { Value: { } storage })
+            {
+                yield return new Annotation(CamusAnnotationNames.ColumnStorage, storage);
+                yield break;
+            }
+        }
+    }
+
     public override IEnumerable<IAnnotation> For(ITableIndex index, bool designTime)
     {
         foreach (var annotation in base.For(index, designTime))

@@ -1,4 +1,5 @@
 using System.Text;
+using CamusDB.Client;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Metadata;
@@ -122,6 +123,11 @@ public class CamusDatabaseCreator : RelationalDatabaseCreator
 
             if (pkProps.Contains(prop) || !prop.IsNullable)
                 sb.Append(" NOT NULL");
+
+            // Only a column with an explicit strategy gets the clause, so the DDL of a model without one
+            // is unchanged and still runs on a server that predates large-value storage.
+            if (prop.GetStorage() is { } storage)
+                sb.Append(" STORAGE ").Append(storage.ToSql());
         }
 
         // Emit a single table-level PRIMARY KEY constraint so that composite keys

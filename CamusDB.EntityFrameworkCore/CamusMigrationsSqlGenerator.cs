@@ -35,6 +35,8 @@ public class CamusMigrationsSqlGenerator : MigrationsSqlGenerator
             if (!col.IsNullable)
                 builder.Append(" NOT NULL");
 
+            AppendStorage(builder, col);
+
             if (col.Comment is not null)
                 builder.Append(" COMMENT ").Append(CamusCommentSyntax.Literal(col.Comment, $"column '{operation.Name}.{col.Name}'"));
         }
@@ -96,6 +98,8 @@ public class CamusMigrationsSqlGenerator : MigrationsSqlGenerator
             builder.Append(" DEFAULT (").Append(FormatDefaultValue(operation.DefaultValue)).Append(")");
         else if (!string.IsNullOrEmpty(operation.DefaultValueSql))
             builder.Append(" DEFAULT (").Append(operation.DefaultValueSql).Append(")");
+
+        AppendStorage(builder, operation);
 
         if (operation.Comment is not null)
             builder.Append(" COMMENT ").Append(CamusCommentSyntax.Literal(operation.Comment, $"column '{operation.Table}.{operation.Name}'"));
@@ -226,8 +230,9 @@ public class CamusMigrationsSqlGenerator : MigrationsSqlGenerator
     }
 
     // CamusDB cannot change a column's stored type in place, but it does support toggling a column's
-    // NOT NULL constraint (ALTER COLUMN ... SET/DROP NOT NULL) and re-describing it (COMMENT ON
-    // COLUMN). Map those two; reject anything that would require rewriting the column's type.
+    // NOT NULL constraint (ALTER COLUMN ... SET/DROP NOT NULL), changing its storage strategy
+    // (ALTER COLUMN ... SET STORAGE) and re-describing it (COMMENT ON COLUMN). Map those three; reject
+    // anything that would require rewriting the column's type.
     protected override void Generate(AlterColumnOperation operation, IModel? model, MigrationCommandListBuilder builder)
     {
         var helper = Dependencies.SqlGenerationHelper;
@@ -237,15 +242,28 @@ public class CamusMigrationsSqlGenerator : MigrationsSqlGenerator
 
         bool nullabilityChanged = operation.IsNullable != operation.OldColumn.IsNullable;
         bool commentChanged = !string.Equals(operation.Comment, operation.OldColumn.Comment, StringComparison.Ordinal);
+        CamusColumnStorage? storage = GetStorage(operation);
+        bool storageChanged = storage != GetStorage(operation.OldColumn);
 
-        if (!nullabilityChanged && !commentChanged)
-            throw new NotSupportedException("CamusDB only supports altering a column's nullability or comment.");
+        if (!nullabilityChanged && !commentChanged && !storageChanged)
+            throw new NotSupportedException("CamusDB only supports altering a column's nullability, storage strategy or comment.");
 
         if (nullabilityChanged)
         {
             builder.Append("ALTER TABLE ").Append(helper.DelimitIdentifier(operation.Table))
                    .Append(" ALTER COLUMN ").Append(helper.DelimitIdentifier(operation.Name))
                    .Append(operation.IsNullable ? " DROP NOT NULL" : " SET NOT NULL");
+            builder.EndCommand();
+        }
+
+        // SET STORAGE changes the form of future writes only; the rows already stored keep their form
+        // until they are written again or a RewriteStorage step converts them. CamusDB has no RESET
+        // STORAGE, so a removed strategy goes back to the server default explicitly.
+        if (storageChanged)
+        {
+            builder.Append("ALTER TABLE ").Append(helper.DelimitIdentifier(operation.Table))
+                   .Append(" ALTER COLUMN ").Append(helper.DelimitIdentifier(operation.Name))
+                   .Append(" SET STORAGE ").Append((storage ?? CamusColumnStorage.Extended).ToSql());
             builder.EndCommand();
         }
 
@@ -257,6 +275,43 @@ public class CamusMigrationsSqlGenerator : MigrationsSqlGenerator
             builder.EndCommand();
         }
     }
+
+    /// <summary>
+    /// Emits an inline <c>STORAGE &lt;strategy&gt;</c> clause when the column carries a strategy. A column
+    /// without one gets no clause, so the DDL of a model that never sets a strategy is unchanged and still
+    /// runs on a server that predates large-value storage.
+    /// </summary>
+    private static void AppendStorage(MigrationCommandListBuilder builder, ColumnOperation column)
+    {
+        if (GetStorage(column) is { } storage)
+            builder.Append(" STORAGE ").Append(storage.ToSql());
+    }
+
+    private static CamusColumnStorage? GetStorage(ColumnOperation column)
+        => column[CamusAnnotationNames.ColumnStorage] switch
+        {
+            null => null,
+            CamusColumnStorage storage => storage,
+            // A hand-written migration can carry the annotation as the SQL keyword.
+            string name => ParseStorage(name, column),
+            var other => throw new InvalidOperationException(
+                $"The '{CamusAnnotationNames.ColumnStorage}' annotation on column '{column.Table}.{column.Name}' " +
+                $"must be a {nameof(CamusColumnStorage)}, not '{other.GetType().Name}'."),
+        };
+
+    // An exact keyword match: Enum.TryParse would also accept "1" and a comma list such as
+    // "Plain, Main", which it ORs into a different member.
+    private static CamusColumnStorage ParseStorage(string name, ColumnOperation column)
+        => name.Trim().ToUpperInvariant() switch
+        {
+            "EXTENDED" => CamusColumnStorage.Extended,
+            "PLAIN" => CamusColumnStorage.Plain,
+            "MAIN" => CamusColumnStorage.Main,
+            "EXTERNAL" => CamusColumnStorage.External,
+            _ => throw new InvalidOperationException(
+                $"Unknown storage strategy '{name}' on column '{column.Table}.{column.Name}'. " +
+                "Expected PLAIN, MAIN, EXTERNAL or EXTENDED."),
+        };
 
     /// <summary>
     /// Emits COMMENT ON &lt;kind&gt; &lt;target&gt; IS &lt;value&gt;. A null comment renders as IS NULL,

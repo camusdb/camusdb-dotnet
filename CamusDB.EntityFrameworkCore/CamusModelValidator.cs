@@ -27,6 +27,7 @@ public class CamusModelValidator : RelationalModelValidator
         ValidateConcurrencyTokens(model);
         ValidateComputedColumns(model);
         ValidateKeyTypes(model);
+        ValidateColumnStorage(model);
     }
 
     private static readonly HashSet<Type> SupportedConcurrencyTokenClrTypes = new()
@@ -100,5 +101,42 @@ public class CamusModelValidator : RelationalModelValidator
                 }
             }
         }
+    }
+
+    /// <summary>
+    /// A storage strategy is refused on a column whose store type has no variable-length value. The
+    /// server refuses the same DDL with <c>CADB0414</c> (<c>ColumnStorageNotApplicable</c>); refusing it
+    /// here names the property and fails before a migration starts.
+    /// </summary>
+    private static void ValidateColumnStorage(IModel model)
+    {
+        foreach (var entityType in model.GetEntityTypes())
+        {
+            foreach (var property in entityType.GetProperties())
+            {
+                if (property.GetStorage() is not { } storage)
+                    continue;
+
+                string storeType = property.GetColumnType();
+                if (!HasVariableLengthStoreType(storeType))
+                    throw new NotSupportedException(
+                        $"CamusDB supports a storage strategy only on string, bytes and array columns. " +
+                        $"Property '{entityType.DisplayName()}.{property.Name}' has store type '{storeType}' " +
+                        $"and storage strategy '{storage}'.");
+            }
+        }
+    }
+
+    /// <summary><c>string</c>, <c>bytes</c> (alias <c>blob</c>) and <c>array(T)</c>, with or without a size.</summary>
+    internal static bool HasVariableLengthStoreType(string storeType)
+    {
+        ReadOnlySpan<char> name = storeType.AsSpan().Trim();
+        int paren = name.IndexOf('(');
+        ReadOnlySpan<char> baseName = (paren < 0 ? name : name[..paren]).TrimEnd();
+
+        return baseName.Equals("string", StringComparison.OrdinalIgnoreCase)
+            || baseName.Equals("bytes", StringComparison.OrdinalIgnoreCase)
+            || baseName.Equals("blob", StringComparison.OrdinalIgnoreCase)
+            || baseName.Equals("array", StringComparison.OrdinalIgnoreCase);
     }
 }

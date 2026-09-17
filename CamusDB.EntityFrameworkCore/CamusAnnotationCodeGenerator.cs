@@ -1,4 +1,5 @@
 using System.Reflection;
+using CamusDB.Client;
 using Microsoft.EntityFrameworkCore.Design;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Metadata;
@@ -12,6 +13,10 @@ public class CamusAnnotationCodeGenerator : AnnotationCodeGenerator
         = typeof(CamusIndexBuilderExtensions).GetRuntimeMethod(
               nameof(CamusIndexBuilderExtensions.HasComment), [typeof(IndexBuilder), typeof(string)])!;
 
+    private static readonly MethodInfo PropertyHasStorageMethod
+        = typeof(CamusPropertyBuilderExtensions).GetRuntimeMethod(
+              nameof(CamusPropertyBuilderExtensions.HasStorage), [typeof(PropertyBuilder), typeof(CamusColumnStorage?)])!;
+
     public CamusAnnotationCodeGenerator(AnnotationCodeGeneratorDependencies dependencies)
         : base(dependencies) { }
 
@@ -21,4 +26,11 @@ public class CamusAnnotationCodeGenerator : AnnotationCodeGenerator
         => annotation.Name == CamusAnnotationNames.IndexComment && annotation.Value is string comment
             ? new MethodCallCodeFragment(IndexHasCommentMethod, comment)
             : base.GenerateFluentApi(index, annotation);
+
+    // Render the column storage strategy as .HasStorage(CamusColumnStorage.Plain) in the model snapshot
+    // and in scaffolded models.
+    protected override MethodCallCodeFragment? GenerateFluentApi(IProperty property, IAnnotation annotation)
+        => annotation.Name == CamusAnnotationNames.ColumnStorage && annotation.Value is CamusColumnStorage storage
+            ? new MethodCallCodeFragment(PropertyHasStorageMethod, storage)
+            : base.GenerateFluentApi(property, annotation);
 }

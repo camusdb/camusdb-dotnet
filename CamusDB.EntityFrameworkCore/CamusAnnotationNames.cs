@@ -12,4 +12,11 @@ public static class CamusAnnotationNames
     /// built-in comment surface for indexes, unlike tables and columns.
     /// </summary>
     public const string IndexComment = Prefix + "IndexComment";
+
+    /// <summary>
+    /// The <see cref="CamusDB.Client.CamusColumnStorage"/> of a <c>string</c>, <c>bytes</c> or array
+    /// column, emitted as an inline <c>STORAGE</c> clause and changed with <c>ALTER COLUMN … SET STORAGE</c>.
+    /// Absent means the server default, <c>EXTENDED</c>.
+    /// </summary>
+    public const string ColumnStorage = Prefix + "ColumnStorage";
 }

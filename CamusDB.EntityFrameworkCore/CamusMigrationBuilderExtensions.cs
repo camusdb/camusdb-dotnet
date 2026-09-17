@@ -5,7 +5,7 @@ using Microsoft.EntityFrameworkCore.Migrations.Operations.Builders;
 namespace CamusDB.EntityFrameworkCore;
 
 /// <summary>
-/// View DDL, and <c>TRUNCATE TABLE</c>, for migrations.
+/// View DDL, <c>TRUNCATE TABLE</c> and <c>REWRITE STORAGE</c>, for migrations.
 /// </summary>
 /// <remarks>
 /// <para>EF Core has no migration operation for views, so a provider that wants them has to emit raw
@@ -121,6 +121,41 @@ public static class CamusMigrationBuilderExtensions
 
         return migrationBuilder.Sql(
             $"TRUNCATE TABLE {Delimit(name, nameof(name))}",
+            suppressTransaction: true);
+    }
+
+    /// <summary>
+    /// Emits <c>ALTER TABLE … REWRITE STORAGE</c>, which converts the rows a table already stores to its
+    /// current large-value storage rules: each <c>string</c>, <c>bytes</c> and array value is compressed
+    /// or moved out of its row as the column's storage strategy and the server settings decide. With
+    /// <paramref name="inline"/>, it emits <c>REWRITE STORAGE INLINE</c>, which stores every value inside
+    /// its row and uncompressed.
+    /// </summary>
+    /// <param name="name">The table to rewrite.</param>
+    /// <param name="inline">
+    /// Convert the rows back to the inline, uncompressed form. This is the form a server that predates
+    /// large-value storage can read, so run it on every table before such a downgrade.
+    /// </param>
+    /// <remarks>
+    /// <para>Nothing generates this call. A <c>HasStorage(...)</c> change produces
+    /// <c>ALTER COLUMN … SET STORAGE</c>, which changes the form of future writes only and returns at
+    /// once. Add this step after it when the rows that already exist must change form now.</para>
+    ///
+    /// <para>The rewrite changes no value, no row id and no index entry, and it never overwrites a user
+    /// write. It runs in its own bounded transactions of <c>large_value_rewrite_batch_rows</c> rows, so a
+    /// migration transaction cannot contain it: the command suppresses the migration transaction. Its time
+    /// is proportional to the table. Raise the command timeout for a large table. The rewrite is
+    /// resumable and idempotent, so a second run continues after the last committed batch.</para>
+    /// </remarks>
+    public static OperationBuilder<SqlOperation> RewriteStorage(
+        this MigrationBuilder migrationBuilder,
+        string name,
+        bool inline = false)
+    {
+        ArgumentNullException.ThrowIfNull(migrationBuilder);
+
+        return migrationBuilder.Sql(
+            CamusStorageSyntax.RewriteStorage(name, inline, nameof(name)),
             suppressTransaction: true);
     }
 

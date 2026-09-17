@@ -58,6 +58,48 @@ public static class CamusDatabaseFacadeExtensions
         _ = await database.ExecuteSqlRawAsync(TruncateSql(name), cancellationToken).ConfigureAwait(false);
     }
 
+    /// <summary>
+    /// Converts the rows a table already stores to its current large-value storage rules with
+    /// <c>ALTER TABLE … REWRITE STORAGE</c>, or, with <paramref name="inline"/>, back to the inline and
+    /// uncompressed form with <c>REWRITE STORAGE INLINE</c>. No value changes, so no query result
+    /// changes; only the physical form of each row and the I/O a query does change.
+    /// </summary>
+    /// <param name="database">The context's <see cref="DatabaseFacade"/>.</param>
+    /// <param name="name">The table to rewrite. Quoted for you; it is an identifier, not a parameter.</param>
+    /// <param name="inline">
+    /// Store every value inside its row, uncompressed. This is the form a server that predates
+    /// large-value storage can read.
+    /// </param>
+    /// <remarks>
+    /// <para>The server runs the rewrite in its own bounded transactions, not in the caller's
+    /// transaction, so a <c>ROLLBACK</c> does not undo the batches that committed. Call this outside
+    /// <c>BeginTransaction</c>.</para>
+    ///
+    /// <para>The time is proportional to the table. Set a sufficient timeout with
+    /// <c>Database.SetCommandTimeout</c> first. The rewrite is resumable: when a run stops, a second run
+    /// continues after the last committed batch. A batch that loses to a user write is retried at the end
+    /// of the run, and the user write stands.</para>
+    /// </remarks>
+    public static void RewriteStorage(this DatabaseFacade database, string name, bool inline = false)
+    {
+        ArgumentNullException.ThrowIfNull(database);
+
+        _ = database.ExecuteSqlRaw(CamusStorageSyntax.RewriteStorage(name, inline, nameof(name)));
+    }
+
+    /// <inheritdoc cref="RewriteStorage(DatabaseFacade, string, bool)"/>
+    public static async Task RewriteStorageAsync(
+        this DatabaseFacade database,
+        string name,
+        bool inline = false,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(database);
+
+        _ = await database.ExecuteSqlRawAsync(
+            CamusStorageSyntax.RewriteStorage(name, inline, nameof(name)), cancellationToken).ConfigureAwait(false);
+    }
+
     private static string TruncateSql(string name)
         => $"TRUNCATE TABLE {CamusIdentifier.Delimit(name, nameof(name))}";
 }

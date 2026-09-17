@@ -454,6 +454,59 @@ DateOnly  day      = reader.GetFieldValue<DateOnly>(reader.GetOrdinal("day"));
 object?[] tags     = (object?[])reader.GetValue(reader.GetOrdinal("tags"));
 ```
 
+#### Large values
+
+A server with large-value storage can store a large `string`, `bytes` or `ARRAY(T)` value compressed (LZ4), or under its own key outside the row. The form never changes a query result or the wire format, so reads and parameters work as before. It changes the I/O a query does and the size of each stored version: a query that does not name a column stored out of line never fetches it, and an update of another column does not rewrite it.
+
+Each such column has a storage strategy. The names follow PostgreSQL:
+
+| Strategy | Compresses | Moves out of the row | Use it for |
+| --- | --- | --- | --- |
+| `EXTENDED` (default) | When it pays | At or above `large_value_threshold_bytes` (2048) | Text, JSON, documents |
+| `MAIN` | When it pays | Never | Compressible values that a typical query reads |
+| `EXTERNAL` | Never | At or above the threshold | Images, archives and other large values that do not compress and that queries often skip |
+| `PLAIN` | Never | Never | Embeddings that a KNN query reads on every row |
+
+Set the strategy in the column definition, and change it later with `SET STORAGE`. `CamusColumnStorage` and its `ToSql()` give the SQL keyword when you compose DDL:
+
+```csharp
+await connection.CreateCamusCommand("""
+    CREATE TABLE docs (
+        id         OID PRIMARY KEY NOT NULL,
+        title      STRING,
+        body       STRING,
+        thumbnail  BYTES STORAGE EXTERNAL,
+        embedding  BYTES(3072) STORAGE PLAIN
+    )
+    """).ExecuteDDLAsync();
+
+await connection.CreateCamusCommand(
+    $"ALTER TABLE docs ALTER COLUMN thumbnail SET STORAGE {CamusColumnStorage.Plain.ToSql()}").ExecuteDDLAsync();
+```
+
+`SET STORAGE` changes the form of future writes only, and returns at once. To convert the rows that already exist, run `REWRITE STORAGE`. `REWRITE STORAGE INLINE` stores every value inside its row and uncompressed, which is the form a server without large-value storage can read. Run it on every table before such a downgrade:
+
+```csharp
+await using CamusCommand rewrite = connection.CreateCamusCommand("ALTER TABLE docs REWRITE STORAGE");
+rewrite.CommandTimeout = 3600; // the time is proportional to the table
+await rewrite.ExecuteDDLAsync();
+```
+
+The rewrite runs in its own bounded transactions on the server, not in the caller's transaction, so a `ROLLBACK` does not undo it. It is idempotent and resumable: when a run stops, a second run continues after the last committed batch. It never overwrites a user write, but a concurrent write to a row in a committing batch can fail with the retryable `CADB0502`.
+
+Keep two costs in mind:
+
+- **Embeddings.** A 768-dimension float32 embedding is 3072 bytes, which is above the default threshold. Under `EXTENDED`, each embedding moves out of its row and a KNN query pays one more batched fetch per scanned batch. Declare an embedding column that a KNN query scans with `STORAGE PLAIN`.
+- **Mutation budget.** Each out-of-line value is one more key, so an insert or a delete of a row with `k` out-of-line values costs `k` more mutations. A bulk insert of rows with several large columns fits fewer rows in one transaction.
+
+| Code | Name | Meaning |
+| --- | --- | --- |
+| `CADB0414` | `ColumnStorageNotApplicable` | A storage strategy on a column type with no variable-length value. |
+| `CADB0540` | `LargeValueCorrupt` | A stored value failed to decompress, or did not match its checksum. |
+| `CADB0541` | `LargeValueNotResolved` | A server defect: a read path decoded a value it did not fetch. Report it. |
+
+A read without a snapshot that keeps seeing a row change under it fails with the retryable `CADB0504` (`TransactionMustRetry`), which `SerializableRetryHelper` and `EnableRetryOnFailure` already retry.
+
 #### Identifiers and inline literals
 
 The driver never puts a parameter value into SQL text: values travel as typed wire objects and the server binds them. A few places do compose text — the admin DDL the gRPC transport builds (`CREATE DATABASE`, `DROP DATABASE`, `SHOW BRANCHES`), the EF Core migration and `EnsureCreated` DDL, and the cache hints — and those follow two rules that come from CamusDB's lexer:
@@ -1168,6 +1221,8 @@ The provider supports EF Core migrations for the following DDL operations:
 | Set/change table comment | `COMMENT ON TABLE t IS '...'` |
 | Set/change column comment | `COMMENT ON COLUMN t.col IS '...'` |
 | Set index comment | `COMMENT ON INDEX t.name IS '...'` |
+| Set/change column storage strategy | inline `STORAGE X` on create / add column; `ALTER TABLE t ALTER COLUMN col SET STORAGE X` |
+| Rewrite stored rows (`migrationBuilder.RewriteStorage`) | `ALTER TABLE t REWRITE STORAGE [INLINE]` |
 | Raw SQL | passed through as-is |
 
 A `CHECK` constraint declared with `ToTable(t => t.HasCheckConstraint(...))` is emitted as a
@@ -1216,6 +1271,48 @@ Embedded single quotes are fine — they are doubled on output.
 Two limitations have no EF surface: the primary key index cannot carry a comment (comment the table
 instead), and database comments must be issued as raw SQL —
 `migrationBuilder.Sql("COMMENT ON DATABASE app IS '...'")`.
+
+#### Large values
+
+`HasStorage` sets the storage strategy of a `string`, `byte[]` or array property (see [Large values](#large-values) for what each strategy does). Migrations and `EnsureCreated` emit it as an inline `STORAGE` clause:
+
+```csharp
+modelBuilder.Entity<Doc>(b =>
+{
+    b.Property(d => d.Body);                                                  // EXTENDED, the default
+    b.Property(d => d.Thumbnail).HasStorage(CamusColumnStorage.External);
+    b.Property(d => d.Embedding).HasMaxLength(3072).HasStorage(CamusColumnStorage.Plain);
+});
+```
+
+```sql
+CREATE TABLE IF NOT EXISTS `docs` (
+`Id` OID NOT NULL,
+`Body` STRING NOT NULL,
+`Thumbnail` BYTES STORAGE EXTERNAL,
+`Embedding` BYTES(3072) STORAGE PLAIN,
+PRIMARY KEY (`Id`)
+);
+```
+
+A property without `HasStorage` gets no clause, so the DDL of an existing model does not change. A later change of strategy produces `ALTER COLUMN … SET STORAGE`. A strategy removed from the model produces `SET STORAGE EXTENDED`, because CamusDB has no reset form. The model validator refuses `HasStorage` on any other column type, as the server does with `CADB0414`.
+
+`SET STORAGE` changes future writes only. To convert the stored rows in the same migration, add the rewrite by hand. It suppresses the migration transaction, because the server runs it in its own batches:
+
+```csharp
+protected override void Up(MigrationBuilder migrationBuilder)
+{
+    migrationBuilder.AlterColumn<byte[]>(
+        name: "Embedding", table: "docs", type: "bytes", maxLength: 3072, nullable: true,
+        oldClrType: typeof(byte[]), oldType: "bytes", oldMaxLength: 3072, oldNullable: true)
+        .Annotation("Camus:ColumnStorage", CamusColumnStorage.Plain)
+        .OldAnnotation("Camus:ColumnStorage", CamusColumnStorage.Extended);
+
+    migrationBuilder.RewriteStorage("docs");            // ALTER TABLE `docs` REWRITE STORAGE
+}
+```
+
+Outside a migration, `context.Database.RewriteStorageAsync("docs")` runs the same statement, and `inline: true` converts the table back to inline form. The time is proportional to the table, so set `Database.SetCommandTimeout(...)` first for a large table.
 
 The provider ships design-time services so the EF tooling can discover the provider automatically. No extra flags are needed:
 
@@ -1411,7 +1508,7 @@ await ctx.SaveChangesAsync();                    // throws DbUpdateConcurrencyEx
 - No foreign key constraints.
 - No `LEFT`/`OUTER JOIN` — CamusDB supports only `INNER JOIN`. `Include`/collection navigations and optional-reference joins do not translate; use an explicit inner `join` projection.
 - No `UNION`/`UNION ALL` — LINQ `Union`/`Concat` do not translate; issue separate queries.
-- `ALTER COLUMN` only supports toggling nullability (`SET`/`DROP NOT NULL`); changing a column's stored type requires dropping and recreating the column.
+- `ALTER COLUMN` only supports toggling nullability (`SET`/`DROP NOT NULL`), the storage strategy (`SET STORAGE`) and the comment; changing a column's stored type requires dropping and recreating the column.
 - `CHECK` conditions must be deterministic single-row predicates — no subqueries, aggregates, or volatile functions (`now()`, `gen_uuid_v4/v7()`, …); a violated check surfaces as a `CamusException` with code `CADB0303` (wrapped in `DbUpdateException` under EF Core), and a NULL operand makes the predicate pass (SQL three-valued logic).
 - `array(T)` columns map for `long[]`, `string[]`, `double[]`, and `bool[]`. They are not indexable and have no SQL literal, so an array can only be written/read as a whole value — it cannot appear in a `Where` predicate or as a default/seed value.
 - No `decimal`/exact-numeric store type — use `double` (`float64`), accepting binary floating-point rounding.
