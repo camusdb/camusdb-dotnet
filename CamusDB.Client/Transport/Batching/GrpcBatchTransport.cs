@@ -16,10 +16,11 @@ namespace CamusDB.Client.Transport.Batching;
 /// long-lived stream; the batcher keeps several (the pool) and multiplexes ops across them. Ported from
 /// the server's <c>CamusDB.Grpc.Client</c>.
 ///
-/// <para>Any authentication metadata is attached when the stream opens, because the server resolves the
-/// principal once for the whole <c>BatchExecute</c> call: every op multiplexed onto this stream runs as
+/// <para>Any authentication metadata is attached when the stream opens — gRPC metadata belongs to the
+/// call, so this is the only token the stream ever presents, and every op multiplexed onto it runs as
 /// that identity. A token refresh therefore reaches the server on the next stream the batcher builds, not
-/// mid-stream.</para>
+/// mid-stream, which is why the batcher builds one when the token is renewed instead of waiting for the
+/// stream to fail.</para>
 /// </summary>
 internal sealed class GrpcBatchTransport : IBatchTransport
 {

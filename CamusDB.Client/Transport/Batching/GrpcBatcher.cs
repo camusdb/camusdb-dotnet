@@ -28,15 +28,38 @@ namespace CamusDB.Client.Transport.Batching;
 /// one stream (the caller reserves a slot via <see cref="ReserveSlot"/> and passes it on every call) so
 /// the server's per-stream ordering chain sees them together. The pool bounds the number of streams, not
 /// the number of in-flight transactions.</para>
+///
+/// <para><b>A stream is rotated when the credential it opened with is superseded.</b> A stream presents
+/// its bearer token once, in its opening metadata, and then outlives it: the provider renews the token
+/// every few minutes, the stream is meant to last a session. Whether the server tolerates that is the
+/// server's decision — one that re-checks the opening token per operation ends the stream at the token's
+/// expiry, with every transaction on it — so the client does not rely on it. When the slot's next
+/// unbound op finds the credential changed, the slot gets a fresh stream, opened under the new token,
+/// and the old one is <em>retired</em>: it takes no new work, keeps serving the transactions that began
+/// on it (a transaction cannot change streams; the server rolls it back when its stream closes), and is
+/// closed as soon as the last of them ends. Rotation happens on the write path, so an idle client rotates
+/// on its first op after the renewal, before that op is sent.</para>
 /// </summary>
 internal sealed class GrpcBatcher : IAsyncDisposable
 {
     private readonly GrpcBatchOptions options;
     private readonly Func<long, IBatchTransport> transportFactory;
+    private readonly Func<object?>? credentialStamp;
     private readonly Slot[] slots;
     private readonly CancellationTokenSource shutdown = new();
 
     private readonly ConcurrentDictionary<int, PendingOp> pending = new();
+
+    /// <summary>
+    /// The stream each open transaction began on, by handle. Written when a START is answered, removed
+    /// when the server answers its COMMIT or ROLLBACK, or when that stream ends. It is what lets a
+    /// transaction keep its stream across a rotation of the slot it is pinned to.
+    /// </summary>
+    private readonly ConcurrentDictionary<(long Pt, uint Counter), StreamLease> openTransactions = new();
+
+    /// <summary>Retired streams that are still draining, so disposal can reach them: a slot only
+    /// references its current stream.</summary>
+    private readonly ConcurrentDictionary<StreamLease, byte> retiring = new();
 
     private static int requestIdSeq;
     private int roundRobin = -1;
@@ -47,22 +70,28 @@ internal sealed class GrpcBatcher : IAsyncDisposable
     /// transports produced by <paramref name="transportFactory"/> (the argument is a fresh transport id).
     /// The factory is called again to rebuild a slot after its stream faults — but lazily, on the next
     /// op that needs the slot, never in a retry loop.
+    ///
+    /// <para><paramref name="credentialStamp"/> reports the credential a stream opened <em>now</em> would
+    /// carry — in practice the current bearer token. It is compared, never inspected: a value that
+    /// differs from the one a stream opened under is what retires that stream. Null means streams carry
+    /// no credential that can change, and nothing is ever rotated.</para>
     /// </summary>
-    public GrpcBatcher(GrpcBatchOptions options, Func<long, IBatchTransport> transportFactory)
+    public GrpcBatcher(
+        GrpcBatchOptions options,
+        Func<long, IBatchTransport> transportFactory,
+        Func<object?>? credentialStamp = null)
     {
         this.options = options;
         this.transportFactory = transportFactory;
+        this.credentialStamp = credentialStamp;
         int poolSize = Math.Max(1, options.ChannelPoolSize);
         slots = new Slot[poolSize];
         for (int i = 0; i < poolSize; i++)
         {
-            slots[i] = new Slot(i)
-            {
-                // Connect the first transport synchronously so a slot is never written to before it exists;
-                // the reader loop then owns reads, and the write path rebuilds the slot after a fault.
-                Transport = transportFactory(Interlocked.Increment(ref transportIdSeq)),
-            };
-            StartReaderLoop(slots[i]);
+            // Connect the first transport synchronously so a slot is never written to before it exists;
+            // its reader then owns reads, and the write path rebuilds the slot after a fault.
+            slots[i] = new Slot(i);
+            Connect(slots[i]);
         }
     }
 
@@ -108,7 +137,7 @@ internal sealed class GrpcBatcher : IAsyncDisposable
         int slot = slotIndex ?? NextRoundRobin();
         int id = Interlocked.Increment(ref requestIdSeq);
 
-        PendingOp op = new(id);
+        PendingOp op = new(id, kind, HandleKey(request.TxnHandle));
 
         if (ct.CanBeCanceled)
             op.Registration = ct.Register(static state =>
@@ -174,7 +203,7 @@ internal sealed class GrpcBatcher : IAsyncDisposable
                     continue;
                 }
 
-                if (entry.TransportId == slot.Transport?.Id)
+                if (entry.TransportId == Volatile.Read(ref slot.Current)?.Transport.Id)
                     return entry;
 
                 // The slot's stream was rebuilt since this was registered — the handle died with it.
@@ -206,6 +235,19 @@ internal sealed class GrpcBatcher : IAsyncDisposable
             }
         }
     }
+
+    /// <summary>
+    /// True when the transaction began on a stream that has since been rotated out, and is finishing
+    /// there.
+    ///
+    /// <para>Such a transaction must not run prepared. A slot keeps one registration per statement, and
+    /// it belongs to the slot's <em>current</em> stream; this transaction's ops go to a different one,
+    /// where that handle does not exist. Registering it there instead would evict the entry every
+    /// autocommit caller is using, and the two would re-prepare against each other for as long as the
+    /// old stream drains. Running inline is always correct, and the window is short.</para>
+    /// </summary>
+    public bool IsBoundToRetiredStream(long txnIdPt, uint txnIdCounter)
+        => openTransactions.TryGetValue((txnIdPt, txnIdCounter), out StreamLease? home) && home.Retired;
 
     /// <summary>
     /// Forgets a slot's registration for a statement, but only if it is still the one the caller was
@@ -318,7 +360,8 @@ internal sealed class GrpcBatcher : IAsyncDisposable
     {
         try
         {
-            IBatchTransport transport = slot.Transport ?? Reconnect(slot);
+            StreamLease lease = Route(slot, item.Op);
+            IBatchTransport transport = lease.Transport;
 
             // A prepared execution names a handle that exists only on the stream it was registered on.
             // This is the last moment the two can be compared — check any earlier and the stream could
@@ -328,6 +371,15 @@ internal sealed class GrpcBatcher : IAsyncDisposable
                 throw new PreparedStatementStaleException();
 
             item.Op.TransportId = transport.Id;
+
+            // Counted before it is published on the op: a release that raced in between would otherwise
+            // take the count below zero and let a retired stream look drained while this op is on it.
+            Interlocked.Increment(ref lease.InFlight);
+            Volatile.Write(ref item.Op.Lease, lease);
+
+            // Cancelled while it sat in the inbox: nobody is left to release it, so do it here.
+            if (!pending.ContainsKey(item.Op.RequestId))
+                Release(item.Op);
 
             await transport.SendAsync(item.Request, shutdown.Token).ConfigureAwait(false);
         }
@@ -340,61 +392,161 @@ internal sealed class GrpcBatcher : IAsyncDisposable
     // ─── Reader / demux ───────────────────────────────────────────────────────
 
     /// <summary>
-    /// Builds a fresh transport for a slot whose stream faulted. Called only from the slot's pump —
-    /// the single writer — so at most one reconnect runs per slot, and only when an op actually needs
-    /// the stream. The reader loop is parked on <see cref="Slot.TransportConnected"/> until then, so a
-    /// client sitting idle against an unreachable server never cycles through connect attempts.
+    /// Picks the stream an op is written to. Called only from the slot's pump — the single writer — so
+    /// at most one connect or rotation runs per slot at a time, and only when an op actually needs the
+    /// stream: a client sitting idle against an unreachable server never cycles through connect attempts.
+    ///
+    /// <para>An op of an open transaction goes to the stream that transaction began on, retired or not.
+    /// Everything else goes to the slot's current stream, which is first replaced if it faulted, or if
+    /// the credential it opened under has been superseded.</para>
     /// </summary>
-    private IBatchTransport Reconnect(Slot slot)
+    private StreamLease Route(Slot slot, PendingOp op)
     {
-        IBatchTransport transport = transportFactory(Interlocked.Increment(ref transportIdSeq));
-        slot.Transport = transport;
-        slot.TransportConnected.Release();
-        return transport;
+        if (op.Transaction is { } handle
+            && op.Kind != BatchStatementKind.Start
+            && openTransactions.TryGetValue(handle, out StreamLease? home))
+        {
+            return home;
+        }
+
+        StreamLease? current = Volatile.Read(ref slot.Current);
+        if (current is null)
+            return Connect(slot);
+
+        // A null stamp is "no token right now" — one was just invalidated and its replacement is not
+        // minted yet. That is no reason to trade a working stream for one opened with no credential.
+        if (credentialStamp?.Invoke() is { } stamp && !stamp.Equals(current.Stamp))
+        {
+            Retire(current);
+            return Connect(slot);
+        }
+
+        return current;
     }
 
-    private void StartReaderLoop(Slot slot)
+    /// <summary>
+    /// Opens a fresh stream for a slot and makes it current. The stamp is read <b>before</b> the factory
+    /// reads the credential itself: if the credential is renewed in between, the stream is stamped older
+    /// than it is and is rotated once more than needed. Read afterwards, it could be stamped newer than
+    /// it is, and would never be rotated at all.
+    /// </summary>
+    private StreamLease Connect(Slot slot)
     {
-        _ = Task.Run(async () =>
+        object? stamp = credentialStamp?.Invoke();
+        StreamLease lease = new(transportFactory(Interlocked.Increment(ref transportIdSeq)), stamp);
+
+        Volatile.Write(ref slot.Current, lease);
+        _ = Task.Run(() => ReadAsync(slot, lease));
+
+        return lease;
+    }
+
+    /// <summary>
+    /// Takes a stream out of rotation. It stays open for the transactions that began on it and is closed
+    /// when the last one ends — or after <see cref="GrpcBatchOptions.StreamDrainTimeoutMs"/>, because a
+    /// transaction its caller abandoned would otherwise hold the stream, and its locks, open for good.
+    /// Closing the stream is what makes the server roll such a transaction back.
+    /// </summary>
+    private void Retire(StreamLease lease)
+    {
+        retiring[lease] = 0;
+        lease.Retired = true;
+
+        CloseIfDrained(lease);
+
+        if (Volatile.Read(ref lease.Closed) == 0)
+            _ = CloseAfterDrainTimeoutAsync(lease);
+    }
+
+    private async Task CloseAfterDrainTimeoutAsync(StreamLease lease)
+    {
+        try
         {
-            while (!shutdown.IsCancellationRequested)
-            {
-                IBatchTransport? transport = slot.Transport;
-                if (transport is null)
-                {
-                    // The slot faulted and no op has needed it since. Wait for the write path to
-                    // reconnect rather than rebuilding here, which would spin at full speed while
-                    // the server is unreachable.
-                    try { await slot.TransportConnected.WaitAsync(shutdown.Token).ConfigureAwait(false); }
-                    catch (OperationCanceledException) { break; }
-                    continue;
-                }
+            await Task.Delay(Math.Max(0, options.StreamDrainTimeoutMs), shutdown.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) { return; }
+        catch (ObjectDisposedException) { return; }
 
-                Exception fault = new IOException("gRPC batch stream closed");
-                try
-                {
-                    await foreach (BatchExecuteResponse resp in transport.ReadAllAsync(shutdown.Token).ConfigureAwait(false))
-                        Demux(resp);
-                }
-                catch (OperationCanceledException) when (shutdown.IsCancellationRequested)
-                {
-                    break;
-                }
-                catch (Exception ex)
-                {
-                    fault = ex;
-                }
-                finally
-                {
-                    try { await transport.DisposeAsync().ConfigureAwait(false); } catch { /* best effort */ }
-                }
+        Close(lease);
+    }
 
-                // Fail this transport's still-pending ops so callers see the fault and can replay.
-                // The next op through the pump rebuilds the slot.
-                slot.Transport = null;
-                FailTransportPending(transport.Id, fault);
-            }
-        });
+    private void CloseIfDrained(StreamLease lease)
+    {
+        if (lease.Retired
+            && Volatile.Read(ref lease.InFlight) <= 0
+            && Volatile.Read(ref lease.OpenTransactions) <= 0)
+        {
+            Close(lease);
+        }
+    }
+
+    /// <summary>Closes a stream once. Its reader then ends and does the rest of the teardown.</summary>
+    private static void Close(StreamLease lease)
+    {
+        if (Interlocked.Exchange(ref lease.Closed, 1) != 0)
+            return;
+
+        _ = DisposeQuietlyAsync(lease.Transport);
+    }
+
+    private static async Task DisposeQuietlyAsync(IBatchTransport transport)
+    {
+        try { await transport.DisposeAsync().ConfigureAwait(false); } catch { /* best effort */ }
+    }
+
+    /// <summary>Drops an op's hold on its stream, exactly once however many paths race to do it.</summary>
+    private void Release(PendingOp op)
+    {
+        StreamLease? lease = Interlocked.Exchange(ref op.Lease, null);
+
+        if (lease is not null && Interlocked.Decrement(ref lease.InFlight) <= 0)
+            CloseIfDrained(lease);
+    }
+
+    /// <summary>
+    /// The one reader of one stream, for that stream's whole life. When the stream ends — closed by the
+    /// server, faulted, or closed here after draining — it fails whatever is still pending on it so the
+    /// callers can replay, and forgets the transactions that began on it, which the server has rolled
+    /// back. It never reconnects: the next op through the pump does that.
+    /// </summary>
+    private async Task ReadAsync(Slot slot, StreamLease lease)
+    {
+        IBatchTransport transport = lease.Transport;
+        Exception fault = new IOException("gRPC batch stream closed");
+
+        try
+        {
+            await foreach (BatchExecuteResponse resp in transport.ReadAllAsync(shutdown.Token).ConfigureAwait(false))
+                Demux(resp);
+        }
+        catch (OperationCanceledException) when (shutdown.IsCancellationRequested)
+        {
+            // Disposal fails the pending ops itself.
+        }
+        catch (ObjectDisposedException) when (shutdown.IsCancellationRequested)
+        {
+        }
+        catch (Exception ex)
+        {
+            fault = ex;
+        }
+        finally
+        {
+            Interlocked.Exchange(ref lease.Closed, 1);
+            await DisposeQuietlyAsync(transport).ConfigureAwait(false);
+        }
+
+        // Only if it is still the slot's stream: a retired one was replaced long before it ended.
+        Interlocked.CompareExchange(ref slot.Current, null, lease);
+        retiring.TryRemove(lease, out _);
+
+        foreach (KeyValuePair<(long Pt, uint Counter), StreamLease> entry in openTransactions)
+        {
+            if (ReferenceEquals(entry.Value, lease))
+                openTransactions.TryRemove(entry);
+        }
+
+        FailTransportPending(transport.Id, fault);
     }
 
     private void Demux(BatchExecuteResponse resp)
@@ -449,6 +601,15 @@ internal sealed class GrpcBatcher : IAsyncDisposable
     {
         if (!pending.TryRemove(op.RequestId, out _))
             return;
+
+        // Before the op lets go of its stream: a START that has just been answered is the only thing
+        // holding a retired stream open until its transaction is on the books.
+        if (result is TxnHandle started && op.Kind == BatchStatementKind.Start)
+            TransactionBegan((started.TxnIdPt, started.TxnIdCounter), Volatile.Read(ref op.Lease));
+        else if (op.Kind is BatchStatementKind.Commit or BatchStatementKind.Rollback)
+            TransactionEnded(op.Transaction);
+
+        Release(op);
         op.Dispose();
         op.Promise.TrySetResult(result);
     }
@@ -457,12 +618,43 @@ internal sealed class GrpcBatcher : IAsyncDisposable
     {
         if (!pending.TryRemove(op.RequestId, out _))
             return;
+
+        // Only an answer from the server ends the transaction. A COMMIT that timed out or was cancelled
+        // here may still be open there, and the ROLLBACK that usually follows must find its stream.
+        if (ex is CamusException && op.Kind is BatchStatementKind.Commit or BatchStatementKind.Rollback)
+            TransactionEnded(op.Transaction);
+
+        Release(op);
         op.Dispose();
         if (ex is OperationCanceledException oce)
             op.Promise.TrySetCanceled(oce.CancellationToken);
         else
             op.Promise.TrySetException(ex);
     }
+
+    private void TransactionBegan((long Pt, uint Counter) handle, StreamLease? lease)
+    {
+        if (lease is null)
+            return;
+
+        Interlocked.Increment(ref lease.OpenTransactions);
+
+        if (!openTransactions.TryAdd(handle, lease))
+            Interlocked.Decrement(ref lease.OpenTransactions);   // a handle is unique; never double-count one
+    }
+
+    private void TransactionEnded((long Pt, uint Counter)? handle)
+    {
+        if (handle is { } key
+            && openTransactions.TryRemove(key, out StreamLease? lease)
+            && Interlocked.Decrement(ref lease.OpenTransactions) <= 0)
+        {
+            CloseIfDrained(lease);
+        }
+    }
+
+    private static (long Pt, uint Counter)? HandleKey(TxnHandle? handle)
+        => handle is null ? null : (handle.TxnIdPt, handle.TxnIdCounter);
 
     // ConcurrentDictionary enumeration is safe under concurrent mutation, so no snapshot copy is needed;
     // Fault's TryRemove keeps a concurrently-completed op from being faulted twice.
@@ -478,12 +670,11 @@ internal sealed class GrpcBatcher : IAsyncDisposable
         shutdown.Cancel();
         foreach (Slot slot in slots)
         {
-            IBatchTransport? t = slot.Transport;
-            if (t is not null)
-            {
-                try { await t.DisposeAsync().ConfigureAwait(false); } catch { /* best effort */ }
-            }
+            if (Volatile.Read(ref slot.Current) is { } current)
+                await DisposeQuietlyAsync(current.Transport).ConfigureAwait(false);
         }
+        foreach (KeyValuePair<StreamLease, byte> entry in retiring)
+            await DisposeQuietlyAsync(entry.Key.Transport).ConfigureAwait(false);
         foreach (KeyValuePair<int, PendingOp> entry in pending)
             Fault(entry.Value, new ObjectDisposedException(nameof(GrpcBatcher)));
         shutdown.Dispose();
@@ -496,12 +687,10 @@ internal sealed class GrpcBatcher : IAsyncDisposable
         public readonly int Index = index;
         public readonly ConcurrentQueue<QueuedItem> Inbox = new();
         public int Processing;   // 0 = idle, 1 = this slot's pump loop is running
-        public volatile IBatchTransport? Transport;
 
-        /// <summary>Signaled by the write path each time it reconnects the slot, waking the parked
-        /// reader loop. One release per null→connected transition, one wait per observed null, so the
-        /// count stays balanced.</summary>
-        public readonly SemaphoreSlim TransportConnected = new(0);
+        /// <summary>The stream new work is written to, or null after it faulted and before an op has
+        /// needed the slot again. Written by the pump, and cleared by that stream's own reader.</summary>
+        public StreamLease? Current;
 
         /// <summary>
         /// Statements registered on this slot, keyed by (database, sql). The value is the in-flight or
@@ -511,13 +700,46 @@ internal sealed class GrpcBatcher : IAsyncDisposable
         public readonly ConcurrentDictionary<StatementKey, Task<PreparedSlotEntry>> Prepared = new();
     }
 
+    /// <summary>
+    /// One stream, the credential it opened under, and what is still riding on it — which is what
+    /// decides when a retired stream may be closed.
+    /// </summary>
+    private sealed class StreamLease(IBatchTransport transport, object? stamp)
+    {
+        public readonly IBatchTransport Transport = transport;
+
+        /// <summary>What the credential stamp read when this stream opened; compared, never inspected.</summary>
+        public readonly object? Stamp = stamp;
+
+        /// <summary>Ops written to this stream and not yet terminated.</summary>
+        public int InFlight;
+
+        /// <summary>Transactions that began on this stream and that the server has not yet finalized.</summary>
+        public int OpenTransactions;
+
+        /// <summary>Set once the slot has moved on to a newer stream; from then on it only drains.</summary>
+        public volatile bool Retired;
+
+        /// <summary>0 until the stream is closed, from either end.</summary>
+        public int Closed;
+    }
+
     private readonly record struct QueuedItem(
         BatchExecuteRequest Request, PendingOp Op, long? ExpectedTransportId);
 
     /// <summary>One in-flight op awaiting its terminal response, plus the accumulator a QUERY needs.</summary>
-    private sealed class PendingOp(int requestId)
+    private sealed class PendingOp(int requestId, BatchStatementKind kind, (long Pt, uint Counter)? transaction)
     {
         public readonly int RequestId = requestId;
+        public readonly BatchStatementKind Kind = kind;
+
+        /// <summary>The transaction this op belongs to, from the handle it carries; null for an
+        /// autocommit op, and for a START, whose handle does not exist until it is answered.</summary>
+        public readonly (long Pt, uint Counter)? Transaction = transaction;
+
+        /// <summary>The stream this op was written to, held until the op terminates. Swapped to null
+        /// atomically by whichever path releases it first.</summary>
+        public StreamLease? Lease;
         public readonly TaskCompletionSource<object?> Promise = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public ResultSchema? Schema;
 

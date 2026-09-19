@@ -34,11 +34,20 @@ namespace CamusDB.Client.Transport;
 /// the server's own gRPC client does.</para>
 ///
 /// <para>Authentication rides in the <c>authorization</c> request metadata, exactly as the REST transport
-/// puts it in the HTTP header. Unary calls (DDL, Ping) attach it per call; the long-lived
-/// <c>BatchExecute</c> streams attach it once, when the stream opens, because that is when the server
-/// resolves the principal for the whole stream. Every batched entry point therefore awaits the token
+/// puts it in the HTTP header. Unary calls (DDL, Ping) attach it per call; a long-lived
+/// <c>BatchExecute</c> stream can only attach it once, when the stream opens, because gRPC metadata
+/// belongs to the call and not to a message. Every batched entry point therefore awaits the token
 /// before touching the batcher, so a stream is never opened — or rebuilt after a fault — with a token the
 /// provider has not minted yet.</para>
+///
+/// <para><b>A stream does not rely on outliving its token.</b> The server authenticates the stream from
+/// that opening token and re-derives its authorization per operation. A current server lets a stream
+/// continue past its token's ordinary expiry and ends it — with <c>UNAUTHENTICATED</c> — only when the
+/// session is logged out or revoked, the password changes, or the account is dropped. A server that
+/// re-checks the opening token itself ends every stream at that token's expiry instead. The driver is
+/// correct against both: when the provider renews the token, the batcher rotates each stream onto the
+/// new one (see <see cref="GrpcBatcher"/>), well inside the old token's lifetime, so no stream is still
+/// carrying a token by the time it expires.</para>
 ///
 /// <para>It is also the <see cref="ICamusLoginClient"/> for gRPC connections, exchanging credentials over
 /// the <c>CamusAuth</c> service on the same channel as everything else — so a gRPC deployment never has
@@ -74,6 +83,7 @@ internal sealed class GrpcTransport(CamusEndpointPool endpoints, CamusTokenProvi
         GrpcChannel channel,
         CamusSql.CamusSqlClient client,
         Func<global::Grpc.Core.Metadata?> headers,
+        Func<object?> credentialStamp,
         GrpcBatchOptions batchOptions)
     {
         public GrpcChannel Channel { get; } = channel;
@@ -87,12 +97,13 @@ internal sealed class GrpcTransport(CamusEndpointPool endpoints, CamusTokenProvi
         // only logs in, pings, or runs DDL never needs them, and — since a stream carries the token it
         // was opened with — opening them before the first login would open them unauthenticated.
         private readonly Lazy<GrpcBatcher> batcher = new(
-            () => new GrpcBatcher(batchOptions, id => new GrpcBatchTransport(id, client, headers())),
+            () => new GrpcBatcher(batchOptions, id => new GrpcBatchTransport(id, client, headers()), credentialStamp),
             LazyThreadSafetyMode.ExecutionAndPublication);
 
         // The batcher rebuilds a faulted stream on its own, so the factory reads the current token on
         // every call rather than closing over one — a stream re-opened after a token refresh carries the
-        // new token.
+        // new token. The stamp is the same token, handed over separately so the batcher can tell that a
+        // live stream was opened under one that has since been replaced, and rotate it.
         public GrpcBatcher Batcher => batcher.Value;
 
         public GrpcBatcher? BatcherIfCreated => batcher.IsValueCreated ? batcher.Value : null;
@@ -102,7 +113,8 @@ internal sealed class GrpcTransport(CamusEndpointPool endpoints, CamusTokenProvi
         => channels.GetOrAdd(endpoint, ep =>
         {
             GrpcChannel channel = CreateChannel(ep);
-            return new ChannelEntry(channel, new CamusSql.CamusSqlClient(channel), CurrentCallHeaders, this.batchOptions);
+            return new ChannelEntry(
+                channel, new CamusSql.CamusSqlClient(channel), CurrentCallHeaders, () => auth.CurrentToken, this.batchOptions);
         });
 
     private CamusSql.CamusSqlClient GetClient(string endpoint) => GetEntry(endpoint).Client;
@@ -353,7 +365,8 @@ internal sealed class GrpcTransport(CamusEndpointPool endpoints, CamusTokenProvi
     /// (<c>CADB0520</c> — a rebuild this client had not noticed yet). Both mean "prepare again and
     /// resend". Everything else propagates: a transport fault on the execution itself is the caller's to
     /// handle under the normal retry taxonomy, and replaying a mutation that may already have been
-    /// applied is not this layer's decision to make. A failure to <em>register</em> is absorbed instead —
+    /// applied is not this layer's decision to make. A second pre-write refusal is the one exception: it
+    /// proves nothing was written, so the statement runs inline rather than fail. A failure to <em>register</em> is absorbed instead —
     /// the statement simply runs inline, since preparing is an optimization and must never be the reason
     /// a working statement fails.</para>
     /// </summary>
@@ -365,6 +378,11 @@ internal sealed class GrpcTransport(CamusEndpointPool endpoints, CamusTokenProvi
         GrpcBatcher batcher = GetBatcher(request.Endpoint);
 
         if (!request.Prepared)
+            return await send(batcher, BuildSqlRequest(request), request.StreamSlot, null, cancellationToken).ConfigureAwait(false);
+
+        // A transaction finishing on a rotated-out stream cannot use the slot's registration, which
+        // lives on the stream that replaced it — see GrpcBatcher.IsBoundToRetiredStream.
+        if (request.TxnIdPT is long pt && request.TxnIdCounter is uint counter && batcher.IsBoundToRetiredStream(pt, counter))
             return await send(batcher, BuildSqlRequest(request), request.StreamSlot, null, cancellationToken).ConfigureAwait(false);
 
         int slot = request.StreamSlot ?? batcher.ReserveSlot();
@@ -391,6 +409,15 @@ internal sealed class GrpcTransport(CamusEndpointPool endpoints, CamusTokenProvi
             catch (Exception ex) when (attempt == 0 && IsStaleRegistration(ex))
             {
                 batcher.InvalidatePrepared(slot, request.Database, request.Sql, entry);
+            }
+            catch (PreparedStatementStaleException)
+            {
+                // Stale twice running: the stream this op is headed for keeps differing from the one
+                // the registration is on — a rotation landed between the check above and the write.
+                // This exception is raised before anything is written, so nothing ran, and running
+                // inline is safe. Preparing is an optimization; it must never be why a statement fails.
+                batcher.InvalidatePrepared(slot, request.Database, request.Sql, entry);
+                return await send(batcher, BuildSqlRequest(request), slot, null, cancellationToken).ConfigureAwait(false);
             }
         }
     }

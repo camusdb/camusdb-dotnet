@@ -103,4 +103,13 @@ internal sealed class GrpcBatchOptions
     /// server formed larger batches on its own. Set 1-2 for clients that fire genuine bursts from many
     /// concurrent callers on one connection.</summary>
     public int CoalescingDelayMs { get; init; } = 0;
+
+    /// <summary>
+    /// How long a stream that was rotated out is kept open for the transactions that began on it. A
+    /// transaction cannot change streams, so a retired stream stays until its last one ends; this bounds
+    /// the wait, because a transaction whose caller abandoned it never ends by itself, and closing its
+    /// stream is what makes the server roll it back and release its locks. Longer than any transaction
+    /// that is still making progress should need.
+    /// </summary>
+    public int StreamDrainTimeoutMs { get; init; } = 300_000;
 }
