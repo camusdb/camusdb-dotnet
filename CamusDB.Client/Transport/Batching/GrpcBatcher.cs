@@ -29,6 +29,12 @@ namespace CamusDB.Client.Transport.Batching;
 /// the server's per-stream ordering chain sees them together. The pool bounds the number of streams, not
 /// the number of in-flight transactions.</para>
 ///
+/// <para><b>Ops that wait together travel together.</b> The pump writes the ops it drained for one
+/// stream as a single stream message — a frame, see <see cref="BatchFrames"/> — when that stream's
+/// server announced it reads them, and reads response frames at any time. A frame never waits: only
+/// ops already in the inbox are packed, and a lone op is the plain single message it always was. It is
+/// a transport optimization only, with no atomicity and no ordering the stream does not already give.</para>
+///
 /// <para><b>A stream is rotated when the credential it opened with is superseded.</b> A stream presents
 /// its bearer token once, in its opening metadata, and then outlives it: the provider renews the token
 /// every few minutes, the stream is meant to last a session. Whether the server tolerates that is the
@@ -320,20 +326,28 @@ internal sealed class GrpcBatcher : IAsyncDisposable
             while (true)
             {
                 int drained = 0;
-                while (slot.Inbox.TryDequeue(out QueuedItem item))
+
+                // Ops that arrive while a write is awaited belong to the same drain, as they always did.
+                do
                 {
-                    await WriteItemAsync(slot, item).ConfigureAwait(false);
-                    drained++;
+                    while (slot.Inbox.TryDequeue(out QueuedItem item))
+                    {
+                        await StageAsync(slot, item).ConfigureAwait(false);
+                        drained++;
+                    }
+
+                    await FlushAsync(slot).ConfigureAwait(false);
                 }
+                while (!slot.Inbox.IsEmpty);
 
                 // Coalesce: after writing a small burst, pause briefly so more ops accumulate before the
                 // next drain writes them together. Only after a drain of TWO or more items: a one-item drain
                 // is a request/response ping-pong (one caller, whose next op cannot arrive until this one is
                 // answered), and sleeping there adds the whole delay to every round trip while gaining
                 // nothing — measured on the bank workload as ~3.5 ms per statement, 22 ms per six-statement
-                // transfer, and a fifth of the throughput at low concurrency. Each item is its own stream
-                // message either way; the pause only lets the transport pack frames, so it is worth paying
-                // only when a burst is demonstrably arriving.
+                // transfer, and a fifth of the throughput at low concurrency. Ops that are waiting together
+                // already share a frame without any pause; the pause only makes the next frame fuller, so it
+                // is worth paying only when a burst is demonstrably arriving.
                 if (drained >= 2 && options.CoalescingThreshold > 1
                     && drained < options.CoalescingThreshold && options.CoalescingDelayMs > 0)
                 {
@@ -349,18 +363,42 @@ internal sealed class GrpcBatcher : IAsyncDisposable
                     return;
             }
         }
-        catch
+        catch (Exception ex)
         {
+            // Staging and flushing report their failures per op, so this is not expected; but an op left
+            // in the run would otherwise wait for an answer to a message that was never written.
+            FaultRun(slot, ex);
+            slot.Frame.Items.Clear();
+            slot.Run.Clear();
             Interlocked.Exchange(ref slot.Processing, 0);
         }
     }
 
+    /// <summary>
+    /// Does everything an op needs before it is written — routing, the prepared-statement check, the hold
+    /// on its stream — and then either writes it alone or adds it to the slot's run, the ops that will
+    /// share the next stream message. All of it is per op: a frame must not let one op's routing or one
+    /// op's failure stand in for another's.
+    ///
+    /// <para>A run holds consecutive ops bound for <b>one</b> stream. The ops of one drain can belong to
+    /// different streams — a transaction finishing on a retired stream, autocommit ops on the current one
+    /// — so an op for another stream first flushes the run. Ops are never reordered to make a fuller
+    /// frame: the server chains the ops of a transaction by arrival order, and inbox order is the only
+    /// order the callers gave.</para>
+    /// </summary>
     // The slot's pump is the only writer to its stream, so no write lock is needed.
-    private async Task WriteItemAsync(Slot slot, QueuedItem item)
+    private async Task StageAsync(Slot slot, QueuedItem item)
     {
+        PendingOp op = item.Op;
+        StreamLease lease;
+
         try
         {
-            StreamLease lease = Route(slot, item.Op);
+            // Cancelled while it sat in the inbox: it holds nothing yet, so it is simply left out.
+            if (!MustStillBeWritten(op))
+                return;
+
+            lease = Route(slot, op);
             IBatchTransport transport = lease.Transport;
 
             // A prepared execution names a handle that exists only on the stream it was registered on.
@@ -370,23 +408,149 @@ internal sealed class GrpcBatcher : IAsyncDisposable
             if (item.ExpectedTransportId is long expected && transport.Id != expected)
                 throw new PreparedStatementStaleException();
 
-            item.Op.TransportId = transport.Id;
+            op.TransportId = transport.Id;
 
             // Counted before it is published on the op: a release that raced in between would otherwise
             // take the count below zero and let a retired stream look drained while this op is on it.
             Interlocked.Increment(ref lease.InFlight);
-            Volatile.Write(ref item.Op.Lease, lease);
+            Volatile.Write(ref op.Lease, lease);
 
-            // Cancelled while it sat in the inbox: nobody is left to release it, so do it here.
-            if (!pending.ContainsKey(item.Op.RequestId))
-                Release(item.Op);
+            // Cancelled between the check above and the publish: nobody is left to release it, so do it
+            // here.
+            if (!pending.ContainsKey(op.RequestId))
+            {
+                Release(op);
 
-            await transport.SendAsync(item.Request, shutdown.Token).ConfigureAwait(false);
+                if (!MustStillBeWritten(op))
+                    return;
+            }
         }
         catch (Exception ex)
         {
-            Fault(item.Op, ex);
+            Fault(op, ex);
+            return;
         }
+
+        // Frames only to a server that announced them on this very stream. The announcement is read, never
+        // awaited: until it arrives — and for good against a server that makes none — each op is its own
+        // message, written at once as it always was.
+        bool framed = options.RequestFrames && lease.Transport.FramesAnnounced;
+
+        if (slot.Run.Count > 0 && (!framed || !ReferenceEquals(slot.RunLease, lease)))
+            await FlushAsync(slot).ConfigureAwait(false);
+
+        if (!framed)
+        {
+            await SendAsync(lease, item.Request, op).ConfigureAwait(false);
+            return;
+        }
+
+        if (slot.Run.Count == 0)
+        {
+            // A lone op is never measured: it travels as the plain message whatever its size.
+            slot.Run.Add(item);
+            slot.RunLease = lease;
+            slot.RunBytes = -1;
+            return;
+        }
+
+        if (slot.RunBytes < 0)
+            slot.RunBytes = FrameCost(slot.Run[0].Request);
+
+        int cost = FrameCost(item.Request);
+
+        // Both limits are the sender's duty. The byte budget most of all: a message over the transport's
+        // limit is rejected before the server can parse it, which resets the stream for every op on it.
+        // An op over the budget on its own ends up alone in its run, and so travels as a single message.
+        if (slot.Run.Count >= BatchFrames.MaxItems || (long)slot.RunBytes + cost > BatchFrames.MaxBytes)
+        {
+            await FlushAsync(slot).ConfigureAwait(false);
+
+            slot.Run.Add(item);
+            slot.RunLease = lease;
+            slot.RunBytes = cost;
+            return;
+        }
+
+        slot.Run.Add(item);
+        slot.RunBytes += cost;
+    }
+
+    /// <summary>
+    /// Writes the slot's run: one frame, or the plain single message when only one op is left in it, so a
+    /// quiet stream is byte-identical to one without frames.
+    ///
+    /// <para>A frame is never resent. One whose write failed may or may not have reached the server,
+    /// which is true of every op in it, so every op faults with the transport error and the retry
+    /// contract above the batcher decides — exactly what happens to the ops of a faulted stream.</para>
+    /// </summary>
+    private async Task FlushAsync(Slot slot)
+    {
+        if (slot.Run.Count == 0)
+            return;
+
+        BatchExecuteRequest frame = slot.Frame;
+
+        try
+        {
+            // Cancelled since it was staged: its hold on the stream is already released, leave it out.
+            foreach (QueuedItem item in slot.Run)
+            {
+                if (MustStillBeWritten(item.Op))
+                    frame.Items.Add(item.Request);
+            }
+
+            if (frame.Items.Count == 1)
+                await slot.RunLease!.Transport.SendAsync(frame.Items[0], shutdown.Token).ConfigureAwait(false);
+            else if (frame.Items.Count > 1)
+                await slot.RunLease!.Transport.SendAsync(frame, shutdown.Token).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            FaultRun(slot, ex);
+        }
+        finally
+        {
+            // The envelope is reused, which is safe only because an awaited send has serialized its
+            // message by the time it returns.
+            frame.Items.Clear();
+            slot.Run.Clear();
+            slot.RunLease = null;
+            slot.RunBytes = -1;
+        }
+    }
+
+    private async Task SendAsync(StreamLease lease, BatchExecuteRequest request, PendingOp op)
+    {
+        try
+        {
+            await lease.Transport.SendAsync(request, shutdown.Token).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            Fault(op, ex);
+        }
+    }
+
+    private void FaultRun(Slot slot, Exception ex)
+    {
+        foreach (QueuedItem item in slot.Run)
+            Fault(item.Op, ex);
+    }
+
+    /// <summary>
+    /// False for an op whose caller is gone (cancelled, or timed out) before the op was written: the
+    /// server is never asked to run it. A ROLLBACK and a CLOSE are written regardless — they only release
+    /// what the server holds (a transaction's locks, a statement handle), and nothing else would.
+    /// </summary>
+    private bool MustStillBeWritten(PendingOp op)
+        => op.Kind is BatchStatementKind.Rollback or BatchStatementKind.Close || pending.ContainsKey(op.RequestId);
+
+    /// <summary>What an op adds to a frame: its serialized size, plus the tag and length it is wrapped in.</summary>
+    private static int FrameCost(BatchExecuteRequest request)
+    {
+        int size = request.CalculateSize();
+        return 1 + Google.Protobuf.CodedOutputStream.ComputeLengthSize(size) + size;
     }
 
     // ─── Reader / demux ───────────────────────────────────────────────────────
@@ -551,6 +715,20 @@ internal sealed class GrpcBatcher : IAsyncDisposable
 
     private void Demux(BatchExecuteResponse resp)
     {
+        // A response frame: each item is handled exactly as if it had arrived alone, in order, so the
+        // messages of one request_id keep theirs. Accepted at any time, whatever this client has sent. A
+        // frame inside a frame is dropped, not followed.
+        if (resp.PayloadCase == BatchExecuteResponse.PayloadOneofCase.Frame)
+        {
+            foreach (BatchExecuteResponse item in resp.Frame.Items)
+            {
+                if (item.PayloadCase != BatchExecuteResponse.PayloadOneofCase.Frame)
+                    Demux(item);
+            }
+
+            return;
+        }
+
         if (!pending.TryGetValue(resp.RequestId, out PendingOp? op))
             return;   // cancelled, timed out, or already completed — drop.
 
@@ -691,6 +869,19 @@ internal sealed class GrpcBatcher : IAsyncDisposable
         /// <summary>The stream new work is written to, or null after it faulted and before an op has
         /// needed the slot again. Written by the pump, and cleared by that stream's own reader.</summary>
         public StreamLease? Current;
+
+        /// <summary>The ops staged for the next stream message, all bound for <see cref="RunLease"/>.
+        /// Touched only by the slot's pump, as are the three fields below.</summary>
+        public readonly List<QueuedItem> Run = [];
+
+        public StreamLease? RunLease;
+
+        /// <summary>Serialized size of <see cref="Run"/> as frame items, or -1 while it holds a single
+        /// op that nobody has had a reason to measure.</summary>
+        public int RunBytes = -1;
+
+        /// <summary>The frame envelope, refilled for every frame this slot writes.</summary>
+        public readonly BatchExecuteRequest Frame = new() { Kind = BatchStatementKind.Frame };
 
         /// <summary>
         /// Statements registered on this slot, keyed by (database, sql). The value is the in-flight or

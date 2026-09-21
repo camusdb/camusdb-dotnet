@@ -97,7 +97,10 @@ internal sealed class GrpcTransport(CamusEndpointPool endpoints, CamusTokenProvi
         // only logs in, pings, or runs DDL never needs them, and — since a stream carries the token it
         // was opened with — opening them before the first login would open them unauthenticated.
         private readonly Lazy<GrpcBatcher> batcher = new(
-            () => new GrpcBatcher(batchOptions, id => new GrpcBatchTransport(id, client, headers()), credentialStamp),
+            () => new GrpcBatcher(
+                batchOptions,
+                id => new GrpcBatchTransport(id, client, headers(), acceptResponseFrames: batchOptions.RequestFrames),
+                credentialStamp),
             LazyThreadSafetyMode.ExecutionAndPublication);
 
         // The batcher rebuilds a faulted stream on its own, so the factory reads the current token on

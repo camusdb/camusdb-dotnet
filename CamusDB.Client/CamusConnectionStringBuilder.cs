@@ -242,8 +242,9 @@ public class CamusConnectionStringBuilder
     };
 
     /// <summary>
-    /// Batcher tuning for gRPC connections, from <c>ChannelPoolSize=</c>, <c>CoalescingThreshold=</c> and
-    /// <c>CoalescingDelay=</c> (milliseconds). Ignored by the REST transport.
+    /// Batcher tuning for gRPC connections, from <c>ChannelPoolSize=</c>, <c>CoalescingThreshold=</c>,
+    /// <c>CoalescingDelay=</c> (milliseconds) and <c>RequestFrames=</c> (<c>true</c>/<c>false</c>).
+    /// Ignored by the REST transport.
     ///
     /// <para><c>ChannelPoolSize</c> is the CamusDB analogue of Spanner's <c>NumChannels</c>: how many
     /// long-lived <c>BatchExecute</c> streams exist per endpoint. It is <i>not</i> a cap on in-flight
@@ -259,7 +260,11 @@ public class CamusConnectionStringBuilder
         ChannelPoolSize = ParseInt("ChannelPoolSize", 1, GrpcBatchOptions.Default.ChannelPoolSize),
         CoalescingThreshold = ParseInt("CoalescingThreshold", 1, GrpcBatchOptions.Default.CoalescingThreshold),
         CoalescingDelayMs = ParseInt("CoalescingDelay", 0, GrpcBatchOptions.Default.CoalescingDelayMs),
+        RequestFrames = ParseBool("RequestFrames", GrpcBatchOptions.Default.RequestFrames),
     };
+
+    private bool ParseBool(string key, bool fallback)
+        => Config.TryGetValue(key, out string? raw) && bool.TryParse(raw, out bool value) ? value : fallback;
 
     private int ParseInt(string key, int minimum, int fallback)
         => Config.TryGetValue(key, out string? raw) && int.TryParse(raw, out int value) && value >= minimum
@@ -624,7 +629,8 @@ public class CamusConnectionStringBuilder
                 CamusTokenProvider.SharingKey(Credentials, DeploymentKey),
                 batch.ChannelPoolSize,
                 batch.CoalescingThreshold,
-                batch.CoalescingDelayMs);
+                batch.CoalescingDelayMs,
+                batch.RequestFrames);
         }
     }
 

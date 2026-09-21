@@ -26,12 +26,58 @@ internal sealed class GrpcBatchTransport : IBatchTransport
 {
     private readonly AsyncDuplexStreamingCall<BatchExecuteRequest, BatchExecuteResponse> call;
 
+    private volatile bool framesAnnounced;
+
     public long Id { get; }
 
-    public GrpcBatchTransport(long id, CamusSql.CamusSqlClient client, global::Grpc.Core.Metadata? headers = null)
+    public bool FramesAnnounced => framesAnnounced;
+
+    /// <param name="acceptResponseFrames">
+    /// Tells the server, in this stream's request metadata, that response frames may be sent on it. Off
+    /// when the caller opted out of frames, so that stream is a true no-frames stream in both directions.
+    /// </param>
+    public GrpcBatchTransport(
+        long id, CamusSql.CamusSqlClient client, global::Grpc.Core.Metadata? headers = null, bool acceptResponseFrames = false)
     {
         Id = id;
-        call = headers is null ? client.BatchExecute() : client.BatchExecute(headers);
+        call = client.BatchExecute(WithAcceptHeader(headers, acceptResponseFrames));
+        _ = ObserveAnnouncementAsync();
+    }
+
+    /// <summary>Builds the call metadata without mutating the caller's, which the factory may reuse.</summary>
+    private static global::Grpc.Core.Metadata? WithAcceptHeader(global::Grpc.Core.Metadata? headers, bool acceptResponseFrames)
+    {
+        if (!acceptResponseFrames)
+            return headers;
+
+        global::Grpc.Core.Metadata merged = [];
+
+        if (headers is not null)
+            foreach (global::Grpc.Core.Metadata.Entry entry in headers)
+                merged.Add(entry);
+
+        merged.Add(BatchFrames.AcceptHeaderName, BatchFrames.Version.ToString());
+        return merged;
+    }
+
+    /// <summary>
+    /// Watches this stream's response headers for the frame announcement, off the operation path: ops are
+    /// written one per message until it arrives, and for good if it never does. A stream that fails before
+    /// its headers arrive announces nothing; the reader reports that failure, not this.
+    /// </summary>
+    private async Task ObserveAnnouncementAsync()
+    {
+        try
+        {
+            global::Grpc.Core.Metadata responseHeaders = await call.ResponseHeadersAsync.ConfigureAwait(false);
+
+            if (BatchFrames.Announces(responseHeaders.GetValue(BatchFrames.HeaderName)))
+                framesAnnounced = true;
+        }
+        catch
+        {
+            // No headers, no announcement.
+        }
     }
 
     public Task SendAsync(BatchExecuteRequest request, CancellationToken cancellationToken)

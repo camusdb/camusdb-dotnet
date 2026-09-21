@@ -97,11 +97,11 @@ internal sealed class GrpcBatchOptions
     /// lockstep, and a pause there is pure latency.</summary>
     public int CoalescingThreshold { get; init; } = 10;
 
-    /// <summary>Coalescing delay in milliseconds. Default 0 (off): each op is its own stream message, so the
-    /// pause only lets the transport pack frames, and measured against a real cluster the former 2 ms
-    /// default cost every statement ~3.5 ms and a 128-worker bank workload 12% of its throughput while the
-    /// server formed larger batches on its own. Set 1-2 for clients that fire genuine bursts from many
-    /// concurrent callers on one connection.</summary>
+    /// <summary>Coalescing delay in milliseconds. Default 0 (off): measured against a real cluster, before
+    /// request frames existed, the former 2 ms default cost every statement ~3.5 ms and a 128-worker bank
+    /// workload 12% of its throughput while the server formed larger batches on its own. Frames already
+    /// pack the ops that are waiting together without any pause; a delay only makes those frames fuller.
+    /// Set 1-2 for clients that fire genuine bursts from many concurrent callers on one connection.</summary>
     public int CoalescingDelayMs { get; init; } = 0;
 
     /// <summary>
@@ -112,4 +112,12 @@ internal sealed class GrpcBatchOptions
     /// that is still making progress should need.
     /// </summary>
     public int StreamDrainTimeoutMs { get; init; } = 300_000;
+
+    /// <summary>
+    /// Whether ops that are waiting together are written as one stream message (a frame) to a server that
+    /// announced it reads them. Default on. A frame never waits for more ops, a lone op is written as the
+    /// plain single message, and a server that made no announcement never receives one — so off is only
+    /// for A/B measurements and as a kill switch.
+    /// </summary>
+    public bool RequestFrames { get; init; } = true;
 }
