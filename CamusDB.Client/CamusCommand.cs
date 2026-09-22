@@ -225,6 +225,11 @@ public class CamusCommand : DbCommand, ICloneable
         "CREATE MATERIALIZED VIEW",
         "DROP MATERIALIZED VIEW",
         "ALTER MATERIALIZED VIEW",
+        // Sequences. ALTER SEQUENCE covers both the option form and RENAME TO. COMMENT ON SEQUENCE is
+        // absent, as COMMENT ON is for every other object: the data endpoint handles it itself.
+        "CREATE SEQUENCE",
+        "DROP SEQUENCE",
+        "ALTER SEQUENCE",
     ];
 
     private static readonly string[] DmlPrefixes =

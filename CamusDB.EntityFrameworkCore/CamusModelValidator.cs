@@ -28,6 +28,7 @@ public class CamusModelValidator : RelationalModelValidator
         ValidateComputedColumns(model);
         ValidateKeyTypes(model);
         ValidateColumnStorage(model);
+        ValidateSequences(model);
     }
 
     private static readonly HashSet<Type> SupportedConcurrencyTokenClrTypes = new()
@@ -123,6 +124,38 @@ public class CamusModelValidator : RelationalModelValidator
                         $"CamusDB supports a storage strategy only on string, bytes and array columns. " +
                         $"Property '{entityType.DisplayName()}.{property.Name}' has store type '{storeType}' " +
                         $"and storage strategy '{storage}'.");
+            }
+        }
+    }
+
+    /// <summary>
+    /// A sequence must be one the server can create: an integer type, and not cyclic. A property that
+    /// draws from a sequence must be an integer and name a sequence of the model. Both checks fail at
+    /// model build, with the names of the sequence and the property, not at the first migration.
+    /// </summary>
+    private static void ValidateSequences(IModel model)
+    {
+        foreach (var sequence in model.GetSequences())
+            CamusSequenceSyntax.EnsureSupported(sequence.Name, sequence.Type, sequence.IsCyclic);
+
+        foreach (var entityType in model.GetEntityTypes())
+        {
+            foreach (var property in entityType.GetProperties())
+            {
+                string? sequenceName = property.GetSequenceName() ?? property.GetHiLoSequenceName();
+                if (sequenceName is null)
+                    continue;
+
+                var clrType = Nullable.GetUnderlyingType(property.ClrType) ?? property.ClrType;
+                if (!CamusPropertyBuilderExtensions.IsSequenceValueType(clrType))
+                    throw new NotSupportedException(
+                        $"Property '{entityType.DisplayName()}.{property.Name}' draws from sequence '{sequenceName}' " +
+                        $"but has type '{clrType.Name}'. A sequence-backed property must be long, int or short.");
+
+                if (model.FindSequence(sequenceName) is null)
+                    throw new InvalidOperationException(
+                        $"Property '{entityType.DisplayName()}.{property.Name}' draws from sequence '{sequenceName}', " +
+                        "which is not in the model. Add it with modelBuilder.HasSequence.");
             }
         }
     }

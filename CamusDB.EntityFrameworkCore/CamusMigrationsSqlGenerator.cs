@@ -35,6 +35,7 @@ public class CamusMigrationsSqlGenerator : MigrationsSqlGenerator
             if (!col.IsNullable)
                 builder.Append(" NOT NULL");
 
+            AppendDefault(builder, col);
             AppendStorage(builder, col);
 
             if (col.Comment is not null)
@@ -94,11 +95,7 @@ public class CamusMigrationsSqlGenerator : MigrationsSqlGenerator
         if (!operation.IsNullable)
             builder.Append(" NOT NULL");
 
-        if (operation.DefaultValue is not null)
-            builder.Append(" DEFAULT (").Append(FormatDefaultValue(operation.DefaultValue)).Append(")");
-        else if (!string.IsNullOrEmpty(operation.DefaultValueSql))
-            builder.Append(" DEFAULT (").Append(operation.DefaultValueSql).Append(")");
-
+        AppendDefault(builder, operation);
         AppendStorage(builder, operation);
 
         if (operation.Comment is not null)
@@ -246,7 +243,18 @@ public class CamusMigrationsSqlGenerator : MigrationsSqlGenerator
         bool storageChanged = storage != GetStorage(operation.OldColumn);
 
         if (!nullabilityChanged && !commentChanged && !storageChanged)
+        {
+            // Typically UseSequence on a column that already exists. The sequence value generator still
+            // works without the DDL default, so the step can be removed from the migration.
+            if (!Equals(operation.DefaultValue, operation.OldColumn.DefaultValue)
+                || !string.Equals(operation.DefaultValueSql, operation.OldColumn.DefaultValueSql, StringComparison.Ordinal))
+                throw new NotSupportedException(
+                    $"CamusDB cannot change the default of the existing column '{operation.Table}.{operation.Name}': " +
+                    "it has no ALTER COLUMN … SET DEFAULT. Remove this AlterColumn step from the migration, or drop " +
+                    "and add the column again.");
+
             throw new NotSupportedException("CamusDB only supports altering a column's nullability, storage strategy or comment.");
+        }
 
         if (nullabilityChanged)
         {
@@ -274,6 +282,20 @@ public class CamusMigrationsSqlGenerator : MigrationsSqlGenerator
                 operation.Comment, $"column '{operation.Table}.{operation.Name}'");
             builder.EndCommand();
         }
+    }
+
+    /// <summary>
+    /// Emits an inline <c>DEFAULT (…)</c> clause from <c>HasDefaultValue</c> or <c>HasDefaultValueSql</c>.
+    /// A sequence-backed column (<see cref="CamusPropertyBuilderExtensions.UseSequence(Microsoft.EntityFrameworkCore.Metadata.Builders.PropertyBuilder, string)"/>)
+    /// gets <c>DEFAULT (nextval('…'))</c> this way, so an <c>INSERT</c> that omits the column draws from
+    /// the sequence too.
+    /// </summary>
+    private static void AppendDefault(MigrationCommandListBuilder builder, ColumnOperation column)
+    {
+        if (column.DefaultValue is not null)
+            builder.Append(" DEFAULT (").Append(FormatDefaultValue(column.DefaultValue)).Append(")");
+        else if (!string.IsNullOrEmpty(column.DefaultValueSql))
+            builder.Append(" DEFAULT (").Append(column.DefaultValueSql).Append(")");
     }
 
     /// <summary>
@@ -392,20 +414,93 @@ public class CamusMigrationsSqlGenerator : MigrationsSqlGenerator
         builder.EndCommand();
     }
 
+    // CamusDB has no schemas, so the Schema of every sequence operation is ignored, as it is for tables.
     protected override void Generate(CreateSequenceOperation operation, IModel? model, MigrationCommandListBuilder builder)
-        => throw new NotSupportedException("CamusDB does not support sequences.");
+    {
+        builder.Append(CamusSequenceSyntax.Create(
+            operation.Name,
+            operation.ClrType,
+            operation.StartValue,
+            operation.IncrementBy,
+            operation.MinValue,
+            operation.MaxValue,
+            operation.IsCyclic,
+            ifNotExists: false));
+        builder.EndCommand();
+    }
 
     protected override void Generate(DropSequenceOperation operation, IModel? model, MigrationCommandListBuilder builder)
-        => throw new NotSupportedException("CamusDB does not support sequences.");
+    {
+        builder.Append("DROP SEQUENCE ").Append(Dependencies.SqlGenerationHelper.DelimitIdentifier(operation.Name));
+        builder.EndCommand();
+    }
 
+    /// <summary>
+    /// Emits one <c>ALTER SEQUENCE</c> with the options that changed. The server checks the definition
+    /// that the statement produces, not only the values it names. Thus a new minimum above the recorded
+    /// start value fails with <c>CADB0545</c>. A change of the start value alone has no statement:
+    /// EF emits a <see cref="RestartSequenceOperation"/> for the counter.
+    /// </summary>
     protected override void Generate(AlterSequenceOperation operation, IModel? model, MigrationCommandListBuilder builder)
-        => throw new NotSupportedException("CamusDB does not support sequences.");
+    {
+        if (operation.IsCyclic)
+            CamusSequenceSyntax.EnsureSupported(operation.Name, typeof(long), isCyclic: true);
 
+        SequenceOperation old = operation.OldSequence;
+        List<string> options = [];
+
+        if (operation.IncrementBy != old.IncrementBy)
+            options.Add("INCREMENT BY " + CamusSequenceSyntax.Number(operation.IncrementBy));
+
+        if (operation.MinValue != old.MinValue)
+            options.Add("MINVALUE " + CamusSequenceSyntax.Number(operation.MinValue ?? CamusSequenceSyntax.DefaultMinValue));
+
+        if (operation.MaxValue != old.MaxValue)
+            options.Add(operation.MaxValue is { } max ? "MAXVALUE " + CamusSequenceSyntax.Number(max) : "NO MAXVALUE");
+
+        // The server grammar needs at least one option. A change of IsCyclic from true to false has no
+        // statement either, because the server never cycles.
+        if (options.Count == 0)
+            return;
+
+        builder.Append("ALTER SEQUENCE ").Append(Dependencies.SqlGenerationHelper.DelimitIdentifier(operation.Name))
+               .Append(" ").Append(string.Join(" ", options));
+        builder.EndCommand();
+    }
+
+    // A rename is metadata only: the counter keeps its position, and a column default that draws from
+    // the sequence keeps working. A change of schema alone has no statement.
     protected override void Generate(RenameSequenceOperation operation, IModel? model, MigrationCommandListBuilder builder)
-        => throw new NotSupportedException("CamusDB does not support sequences.");
+    {
+        if (operation.NewName is not { } newName || string.Equals(newName, operation.Name, StringComparison.Ordinal))
+            return;
 
+        var helper = Dependencies.SqlGenerationHelper;
+        builder.Append("ALTER SEQUENCE ").Append(helper.DelimitIdentifier(operation.Name))
+               .Append(" RENAME TO ").Append(helper.DelimitIdentifier(newName));
+        builder.EndCommand();
+    }
+
+    /// <summary>
+    /// Emits <c>ALTER SEQUENCE … RESTART [WITH n]</c>. Without a value, the server returns the counter to
+    /// the recorded start value.
+    /// </summary>
+    /// <remarks>
+    /// The server refuses <c>RESTART</c> inside an explicit transaction, because a later <c>ROLLBACK</c>
+    /// cannot move the counter back. Thus the command runs outside the migration transaction. The
+    /// statement takes about five seconds: the server waits one storage lease, so that no node can
+    /// still issue values from the old position when the statement returns.
+    /// </remarks>
     protected override void Generate(RestartSequenceOperation operation, IModel? model, MigrationCommandListBuilder builder)
-        => throw new NotSupportedException("CamusDB does not support sequences.");
+    {
+        builder.Append("ALTER SEQUENCE ").Append(Dependencies.SqlGenerationHelper.DelimitIdentifier(operation.Name))
+               .Append(" RESTART");
+
+        if (operation.StartValue is { } startValue)
+            builder.Append(" WITH ").Append(CamusSequenceSyntax.Number(startValue));
+
+        builder.EndCommand(suppressTransaction: true);
+    }
 
     private static string GetDdlType(ColumnOperation col)
     {
@@ -464,9 +559,10 @@ public class CamusMigrationsSqlGenerator : MigrationsSqlGenerator
     /// The shared formatter refuses that shape and names the column, which is also what keeps a
     /// data-driven migration from composing a statement nobody wrote.</para>
     /// </summary>
-    private static string FormatDefaultValue(object value) => value switch
+    internal static string FormatDefaultValue(object value) => value switch
     {
         bool b           => b ? "true" : "false",
+        Guid g           => $"'{g.ToString("D", CultureInfo.InvariantCulture)}'",
         string s         => CamusSqlSyntax.Literal(s, "a column default value"),
         int i            => i.ToString(CultureInfo.InvariantCulture),
         long l           => l.ToString(CultureInfo.InvariantCulture),

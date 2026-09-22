@@ -17,6 +17,14 @@ public class CamusAnnotationCodeGenerator : AnnotationCodeGenerator
         = typeof(CamusPropertyBuilderExtensions).GetRuntimeMethod(
               nameof(CamusPropertyBuilderExtensions.HasStorage), [typeof(PropertyBuilder), typeof(CamusColumnStorage?)])!;
 
+    private static readonly MethodInfo PropertyUseSequenceMethod
+        = typeof(CamusPropertyBuilderExtensions).GetRuntimeMethod(
+              nameof(CamusPropertyBuilderExtensions.UseSequence), [typeof(PropertyBuilder), typeof(string)])!;
+
+    private static readonly MethodInfo PropertyUseHiLoMethod
+        = typeof(CamusPropertyBuilderExtensions).GetRuntimeMethod(
+              nameof(CamusPropertyBuilderExtensions.UseHiLo), [typeof(PropertyBuilder), typeof(string), typeof(int?)])!;
+
     public CamusAnnotationCodeGenerator(AnnotationCodeGeneratorDependencies dependencies)
         : base(dependencies) { }
 
@@ -29,8 +37,19 @@ public class CamusAnnotationCodeGenerator : AnnotationCodeGenerator
 
     // Render the column storage strategy as .HasStorage(CamusColumnStorage.Plain) in the model snapshot
     // and in scaffolded models.
+    //
+    // A sequence-backed property renders as .UseSequence("name") or .UseHiLo("name"). UseHiLo gets no
+    // block size: the snapshot configures the sequence with HasSequence(...).IncrementsBy(n) already, and
+    // a block size here would change that increment again.
     protected override MethodCallCodeFragment? GenerateFluentApi(IProperty property, IAnnotation annotation)
-        => annotation.Name == CamusAnnotationNames.ColumnStorage && annotation.Value is CamusColumnStorage storage
-            ? new MethodCallCodeFragment(PropertyHasStorageMethod, storage)
-            : base.GenerateFluentApi(property, annotation);
+        => annotation switch
+        {
+            { Name: CamusAnnotationNames.ColumnStorage, Value: CamusColumnStorage storage }
+                => new MethodCallCodeFragment(PropertyHasStorageMethod, storage),
+            { Name: CamusAnnotationNames.SequenceName, Value: string sequenceName }
+                => new MethodCallCodeFragment(PropertyUseSequenceMethod, sequenceName),
+            { Name: CamusAnnotationNames.HiLoSequenceName, Value: string sequenceName }
+                => new MethodCallCodeFragment(PropertyUseHiLoMethod, sequenceName, null),
+            _ => base.GenerateFluentApi(property, annotation),
+        };
 }

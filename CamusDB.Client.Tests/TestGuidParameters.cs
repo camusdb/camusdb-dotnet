@@ -166,10 +166,10 @@ public class TestGuidParameters
     }
 
     [Fact]
-    public async Task ContainsOverAGuidList_OnAColumnWithNoUuidMapping_BindsUuidParameters()
+    public async Task ContainsOverAGuidList_OnAnObjectIdColumn_BindsUuidParameters()
     {
-        // ExternalRef is a Guid with no store type, so EF maps it with the default "id" mapping, whose
-        // parameters carry DbType.Guid. The Guid values must still travel as Uuid.
+        // ExternalRef is a Guid declared HasColumnType("id"), so EF maps it with the "id" mapping, whose
+        // parameters carry DbType.Guid and no Uuid stamp. The Guid values must still travel as Uuid.
         List<Guid> ids = [Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid()];
 
         Dictionary<string, ColumnValue> parameters = await CaptureAsync(
@@ -202,7 +202,7 @@ public class TestGuidParameters
                 b.ToTable("guid_parameter_accounts");
                 b.HasKey(e => e.Id);
                 b.Property(e => e.Id).HasColumnType("uuid");
-                b.Property(e => e.ExternalRef);
+                b.Property(e => e.ExternalRef).HasColumnType("id");
                 b.Property(e => e.Name).HasMaxLength(64);
             });
         }

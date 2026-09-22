@@ -115,6 +115,41 @@ public class TestGuidParametersLive : BaseTest
         Assert.Equal(new HashSet<Guid> { ids[0], ids[1] }, found.ToHashSet());
     }
 
+    [Fact]
+    public async Task PlainGuidProperty_IsStoredInAUuidColumn()
+    {
+        // A Guid property with no store type maps to "uuid". Under the old "id" default, EnsureCreated
+        // made an OID column and the insert failed.
+        Guid id = Guid.NewGuid();
+        Guid reference = Guid.NewGuid();
+
+        await using (PlainGuidContext ctx = new(PlainOptions()))
+        {
+            await ctx.Database.EnsureCreatedAsync();
+
+            Assert.Equal("uuid", ctx.Model.FindEntityType(typeof(PlainGuidDoc))!
+                .FindProperty(nameof(PlainGuidDoc.Reference))!.GetColumnType());
+
+            ctx.Docs.Add(new PlainGuidDoc { Id = id, Reference = reference });
+            await ctx.SaveChangesAsync();
+        }
+
+        await using (PlainGuidContext ctx = new(PlainOptions()))
+        {
+            PlainGuidDoc? loaded = await ctx.Docs.FirstOrDefaultAsync(d => d.Reference == reference);
+
+            Assert.NotNull(loaded);
+            Assert.Equal(id, loaded.Id);
+        }
+
+        await using CamusConnection connection = await GetConnection();
+        await using CamusCommand cmd = connection.CreateCamusCommand(
+            $"SELECT id FROM {PlainTableName} WHERE reference = @reference");
+        cmd.Parameters.Add(new CamusParameter { ParameterName = "@reference", DbType = DbType.Guid, Value = reference });
+
+        Assert.Equal([id], await ReadIdsAsync(cmd));
+    }
+
     private static async Task<List<Guid>> ReadIdsAsync(CamusCommand cmd)
     {
         List<Guid> ids = [];
@@ -124,6 +159,33 @@ public class TestGuidParametersLive : BaseTest
             ids.Add(reader.GetGuid(0));
 
         return ids;
+    }
+
+    private const string PlainTableName = "guid_parameter_plain_v1";
+
+    private static DbContextOptions<PlainGuidContext> PlainOptions() =>
+        new DbContextOptionsBuilder<PlainGuidContext>().UseCamusDB(ConnString).Options;
+
+    private sealed class PlainGuidContext(DbContextOptions options) : DbContext(options)
+    {
+        public DbSet<PlainGuidDoc> Docs => Set<PlainGuidDoc>();
+
+        protected override void OnModelCreating(ModelBuilder mb)
+        {
+            mb.Entity<PlainGuidDoc>(b =>
+            {
+                b.ToTable(PlainTableName);
+                b.HasKey(e => e.Id);
+                b.Property(e => e.Id).HasColumnName("id");
+                b.Property(e => e.Reference).HasColumnName("reference");
+            });
+        }
+    }
+
+    private sealed class PlainGuidDoc
+    {
+        public Guid Id { get; set; }
+        public Guid Reference { get; set; }
     }
 
     private sealed class AccountContext(DbContextOptions options) : DbContext(options)

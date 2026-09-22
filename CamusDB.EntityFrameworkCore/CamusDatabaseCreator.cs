@@ -67,6 +67,15 @@ public class CamusDatabaseCreator : RelationalDatabaseCreator
         // the design-time model carries them, so use it for DDL generation.
         var model = _currentContext.Context.GetService<IDesignTimeModel>().Model;
 
+        // Sequences first: a column default can draw from one, and the server checks that the
+        // sequence exists when it creates the table. IF NOT EXISTS keeps the step idempotent, like
+        // the tables below.
+        foreach (var sequence in model.GetSequences())
+        {
+            var cmd = camusConn.CreateCamusCommand(CamusSequenceSyntax.Create(sequence, ifNotExists: true));
+            await cmd.ExecuteDDLAsync(cancellationToken).ConfigureAwait(false);
+        }
+
         foreach (var entityType in model.GetEntityTypes())
         {
             var tableName = entityType.GetTableName();
@@ -123,6 +132,16 @@ public class CamusDatabaseCreator : RelationalDatabaseCreator
 
             if (pkProps.Contains(prop) || !prop.IsNullable)
                 sb.Append(" NOT NULL");
+
+            // HasDefaultValueSql, which includes the nextval('…') default of UseSequence and UseHiLo,
+            // or HasDefaultValue converted to the provider type.
+            if (prop.GetDefaultValueSql() is { Length: > 0 } defaultSql)
+                sb.Append(" DEFAULT (").Append(defaultSql).Append(')');
+            else if (prop.GetDefaultValue() is { } defaultValue and not DBNull)
+                sb.Append(" DEFAULT (")
+                  .Append(CamusMigrationsSqlGenerator.FormatDefaultValue(
+                      prop.GetTypeMapping().Converter?.ConvertToProvider(defaultValue) ?? defaultValue))
+                  .Append(')');
 
             // Only a column with an explicit strategy gets the clause, so the DDL of a model without one
             // is unchanged and still runs on a server that predates large-value storage.

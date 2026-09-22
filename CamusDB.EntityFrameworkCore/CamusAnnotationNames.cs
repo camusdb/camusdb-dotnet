@@ -19,4 +19,16 @@ public static class CamusAnnotationNames
     /// Absent means the server default, <c>EXTENDED</c>.
     /// </summary>
     public const string ColumnStorage = Prefix + "ColumnStorage";
+
+    /// <summary>
+    /// The sequence that gives a property its value, one <c>nextval</c> for each value. Set by
+    /// <see cref="CamusPropertyBuilderExtensions.UseSequence(Microsoft.EntityFrameworkCore.Metadata.Builders.PropertyBuilder, string)"/>.
+    /// </summary>
+    public const string SequenceName = Prefix + "SequenceName";
+
+    /// <summary>
+    /// The sequence that gives a property its values in blocks, one <c>nextval</c> for each block. Set by
+    /// <see cref="CamusPropertyBuilderExtensions.UseHiLo(Microsoft.EntityFrameworkCore.Metadata.Builders.PropertyBuilder, string, int?)"/>.
+    /// </summary>
+    public const string HiLoSequenceName = Prefix + "HiLoSequenceName";
 }

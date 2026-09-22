@@ -9,9 +9,8 @@ namespace CamusDB.EntityFrameworkCore;
 public sealed class CamusTypeMappingSource : RelationalTypeMappingSource
 {
     /// <summary>
-    /// Maps a <see cref="Guid"/> property declared with <c>HasColumnType("uuid")</c> to CamusDB's
-    /// native <c>UUID</c> column. A plain <see cref="Guid"/> property still defaults to the <c>id</c>
-    /// (OID) store type for backward compatibility; native UUID storage is opt-in via the store type.
+    /// Maps a <see cref="Guid"/> property to CamusDB's native <c>UUID</c> column. This is the default
+    /// for a plain <see cref="Guid"/> property, and also the mapping for <c>HasColumnType("uuid")</c>.
     ///
     /// EF Core parameters only carry a <see cref="System.Data.DbType"/>, and <see cref="System.Data.DbType.Guid"/>
     /// resolves to <see cref="ColumnType.Id"/>, because the string-typed OID mapping sends object-id text
@@ -54,11 +53,11 @@ public sealed class CamusTypeMappingSource : RelationalTypeMappingSource
     // DbType.Guid → CamusParameter.FromDbType → ColumnType.Id (OID), while StringTypeMapping keeps
     // ClrType=string so the EF Core key-factory gets ValueComparer<string>, not DefaultValueComparer<Guid>.
     private static readonly StringTypeMapping IdStringMapping = new("id", DbType.Guid);
-    // A Guid property with no store type. Its parameter values are Guids, which the command sends as
-    // Uuid values, because 16 bytes can never be a 12-byte object id; declare HasColumnType("uuid")
-    // to store the property in a native UUID column.
+    // A Guid property declared HasColumnType("id"). Its parameter values are Guids, which the command
+    // sends as Uuid values, because 16 bytes can never be a 12-byte object id; an OID column refuses
+    // them, so a Guid property belongs in a UUID column.
     private static readonly GuidTypeMapping IdGuidMapping = new("id", DbType.Guid);
-    // Native CamusDB UUID column (opt-in via HasColumnType("uuid")).
+    // Native CamusDB UUID column: the default for a Guid property, and HasColumnType("uuid").
     private static readonly CamusUuidTypeMapping UuidMapping = new();
 
     // Native CamusDB ARRAY(T) columns. Each maps a CLR array type to a scalar element wire type.
@@ -106,7 +105,7 @@ public sealed class CamusTypeMappingSource : RelationalTypeMappingSource
         { typeof(DateOnly), DateOnlyMapping },
         { typeof(DateTime), DateTimeMapping },
         { typeof(DateTimeOffset), DateTimeOffsetMapping },
-        { typeof(Guid), IdGuidMapping },
+        { typeof(Guid), UuidMapping },
     };
 
     private static readonly Dictionary<string, RelationalTypeMapping> StoreTypeMappings

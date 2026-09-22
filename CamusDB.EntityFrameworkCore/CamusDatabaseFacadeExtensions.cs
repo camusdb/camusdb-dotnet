@@ -5,8 +5,11 @@
  * file that was distributed with this source code.
  */
 
+using System.Globalization;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Storage;
 
 namespace CamusDB.EntityFrameworkCore;
 
@@ -99,6 +102,63 @@ public static class CamusDatabaseFacadeExtensions
         _ = await database.ExecuteSqlRawAsync(
             CamusStorageSyntax.RewriteStorage(name, inline, nameof(name)), cancellationToken).ConfigureAwait(false);
     }
+
+    /// <summary>
+    /// Draws the next value of a sequence with <c>SELECT nextval('…')</c> and returns it.
+    /// </summary>
+    /// <param name="database">The context's <see cref="DatabaseFacade"/>.</param>
+    /// <param name="sequenceName">The sequence. It is a name, not SQL.</param>
+    /// <remarks>
+    /// <para>The call runs on the context's connection, in its current transaction if there is one. A
+    /// rollback does not return the value: the server never issues a sequence value two times. Inside
+    /// the same transaction, <c>SELECT currval('…')</c> returns the value again.</para>
+    ///
+    /// <para>The server accepts <c>nextval</c> only where it can count the values before the statement
+    /// runs. This is why the statement is sent as is, and not composed into a LINQ query: a
+    /// <c>nextval</c> in a derived table fails with <c>CADB0547</c>.</para>
+    /// </remarks>
+    public static long NextSequenceValue(this DatabaseFacade database, string sequenceName)
+    {
+        ArgumentNullException.ThrowIfNull(database);
+
+        IRelationalCommand command = BuildNextValueCommand(database, sequenceName, out RelationalCommandParameterObject parameters);
+        return ToSequenceValue(command.ExecuteScalar(parameters), sequenceName);
+    }
+
+    /// <inheritdoc cref="NextSequenceValue(DatabaseFacade, string)"/>
+    public static async Task<long> NextSequenceValueAsync(
+        this DatabaseFacade database,
+        string sequenceName,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(database);
+
+        IRelationalCommand command = BuildNextValueCommand(database, sequenceName, out RelationalCommandParameterObject parameters);
+        return ToSequenceValue(await command.ExecuteScalarAsync(parameters, cancellationToken).ConfigureAwait(false), sequenceName);
+    }
+
+    private static IRelationalCommand BuildNextValueCommand(
+        DatabaseFacade database,
+        string sequenceName,
+        out RelationalCommandParameterObject parameters)
+    {
+        DbContext context = database.GetService<ICurrentDbContext>().Context;
+
+        parameters = new RelationalCommandParameterObject(
+            database.GetService<IRelationalConnection>(),
+            parameterValues: null,
+            readerColumns: null,
+            context,
+            database.GetService<IRelationalCommandDiagnosticsLogger>(),
+            CommandSource.ExecuteSqlRaw);
+
+        return database.GetService<IRawSqlCommandBuilder>().Build(CamusSequenceSyntax.SelectNextValue(sequenceName));
+    }
+
+    private static long ToSequenceValue(object? result, string sequenceName)
+        => result is null or DBNull
+            ? throw new InvalidOperationException($"nextval('{sequenceName}') returned no value.")
+            : Convert.ToInt64(result, CultureInfo.InvariantCulture);
 
     private static string TruncateSql(string name)
         => $"TRUNCATE TABLE {CamusIdentifier.Delimit(name, nameof(name))}";

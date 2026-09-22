@@ -401,7 +401,7 @@ CamusDB columns are declared with these SQL types; each maps to a `ColumnType` o
 
 | SQL DDL type | `ColumnType` | CLR type(s) | Notes |
 | --- | --- | --- | --- |
-| `OID` (alias `OBJECT_ID`) | `Id` | `string`, `Guid`, `CamusObjectIdValue` | Native identifier; shares string key encoding. |
+| `OID` (alias `OBJECT_ID`) | `Id` | `string`, `CamusObjectIdValue` | Native identifier; shares string key encoding. A `Guid` value is always sent as a `UUID`. |
 | `UUID` (alias `GUID`) | `Uuid` | `Guid` | Native 128-bit UUID; indexable, ordered by big-endian byte order. `gen_uuid_v4()` / `gen_uuid_v7()` generate values server-side. |
 | `INT64` (aliases `INT`, `INTEGER`) | `Integer64` | `long`, `int`, `short`, `byte` | 64-bit signed. |
 | `FLOAT64` | `Float64` | `double` | IEEE-754 double. |
@@ -994,8 +994,7 @@ b.ToTable("robots", t => t.HasCheckConstraint("ck_robots_price", "price >= 0"));
 | CLR type | CamusDB store type | DDL type |
 | --- | --- | --- |
 | `string` (ID / PK) | `id` or `oid` | `OID` |
-| `Guid` (ID / PK) | `id` or `oid` | `OID` |
-| `Guid` + `HasColumnType("uuid")` | `uuid` (alias `guid`) | `UUID` |
+| `Guid` | `uuid` (alias `guid`) | `UUID` |
 | `string` | `string` | `STRING` |
 | `string` + `HasMaxLength(n)` | `string` | `STRING(n)` |
 | `bool` | `bool` | `BOOL` |
@@ -1007,13 +1006,11 @@ b.ToTable("robots", t => t.HasCheckConstraint("ck_robots_price", "price >= 0"));
 | `DateTime`, `DateTimeOffset` | `datetime` (alias `timestamp`) | `DATETIME` |
 | `long[]`, `string[]`, `double[]`, `bool[]` | `array(int64/string/float64/bool)` | `ARRAY(T)` |
 
-Use `HasColumnType("id")` (or the alias `"oid"`) for primary key columns backed by CamusDB ObjectIds. The provider sends the value as an OID on the wire regardless of whether the CLR property is `string` or `Guid`.
+Use `HasColumnType("id")` (or the alias `"oid"`) on a `string` property for primary key columns backed by CamusDB ObjectIds. The provider sends the value as an OID on the wire.
 
-A plain `Guid` property defaults to the `id`/OID store type for backward compatibility. To store it as CamusDB's native `UUID` column instead — indexable and ordered by big-endian byte order — declare it explicitly with `HasColumnType("uuid")`:
+A `Guid` property maps to CamusDB's native `UUID` column — indexable and ordered by big-endian byte order. No `HasColumnType` is required. A `Guid` value always travels as a UUID, because a 16-byte GUID can never be a 12-byte ObjectId, so do not declare a `Guid` property with `HasColumnType("id")`: an `OID` column refuses its values.
 
-```csharp
-b.Property(e => e.ExternalRef).HasColumnType("uuid");
-```
+Before 0.13.3 a plain `Guid` property defaulted to the `id`/OID store type. Inserts through that mapping never worked, so such a column holds only NULLs. A migration snapshot made before 0.13.3 records `id` for such a property, and the next migration then tries to change the column type to `uuid`, which CamusDB does not support. Drop the column and add it again in that migration, or keep the old type with `HasColumnType("id")` until then.
 
 Dates and datetimes are stored as UTC ticks; the provider normalizes `DateTime` values to UTC before sending and reconstructs them as `DateTimeKind.Utc`. `byte[]` is exchanged as base64 over the JSON wire (SQL literals use `0x`-hex). A `string` property maps to `float32`/`bytes`/`date`/`datetime` etc. either by its CLR type or by an explicit `HasColumnType(...)`.
 

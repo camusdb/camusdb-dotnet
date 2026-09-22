@@ -104,7 +104,7 @@ public class TestEntityFrameworkProvider
         Assert.Equal("int64", source.FindMapping(typeof(int))!.StoreType);
         Assert.Equal("int64", source.FindMapping(typeof(long))!.StoreType);
         Assert.Equal("float64", source.FindMapping(typeof(double))!.StoreType);
-        Assert.Equal("id", source.FindMapping(typeof(Guid))!.StoreType);
+        Assert.Equal("uuid", source.FindMapping(typeof(Guid))!.StoreType);
     }
 
     [Fact]
@@ -894,7 +894,7 @@ public class TestEntityFrameworkProvider
     [Fact]
     public void TestGuidOidMappingDbTypeIsGuid()
     {
-        // IdGuidMapping must use DbType.Guid so that CamusParameter.FromDbType(DbType.Guid)
+        // The OID mappings must use DbType.Guid so that CamusParameter.FromDbType(DbType.Guid)
         // maps to ColumnType.Id. With DbType.String it would map to ColumnType.String and the
         // server would reject OID columns with "Type String cannot be assigned to id (Id)".
         ServiceCollection services = new();
@@ -902,10 +902,18 @@ public class TestEntityFrameworkProvider
         ServiceProvider provider = services.BuildServiceProvider();
         IRelationalTypeMappingSource source = provider.GetRequiredService<IRelationalTypeMappingSource>();
 
-        // Guid CLR type maps to "id" store type
-        var mapping = source.FindMapping(typeof(Guid))!;
+        // A Guid CLR type with the explicit "id" store type
+        var mapping = source.FindMapping(typeof(Guid), "id")!;
         Assert.Equal("id", mapping.StoreType);
         Assert.Equal(System.Data.DbType.Guid, mapping.DbType);
+
+        // A string CLR type with the "id" store type
+        var stringMapping = source.FindMapping(typeof(string), "id")!;
+        Assert.Equal("id", stringMapping.StoreType);
+        Assert.Equal(System.Data.DbType.Guid, stringMapping.DbType);
+
+        // A plain Guid CLR type maps to the native "uuid" store type
+        Assert.Equal("uuid", source.FindMapping(typeof(Guid))!.StoreType);
 
         // DbType.Guid on a parameter must resolve to ColumnType.Id
         var parameter = new CamusParameter("@id", ColumnType.Null, null);
