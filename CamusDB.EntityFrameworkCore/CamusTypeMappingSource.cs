@@ -14,9 +14,11 @@ public sealed class CamusTypeMappingSource : RelationalTypeMappingSource
     /// (OID) store type for backward compatibility; native UUID storage is opt-in via the store type.
     ///
     /// EF Core parameters only carry a <see cref="System.Data.DbType"/>, and <see cref="System.Data.DbType.Guid"/>
-    /// already routes to <see cref="ColumnType.Id"/> for OID keys. This mapping therefore stamps the wire
-    /// column type directly on the <see cref="CamusParameter"/> so a UUID column is never confused
-    /// with an OID key.
+    /// resolves to <see cref="ColumnType.Id"/>, because the string-typed OID mapping sends object-id text
+    /// that way. This mapping therefore stamps the wire column type directly on the
+    /// <see cref="CamusParameter"/> so a UUID column is never confused with an OID key. A
+    /// <see cref="Guid"/> value is sent as a Uuid in any case (see <c>CamusCommand.BuildColumnValue</c>),
+    /// since a Guid can never be an object id.
     /// </summary>
     private sealed class CamusUuidTypeMapping : GuidTypeMapping
     {
@@ -52,6 +54,9 @@ public sealed class CamusTypeMappingSource : RelationalTypeMappingSource
     // DbType.Guid → CamusParameter.FromDbType → ColumnType.Id (OID), while StringTypeMapping keeps
     // ClrType=string so the EF Core key-factory gets ValueComparer<string>, not DefaultValueComparer<Guid>.
     private static readonly StringTypeMapping IdStringMapping = new("id", DbType.Guid);
+    // A Guid property with no store type. Its parameter values are Guids, which the command sends as
+    // Uuid values, because 16 bytes can never be a 12-byte object id; declare HasColumnType("uuid")
+    // to store the property in a native UUID column.
     private static readonly GuidTypeMapping IdGuidMapping = new("id", DbType.Guid);
     // Native CamusDB UUID column (opt-in via HasColumnType("uuid")).
     private static readonly CamusUuidTypeMapping UuidMapping = new();

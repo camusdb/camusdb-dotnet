@@ -308,7 +308,15 @@ public class CamusCommand : DbCommand, ICloneable
             case ColumnType.Id or ColumnType.String when value is string s:
                 return new() { Type = columnType, StrValue = s };
 
-            case ColumnType.Id or ColumnType.String when value is Guid g:
+            // A Guid is 16 bytes and an object id is 12, so a Guid can never be an object id. DbType.Guid
+            // resolves to ColumnType.Id (the EF "id" mapping sends object-id text that way), so a Guid
+            // value arrives here typed Id whenever no uuid mapping stamped the parameter. Sent as Id, its
+            // 36 characters equal no stored value, and the server refuses it; as a Uuid it compares with
+            // a uuid column. A string keeps the Id type: that is how an object id travels.
+            case ColumnType.Id when value is Guid gi:
+                return UuidColumnValue(gi, uuidAsString);
+
+            case ColumnType.String when value is Guid g:
                 return new() { Type = columnType, StrValue = g.ToString() };
 
             case ColumnType.Id when value is CamusObjectIdValue:
@@ -378,6 +386,10 @@ public class CamusCommand : DbCommand, ICloneable
             if (elementType == ColumnType.Null && items.Count > 0)
                 throw new CamusException("CADB0400", $"Cannot infer element type for array parameter '{name}'; set CamusParameter.ArrayElementType explicitly");
         }
+        else
+        {
+            elementType = GuidSafeElementType(elementType, FirstNonNullIsGuid(items));
+        }
 
         List<ColumnValue> elements = new(items.Count);
         foreach (object? item in items)
@@ -424,6 +436,27 @@ public class CamusCommand : DbCommand, ICloneable
         _ => null
     };
 
+    /// <summary>
+    /// The element type of an array of <see cref="Guid"/> values declared as object ids: Uuid, since
+    /// each element is sent as a Uuid (see <see cref="BuildColumnValue"/>) and the server refuses an array
+    /// whose elements do not match its element type.
+    /// </summary>
+    private static ColumnType GuidSafeElementType(ColumnType declared, bool elementsAreGuids)
+        => declared == ColumnType.Id && elementsAreGuids ? ColumnType.Uuid : declared;
+
+    private static bool FirstNonNullIsGuid(List<object?> items)
+    {
+        foreach (object? item in items)
+        {
+            if (item is null or DBNull)
+                continue;
+
+            return item is Guid;
+        }
+
+        return false;
+    }
+
     // Held as fields so the Guid element encoder is one cached delegate per form, rather than a closure
     // built per array parameter.
     private static readonly Func<Guid, ColumnValue> UuidWithStringForm = static v => UuidColumnValue(v);
@@ -440,7 +473,7 @@ public class CamusCommand : DbCommand, ICloneable
         where T : struct
     {
         ColumnType elementType = declaredElementType != ColumnType.Null
-            ? declaredElementType
+            ? GuidSafeElementType(declaredElementType, naturalElementType == ColumnType.Uuid)
             : items.Length > 0 ? naturalElementType : ColumnType.Null;
 
         List<ColumnValue> elements = new(items.Length);
