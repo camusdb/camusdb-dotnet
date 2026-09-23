@@ -111,6 +111,30 @@ public class TestEndpointUnreachable
         Assert.False(pool.IsQuarantined("http://b:9005"));
     }
 
+    /// <summary>
+    /// The shape a <c>BatchExecute</c> stream now ends with when the token it opened with expires. The
+    /// stream is long-lived and carries the bearer it was built with, so the server refuses the next
+    /// operation on it; the driver must read that as <c>CADB0516</c>, which is what
+    /// <see cref="Transport.AuthenticatingTransport"/> replays on, and must leave the endpoint in
+    /// rotation — the node answered, and every stream in the pool reaches this point together.
+    /// </summary>
+    [Fact]
+    public void ExpiredTokenOnAStream_IsAuthFailure_AndLeavesTheEndpointInRotation()
+    {
+        CamusEndpointPool pool = new("http://a:9005,http://b:9005");
+        global::Grpc.Core.Metadata trailers = new()
+        {
+            { "camus-error-code", "CADB0516" },
+            { "camus-error-message", "Authentication failed" },
+        };
+        RpcException ex = new(new Status(StatusCode.Unauthenticated, "Authentication failed"), trailers);
+
+        CamusException translated = GrpcTransport.TranslateFailure(pool, "http://b:9005", ex);
+
+        Assert.Equal("CADB0516", translated.Code);
+        Assert.False(pool.IsQuarantined("http://b:9005"));
+    }
+
     [Fact]
     public void DomainCodeInTrailers_StillWins()
     {

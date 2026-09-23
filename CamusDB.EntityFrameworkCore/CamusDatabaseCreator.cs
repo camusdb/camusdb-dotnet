@@ -108,7 +108,7 @@ public class CamusDatabaseCreator : RelationalDatabaseCreator
     /// runtime (tenant provisioning, a dynamic schema) compose SQL nobody wrote. The CHECK expression
     /// stays verbatim — it is a SQL fragment the model author wrote, not a name.</para>
     /// </summary>
-    private static string BuildCreateTableSql(IEntityType entityType, string tableName)
+    internal static string BuildCreateTableSql(IEntityType entityType, string tableName)
     {
         var sb = new StringBuilder();
         sb.Append("CREATE TABLE ").Append(CamusIdentifier.Delimit(tableName, nameof(tableName))).Append(" (");
@@ -135,9 +135,15 @@ public class CamusDatabaseCreator : RelationalDatabaseCreator
 
             // HasDefaultValueSql, which includes the nextval('…') default of UseSequence and UseHiLo,
             // or HasDefaultValue converted to the provider type.
+            //
+            // TryGetDefaultValue is what separates a configured default from no default at all. Plain
+            // GetDefaultValue answers with the CLR default of the type for a non-nullable value-type
+            // column that carries no default — 0 for an INT64 column, and DateTime.MinValue for a
+            // DATETIME one. That put DEFAULT ('0001-01-01T00:00:00.0000000Z') on every plain DATETIME
+            // column, which the server refuses because the literal is out of range for the type.
             if (prop.GetDefaultValueSql() is { Length: > 0 } defaultSql)
                 sb.Append(" DEFAULT (").Append(defaultSql).Append(')');
-            else if (prop.GetDefaultValue() is { } defaultValue and not DBNull)
+            else if (prop.TryGetDefaultValue(out var defaultValue) && defaultValue is not null and not DBNull)
                 sb.Append(" DEFAULT (")
                   .Append(CamusMigrationsSqlGenerator.FormatDefaultValue(
                       prop.GetTypeMapping().Converter?.ConvertToProvider(defaultValue) ?? defaultValue))
