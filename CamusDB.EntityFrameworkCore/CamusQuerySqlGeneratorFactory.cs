@@ -1,12 +1,15 @@
 using Microsoft.EntityFrameworkCore.Query;
-using Microsoft.EntityFrameworkCore.Query.Internal;
 
 namespace CamusDB.EntityFrameworkCore;
 
-public class CamusQuerySqlGeneratorFactory : QuerySqlGeneratorFactory
+public class CamusQuerySqlGeneratorFactory : IQuerySqlGeneratorFactory
 {
-    public CamusQuerySqlGeneratorFactory(QuerySqlGeneratorDependencies dependencies)
-        : base(dependencies) { }
+    private readonly QuerySqlGeneratorDependencies _dependencies;
 
-    public override QuerySqlGenerator Create() => new CamusQuerySqlGenerator(Dependencies);
+    public CamusQuerySqlGeneratorFactory(QuerySqlGeneratorDependencies dependencies)
+    {
+        _dependencies = dependencies;
+    }
+
+    public QuerySqlGenerator Create() => new CamusQuerySqlGenerator(_dependencies);
 }

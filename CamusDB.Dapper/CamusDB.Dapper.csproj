@@ -5,7 +5,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <PackageId>CamusDB.Dapper</PackageId>
-    <Version>0.13.2</Version>
+    <Version>0.14.0</Version>
     <Description>Dapper support for CamusDB: typed parameters, native array parameters and type handlers.</Description>
     <Authors>CamusDB</Authors>
     <Company>CamusDB</Company>
