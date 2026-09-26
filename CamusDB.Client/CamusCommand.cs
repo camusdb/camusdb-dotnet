@@ -11,6 +11,7 @@ using System.Data;
 using System.Data.Common;
 using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
+using System.Runtime.InteropServices;
 using CamusDB.Client.Transport;
 using CamusDB.Core.Util.ObjectIds;
 
@@ -430,35 +431,41 @@ public class CamusCommand : DbCommand, ICloneable
     }
 
     /// <summary>
-    /// Builds the value for an array parameter held in a CLR array of a known element type, or returns
-    /// null so the caller takes the general path.
+    /// Builds the value for an array parameter held in a CLR array or <see cref="List{T}"/> of a known
+    /// element type, or returns null so the caller takes the general path.
     ///
-    /// <para>Only arrays are eligible, and only of element types whose runtime type is their declared
-    /// type. That restriction is what makes the shortcut equivalent: the general path stages every item
-    /// in a <see cref="List{T}"/> first because an arbitrary <see cref="IEnumerable"/> may be single-use,
-    /// may throw part way, or may have side effects, and because it infers the element type from the
-    /// first non-null item's runtime type. An array has none of those properties, so its elements convert
-    /// straight into the final list — one pre-sized list instead of a staging list plus a boxed element
-    /// per item.</para>
+    /// <para>Only arrays and lists are eligible, and only of element types whose runtime type is their
+    /// declared type. That restriction is what makes the shortcut equivalent: the general path stages every
+    /// item in a <see cref="List{T}"/> first because an arbitrary <see cref="IEnumerable"/> may be
+    /// single-use, may throw part way, or may have side effects, and because it infers the element type
+    /// from the first non-null item's runtime type. An array or a list has none of those properties, so its
+    /// elements convert straight into the final list — one pre-sized list instead of a staging list plus a
+    /// boxed element per item.</para>
     /// </summary>
     private static ColumnValue? BuildTypedArrayColumnValue(string name, object value, ColumnType arrayElementType, bool uuidAsString) => value switch
     {
-        long[] items => BuildScalarArray(name, items, arrayElementType, ColumnType.Integer64, uuidAsString,
-            static v => new ColumnValue { Type = ColumnType.Integer64, LongValue = v }),
-
-        int[] items => BuildScalarArray(name, items, arrayElementType, ColumnType.Integer64, uuidAsString,
-            static v => new ColumnValue { Type = ColumnType.Integer64, LongValue = v }),
-
-        double[] items => BuildScalarArray(name, items, arrayElementType, ColumnType.Float64, uuidAsString,
-            static v => new ColumnValue { Type = ColumnType.Float64, FloatValue = v }),
-
-        bool[] items => BuildScalarArray(name, items, arrayElementType, ColumnType.Bool, uuidAsString,
-            static v => new ColumnValue { Type = ColumnType.Bool, BoolValue = v }),
-
-        Guid[] items => BuildScalarArray(name, items, arrayElementType, ColumnType.Uuid, uuidAsString,
-            uuidAsString ? UuidWithStringForm : UuidWithoutStringForm),
-
+        long[] items => BuildScalarArray(name, items, arrayElementType, ColumnType.Integer64, uuidAsString, EncodeInt64),
+        int[] items => BuildScalarArray(name, items, arrayElementType, ColumnType.Integer64, uuidAsString, EncodeInt32),
+        double[] items => BuildScalarArray(name, items, arrayElementType, ColumnType.Float64, uuidAsString, EncodeFloat64),
+        float[] items => BuildScalarArray(name, items, arrayElementType, ColumnType.Float32, uuidAsString, EncodeFloat32),
+        bool[] items => BuildScalarArray(name, items, arrayElementType, ColumnType.Bool, uuidAsString, EncodeBool),
+        Guid[] items => BuildScalarArray(name, items, arrayElementType, ColumnType.Uuid, uuidAsString, EncodeUuid(uuidAsString)),
         string?[] items => BuildStringArray(name, items, arrayElementType, uuidAsString),
+
+        List<long> items => BuildScalarArray(name, CollectionsMarshal.AsSpan(items), arrayElementType, ColumnType.Integer64, uuidAsString, EncodeInt64),
+        List<int> items => BuildScalarArray(name, CollectionsMarshal.AsSpan(items), arrayElementType, ColumnType.Integer64, uuidAsString, EncodeInt32),
+        List<double> items => BuildScalarArray(name, CollectionsMarshal.AsSpan(items), arrayElementType, ColumnType.Float64, uuidAsString, EncodeFloat64),
+        List<float> items => BuildScalarArray(name, CollectionsMarshal.AsSpan(items), arrayElementType, ColumnType.Float32, uuidAsString, EncodeFloat32),
+        List<bool> items => BuildScalarArray(name, CollectionsMarshal.AsSpan(items), arrayElementType, ColumnType.Bool, uuidAsString, EncodeBool),
+        List<Guid> items => BuildScalarArray(name, CollectionsMarshal.AsSpan(items), arrayElementType, ColumnType.Uuid, uuidAsString, EncodeUuid(uuidAsString)),
+        List<string?> items => BuildStringArray(name, CollectionsMarshal.AsSpan(items), arrayElementType, uuidAsString),
+
+        long?[] items => BuildNullableScalarArray(name, items, arrayElementType, ColumnType.Integer64, uuidAsString, EncodeInt64),
+        int?[] items => BuildNullableScalarArray(name, items, arrayElementType, ColumnType.Integer64, uuidAsString, EncodeInt32),
+        double?[] items => BuildNullableScalarArray(name, items, arrayElementType, ColumnType.Float64, uuidAsString, EncodeFloat64),
+        float?[] items => BuildNullableScalarArray(name, items, arrayElementType, ColumnType.Float32, uuidAsString, EncodeFloat32),
+        bool?[] items => BuildNullableScalarArray(name, items, arrayElementType, ColumnType.Bool, uuidAsString, EncodeBool),
+        Guid?[] items => BuildNullableScalarArray(name, items, arrayElementType, ColumnType.Uuid, uuidAsString, EncodeUuid(uuidAsString)),
 
         _ => null
     };
@@ -484,19 +491,31 @@ public class CamusCommand : DbCommand, ICloneable
         return false;
     }
 
-    // Held as fields so the Guid element encoder is one cached delegate per form, rather than a closure
-    // built per array parameter.
+    // Element encoders, held as fields so each is one cached delegate rather than a closure built per
+    // array parameter. Each produces what BuildColumnValue produces for a value of its natural type.
+    private static readonly Func<long, ColumnValue> EncodeInt64 = static v => new ColumnValue { Type = ColumnType.Integer64, LongValue = v };
+
+    private static readonly Func<int, ColumnValue> EncodeInt32 = static v => new ColumnValue { Type = ColumnType.Integer64, LongValue = v };
+
+    private static readonly Func<double, ColumnValue> EncodeFloat64 = static v => new ColumnValue { Type = ColumnType.Float64, FloatValue = v };
+
+    private static readonly Func<float, ColumnValue> EncodeFloat32 = static v => new ColumnValue { Type = ColumnType.Float32, FloatValue = v };
+
+    private static readonly Func<bool, ColumnValue> EncodeBool = static v => new ColumnValue { Type = ColumnType.Bool, BoolValue = v };
+
     private static readonly Func<Guid, ColumnValue> UuidWithStringForm = static v => UuidColumnValue(v);
 
     private static readonly Func<Guid, ColumnValue> UuidWithoutStringForm = static v => UuidColumnValue(v, includeStringForm: false);
 
+    private static Func<Guid, ColumnValue> EncodeUuid(bool uuidAsString) => uuidAsString ? UuidWithStringForm : UuidWithoutStringForm;
+
     /// <summary>
-    /// The typed path for an array of a non-nullable element type. Every element carries a value, so the
-    /// inferred type is the array's own element type — the same answer the general path reaches from the
-    /// first item's runtime type. An empty array infers nothing, exactly as before.
+    /// The typed path for a sequence of a non-nullable element type. Every element carries a value, so
+    /// the inferred type is the sequence's own element type — the same answer the general path reaches
+    /// from the first item's runtime type. An empty sequence infers nothing, exactly as before.
     /// </summary>
     private static ColumnValue BuildScalarArray<T>(
-        string name, T[] items, ColumnType declaredElementType, ColumnType naturalElementType, bool uuidAsString, Func<T, ColumnValue> encode)
+        string name, ReadOnlySpan<T> items, ColumnType declaredElementType, ColumnType naturalElementType, bool uuidAsString, Func<T, ColumnValue> encode)
         where T : struct
     {
         ColumnType elementType = declaredElementType != ColumnType.Null
@@ -522,10 +541,57 @@ public class CamusCommand : DbCommand, ICloneable
     }
 
     /// <summary>
-    /// The typed path for <see cref="string"/>[], whose elements can be null — so it infers from the
-    /// first non-null element and reports an all-null array the same way the general path does.
+    /// The typed path for a sequence of a nullable element type. The general path sees each value boxed
+    /// as its underlying type, so it infers the underlying type from the first element that has a value,
+    /// and it cannot infer anything from an array whose every element is null. This path gives the same
+    /// answers, and sends a null element as a null cell.
     /// </summary>
-    private static ColumnValue BuildStringArray(string name, string?[] items, ColumnType declaredElementType, bool uuidAsString)
+    private static ColumnValue BuildNullableScalarArray<T>(
+        string name, ReadOnlySpan<T?> items, ColumnType declaredElementType, ColumnType naturalElementType, bool uuidAsString, Func<T, ColumnValue> encode)
+        where T : struct
+    {
+        bool anyValue = false;
+
+        foreach (T? item in items)
+        {
+            if (item.HasValue)
+            {
+                anyValue = true;
+                break;
+            }
+        }
+
+        ColumnType elementType;
+
+        if (declaredElementType != ColumnType.Null)
+            elementType = GuidSafeElementType(declaredElementType, anyValue && naturalElementType == ColumnType.Uuid);
+        else if (anyValue)
+            elementType = naturalElementType;
+        else if (items.Length > 0)
+            throw new CamusException("CADB0400", $"Cannot infer element type for array parameter '{name}'; set CamusParameter.ArrayElementType explicitly");
+        else
+            elementType = ColumnType.Null;
+
+        List<ColumnValue> elements = new(items.Length);
+
+        foreach (T? item in items)
+        {
+            if (item is not { } value)
+                elements.Add(new() { Type = ColumnType.Null });
+            else if (elementType == naturalElementType)
+                elements.Add(encode(value));
+            else
+                elements.Add(BuildColumnValue(name, elementType, value, ColumnType.Null, uuidAsString));
+        }
+
+        return new() { Type = ColumnType.Array, ArrayElementType = elementType, ArrayValues = elements };
+    }
+
+    /// <summary>
+    /// The typed path for a sequence of <see cref="string"/>, whose elements can be null — so it infers
+    /// from the first non-null element and reports an all-null array the same way the general path does.
+    /// </summary>
+    private static ColumnValue BuildStringArray(string name, ReadOnlySpan<string?> items, ColumnType declaredElementType, bool uuidAsString)
     {
         ColumnType elementType = declaredElementType;
 

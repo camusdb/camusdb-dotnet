@@ -16,8 +16,8 @@ public class CamusUpdateSqlGenerator : UpdateSqlGenerator
     {
         requiresTransaction = false;
 
-        var writeOps = command.ColumnModifications.Where(o => o.IsWrite).ToList();
-        if (writeOps.Count == 0)
+        var modifications = command.ColumnModifications;
+        if (!Any(modifications, IsInsertWrite))
             return ResultSetMapping.NoResults;
 
         commandStringBuilder.Append("INSERT INTO ")
@@ -25,8 +25,10 @@ public class CamusUpdateSqlGenerator : UpdateSqlGenerator
             .Append(" (");
 
         bool first = true;
-        foreach (var op in writeOps)
+        for (int i = 0; i < modifications.Count; i++)
         {
+            var op = modifications[i];
+            if (!IsInsertWrite(op)) continue;
             if (!first) commandStringBuilder.Append(", ");
             commandStringBuilder.Append(SqlGenerationHelper.DelimitIdentifier(op.ColumnName));
             first = false;
@@ -35,8 +37,10 @@ public class CamusUpdateSqlGenerator : UpdateSqlGenerator
         commandStringBuilder.Append(") VALUES (");
 
         first = true;
-        foreach (var op in writeOps)
+        for (int i = 0; i < modifications.Count; i++)
         {
+            var op = modifications[i];
+            if (!IsInsertWrite(op)) continue;
             if (!first) commandStringBuilder.Append(", ");
             if (op.UseCurrentValueParameter && op.ParameterName is not null)
                 commandStringBuilder.Append(SqlGenerationHelper.GenerateParameterName(op.ParameterName));
@@ -57,10 +61,8 @@ public class CamusUpdateSqlGenerator : UpdateSqlGenerator
     {
         requiresTransaction = false;
 
-        var setOps = command.ColumnModifications.Where(o => o.IsWrite && !o.IsKey).ToList();
-        var whereOps = command.ColumnModifications.Where(o => o.IsKey || o.IsCondition).ToList();
-
-        if (setOps.Count == 0)
+        var modifications = command.ColumnModifications;
+        if (!Any(modifications, IsUpdateWrite))
             return ResultSetMapping.NoResults;
 
         commandStringBuilder.Append("UPDATE ")
@@ -68,8 +70,10 @@ public class CamusUpdateSqlGenerator : UpdateSqlGenerator
             .Append(" SET ");
 
         bool first = true;
-        foreach (var op in setOps)
+        for (int i = 0; i < modifications.Count; i++)
         {
+            var op = modifications[i];
+            if (!IsUpdateWrite(op)) continue;
             if (!first) commandStringBuilder.Append(", ");
             commandStringBuilder.Append(SqlGenerationHelper.DelimitIdentifier(op.ColumnName)).Append(" = ");
             if (op.UseCurrentValueParameter && op.ParameterName is not null)
@@ -79,22 +83,7 @@ public class CamusUpdateSqlGenerator : UpdateSqlGenerator
             first = false;
         }
 
-        if (whereOps.Count > 0)
-        {
-            commandStringBuilder.Append(" WHERE ");
-            first = true;
-            foreach (var op in whereOps)
-            {
-                if (!first) commandStringBuilder.Append(" AND ");
-                commandStringBuilder.Append(SqlGenerationHelper.DelimitIdentifier(op.ColumnName)).Append(" = ");
-                var paramName = op.UseOriginalValueParameter ? op.OriginalParameterName : op.ParameterName;
-                if (paramName is not null)
-                    commandStringBuilder.Append(SqlGenerationHelper.GenerateParameterName(paramName));
-                else
-                    commandStringBuilder.Append("NULL");
-                first = false;
-            }
-        }
+        AppendKeyConditions(commandStringBuilder, modifications);
 
         commandStringBuilder.AppendLine();
         return ResultSetMapping.NoResults;
@@ -108,29 +97,49 @@ public class CamusUpdateSqlGenerator : UpdateSqlGenerator
     {
         requiresTransaction = false;
 
-        var whereOps = command.ColumnModifications.Where(o => o.IsKey || o.IsCondition).ToList();
-
         commandStringBuilder.Append("DELETE FROM ")
             .Append(SqlGenerationHelper.DelimitIdentifier(command.TableName));
 
-        if (whereOps.Count > 0)
-        {
-            commandStringBuilder.Append(" WHERE ");
-            bool first = true;
-            foreach (var op in whereOps)
-            {
-                if (!first) commandStringBuilder.Append(" AND ");
-                commandStringBuilder.Append(SqlGenerationHelper.DelimitIdentifier(op.ColumnName)).Append(" = ");
-                var paramName = op.UseOriginalValueParameter ? op.OriginalParameterName : op.ParameterName;
-                if (paramName is not null)
-                    commandStringBuilder.Append(SqlGenerationHelper.GenerateParameterName(paramName));
-                else
-                    commandStringBuilder.Append("NULL");
-                first = false;
-            }
-        }
+        AppendKeyConditions(commandStringBuilder, command.ColumnModifications);
 
         commandStringBuilder.AppendLine();
         return ResultSetMapping.NoResults;
+    }
+
+    // The column filters, applied while the modifications are walked instead of copied into a list per
+    // statement.
+    private static bool IsInsertWrite(IColumnModification op) => op.IsWrite;
+
+    private static bool IsUpdateWrite(IColumnModification op) => op.IsWrite && !op.IsKey;
+
+    private static bool IsKeyCondition(IColumnModification op) => op.IsKey || op.IsCondition;
+
+    private static bool Any(IReadOnlyList<IColumnModification> modifications, Func<IColumnModification, bool> predicate)
+    {
+        for (int i = 0; i < modifications.Count; i++)
+        {
+            if (predicate(modifications[i]))
+                return true;
+        }
+
+        return false;
+    }
+
+    private void AppendKeyConditions(StringBuilder commandStringBuilder, IReadOnlyList<IColumnModification> modifications)
+    {
+        bool first = true;
+        for (int i = 0; i < modifications.Count; i++)
+        {
+            var op = modifications[i];
+            if (!IsKeyCondition(op)) continue;
+            commandStringBuilder.Append(first ? " WHERE " : " AND ");
+            commandStringBuilder.Append(SqlGenerationHelper.DelimitIdentifier(op.ColumnName)).Append(" = ");
+            var paramName = op.UseOriginalValueParameter ? op.OriginalParameterName : op.ParameterName;
+            if (paramName is not null)
+                commandStringBuilder.Append(SqlGenerationHelper.GenerateParameterName(paramName));
+            else
+                commandStringBuilder.Append("NULL");
+            first = false;
+        }
     }
 }

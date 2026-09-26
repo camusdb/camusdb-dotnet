@@ -205,16 +205,75 @@ public class CamusDataReader : DbDataReader
             return result;
         }
 
+        if (target == typeof(int[]))
+        {
+            int[] result = new int[elements.Length];
+
+            for (int i = 0; i < elements.Length; i++)
+            {
+                if (elements[i].Type != ColumnType.Integer64)
+                    return null;
+
+                // Checked, as Convert.ChangeType is on the general path: a value out of range throws.
+                result[i] = checked((int)elements[i].LongValue);
+            }
+
+            return result;
+        }
+
+        // Numeric cells convert as the general path converts their boxed value: Convert.ToDouble and
+        // Convert.ToSingle are plain casts from long, float and double.
         if (target == typeof(double[]))
         {
             double[] result = new double[elements.Length];
 
             for (int i = 0; i < elements.Length; i++)
             {
-                if (elements[i].Type != ColumnType.Float64)
-                    return null;
+                ref readonly ColumnValue element = ref elements[i];
 
-                result[i] = elements[i].FloatValue;
+                switch (element.Type)
+                {
+                    case ColumnType.Float64:
+                        result[i] = element.FloatValue;
+                        break;
+
+                    case ColumnType.Float32:
+                        result[i] = (float)element.FloatValue;
+                        break;
+
+                    case ColumnType.Integer64:
+                        result[i] = element.LongValue;
+                        break;
+
+                    default:
+                        return null;
+                }
+            }
+
+            return result;
+        }
+
+        if (target == typeof(float[]))
+        {
+            float[] result = new float[elements.Length];
+
+            for (int i = 0; i < elements.Length; i++)
+            {
+                ref readonly ColumnValue element = ref elements[i];
+
+                switch (element.Type)
+                {
+                    case ColumnType.Float32 or ColumnType.Float64:
+                        result[i] = (float)element.FloatValue;
+                        break;
+
+                    case ColumnType.Integer64:
+                        result[i] = element.LongValue;
+                        break;
+
+                    default:
+                        return null;
+                }
             }
 
             return result;
@@ -275,7 +334,42 @@ public class CamusDataReader : DbDataReader
             return result;
         }
 
+        // Nullable element types: the general path stores a null element as null and a value whose boxed
+        // type is the underlying type as that value. Other cell types fall back to it, because
+        // Convert.ChangeType cannot convert to a nullable type and it throws for them.
+        if (target == typeof(long?[]))
+            return MaterializeNullableArray(elements, ColumnType.Integer64, static (in ColumnValue v) => v.LongValue);
+
+        if (target == typeof(double?[]))
+            return MaterializeNullableArray(elements, ColumnType.Float64, static (in ColumnValue v) => v.FloatValue);
+
+        if (target == typeof(bool?[]))
+            return MaterializeNullableArray(elements, ColumnType.Bool, static (in ColumnValue v) => v.BoolValue);
+
+        if (target == typeof(Guid?[]))
+            return MaterializeNullableArray(elements, ColumnType.Uuid, static (in ColumnValue v) => v.AsGuid());
+
         return null;
+    }
+
+    private delegate T CellReader<T>(in ColumnValue cell);
+
+    private static T?[]? MaterializeNullableArray<T>(ReadOnlySpan<ColumnValue> elements, ColumnType cellType, CellReader<T> read)
+        where T : struct
+    {
+        T?[] result = new T?[elements.Length];
+
+        for (int i = 0; i < elements.Length; i++)
+        {
+            ref readonly ColumnValue element = ref elements[i];
+
+            if (element.Type == cellType)
+                result[i] = read(in element);
+            else if (element.Type != ColumnType.Null)
+                return null;
+        }
+
+        return result;
     }
 
     public override int GetValues(object[] values)
@@ -421,6 +515,25 @@ public class CamusDataReader : DbDataReader
     /// </summary>
     public override T GetFieldValue<T>(int ordinal)
     {
+        // Exact-type scalars come straight from the cell. The base method unboxes GetValue, so it boxes
+        // the value first. A cell of any other type still goes to the base method, so the cast contract
+        // and its InvalidCastException do not change.
+        if (typeof(T) == typeof(long) || typeof(T) == typeof(double) || typeof(T) == typeof(bool))
+        {
+            ref readonly ColumnValue cell = ref Cell(ordinal);
+
+            if (typeof(T) == typeof(long) && cell.Type == ColumnType.Integer64)
+                return (T)(object)cell.LongValue;
+
+            if (typeof(T) == typeof(double) && cell.Type == ColumnType.Float64)
+                return (T)(object)cell.FloatValue;
+
+            if (typeof(T) == typeof(bool) && cell.Type == ColumnType.Bool)
+                return (T)(object)cell.BoolValue;
+
+            return base.GetFieldValue<T>(ordinal);
+        }
+
         Type target = typeof(T);
 
         if (target == typeof(DateOnly))
@@ -487,7 +600,7 @@ public class CamusDataReader : DbDataReader
             yield return this;
     }
 
-    public override float GetFloat(int ordinal) => Convert.ToSingle(GetDouble(ordinal), CultureInfo.InvariantCulture);
+    public override float GetFloat(int ordinal) => (float)GetDouble(ordinal);
 
     public override Guid GetGuid(int ordinal)
     {

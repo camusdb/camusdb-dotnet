@@ -238,8 +238,8 @@ public class TestDataReaderChunking
     [Fact]
     public void MismatchedElementTypesStillConvert()
     {
-        // Integer cells requested as double[] take the general conversion path, which converts rather
-        // than failing.
+        // Integer cells requested as double[] convert rather than fail, as the general conversion path
+        // converts them.
         using CamusDataReader reader = ReaderForArray(ColumnType.Integer64, Int64(1), Int64(2));
 
         Assert.Equal(new[] { 1.0, 2.0 }, reader.GetFieldValue<double[]>(0));
@@ -265,5 +265,95 @@ public class TestDataReaderChunking
 
         first[0] = 99;
         Assert.Equal(1L, reader.GetFieldValue<long[]>(0)[0]);
+    }
+
+    private static ColumnValue Float(ColumnType type, double value) => new() { Type = type, FloatValue = value };
+
+    [Fact]
+    public void IntArrayMaterializesAndStillThrowsOnOverflow()
+    {
+        using CamusDataReader reader = ReaderForArray(ColumnType.Integer64, Int64(1), Int64(int.MinValue), Int64(int.MaxValue));
+
+        Assert.Equal(new[] { 1, int.MinValue, int.MaxValue }, reader.GetFieldValue<int[]>(0));
+
+        using CamusDataReader tooLarge = ReaderForArray(ColumnType.Integer64, Int64(1), Int64((long)int.MaxValue + 1));
+
+        Assert.Throws<OverflowException>(() => tooLarge.GetFieldValue<int[]>(0));
+    }
+
+    [Fact]
+    public void NullElementInAValueTypeArrayKeepsTheGeneralBehaviour()
+    {
+        // The general path stores a null element of a value-type array as its default value.
+        using CamusDataReader reader = ReaderForArray(ColumnType.Integer64, Int64(4), ColumnValue.Null);
+
+        Assert.Equal(new[] { 4, 0 }, reader.GetFieldValue<int[]>(0));
+        Assert.Equal(new[] { 4L, 0L }, reader.GetFieldValue<long[]>(0));
+    }
+
+    [Fact]
+    public void NumericCellsConvertIntoFloatingPointArrays()
+    {
+        using CamusDataReader reader = ReaderForArray(
+            ColumnType.Float64, Float(ColumnType.Float64, 0.1), Float(ColumnType.Float32, 0.1), Int64(3));
+
+        // The values the general path produces: a Float32 cell is read as a float first.
+        Assert.Equal(new[] { 0.1, (double)0.1f, 3.0 }, reader.GetFieldValue<double[]>(0));
+        Assert.Equal(new[] { 0.1f, 0.1f, 3f }, reader.GetFieldValue<float[]>(0));
+    }
+
+    [Fact]
+    public void NullableArraysMaterializeNullElements()
+    {
+        using CamusDataReader longs = ReaderForArray(ColumnType.Integer64, Int64(1), ColumnValue.Null);
+        Assert.Equal(new long?[] { 1, null }, longs.GetFieldValue<long?[]>(0));
+
+        using CamusDataReader doubles = ReaderForArray(ColumnType.Float64, ColumnValue.Null, Float(ColumnType.Float64, 2.5));
+        Assert.Equal(new double?[] { null, 2.5 }, doubles.GetFieldValue<double?[]>(0));
+
+        using CamusDataReader bools = ReaderForArray(
+            ColumnType.Bool, new ColumnValue { Type = ColumnType.Bool, BoolValue = true }, ColumnValue.Null);
+        Assert.Equal(new bool?[] { true, null }, bools.GetFieldValue<bool?[]>(0));
+
+        Guid guid = Guid.NewGuid();
+        using CamusDataReader guids = ReaderForArray(
+            ColumnType.Uuid, ColumnValue.Null, new ColumnValue { Type = ColumnType.Uuid, UuidValue = guid.ToString() });
+        Assert.Equal(new Guid?[] { null, guid }, guids.GetFieldValue<Guid?[]>(0));
+    }
+
+    [Fact]
+    public void NullableArrayOfAnotherCellTypeKeepsTheGeneralBehaviour()
+    {
+        // Convert.ChangeType cannot convert to a nullable type, so the general path refuses this.
+        using CamusDataReader reader = ReaderForArray(ColumnType.Integer64, Int64(1));
+
+        Assert.Throws<InvalidCastException>(() => reader.GetFieldValue<double?[]>(0));
+    }
+
+    [Fact]
+    public void ScalarGetFieldValueReadsTheCellAndKeepsTheCastContract()
+    {
+        using CamusDataReader reader = new(CamusResultSet.FromRows(
+        [
+            new Dictionary<string, ColumnValue>
+            {
+                ["l"] = Int64(42),
+                ["d"] = Float(ColumnType.Float64, 1.5),
+                ["b"] = new() { Type = ColumnType.Bool, BoolValue = true },
+                ["n"] = ColumnValue.Null,
+            }
+        ]));
+
+        Assert.True(reader.Read());
+
+        Assert.Equal(42L, reader.GetFieldValue<long>(0));
+        Assert.Equal(1.5, reader.GetFieldValue<double>(1));
+        Assert.True(reader.GetFieldValue<bool>(2));
+
+        // The cast is exact, as the base reader's unboxing cast is.
+        Assert.Throws<InvalidCastException>(() => reader.GetFieldValue<double>(0));
+        Assert.Throws<InvalidCastException>(() => reader.GetFieldValue<long>(1));
+        Assert.Throws<InvalidCastException>(() => reader.GetFieldValue<bool>(0));
+        Assert.Throws<InvalidCastException>(() => reader.GetFieldValue<long>(3));
     }
 }

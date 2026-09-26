@@ -7,6 +7,7 @@
  */
 
 using System.Buffers.Binary;
+using System.Runtime.CompilerServices;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Diagnostics;
 using Microsoft.EntityFrameworkCore.Metadata;
@@ -38,9 +39,22 @@ public sealed class CamusRowVersionInterceptor : ISaveChangesInterceptor
         return ValueTask.FromResult(result);
     }
 
+    // The row-version properties of each entity type, and whether a model has any. Both are fixed once a
+    // model is built, so they are found once per model instead of by a scan of every property of every
+    // saved entry. The tables hold the model weakly, so a discarded model is not kept alive.
+    private static readonly ConditionalWeakTable<IEntityType, IProperty[]> RowVersionProperties = new();
+
+    private static readonly ConditionalWeakTable<IModel, StrongBox<bool>> ModelHasRowVersions = new();
+
     private static void Stamp(DbContext? context)
     {
         if (context is null)
+            return;
+
+        // A model with no row-version property has nothing to stamp. Entries() is skipped too: it only
+        // runs DetectChanges, which SaveChanges runs itself.
+        if (!ModelHasRowVersions.GetValue(context.Model, static model => new StrongBox<bool>(
+                model.GetEntityTypes().Any(entityType => FindRowVersionProperties(entityType).Length > 0))).Value)
             return;
 
         foreach (var entry in context.ChangeTracker.Entries())
@@ -48,17 +62,17 @@ public sealed class CamusRowVersionInterceptor : ISaveChangesInterceptor
             if (entry.State != EntityState.Added && entry.State != EntityState.Modified)
                 continue;
 
-            foreach (var property in entry.Metadata.GetProperties())
-            {
-                if (property.ClrType == typeof(byte[])
-                    && property.IsConcurrencyToken
-                    && property.ValueGenerated == ValueGenerated.OnAddOrUpdate)
-                {
-                    entry.Property(property.Name).CurrentValue = NextToken();
-                }
-            }
+            foreach (IProperty property in FindRowVersionProperties(entry.Metadata))
+                entry.Property(property).CurrentValue = NextToken();
         }
     }
+
+    private static IProperty[] FindRowVersionProperties(IEntityType entityType)
+        => RowVersionProperties.GetValue(entityType, static type => type.GetProperties()
+            .Where(property => property.ClrType == typeof(byte[])
+                && property.IsConcurrencyToken
+                && property.ValueGenerated == ValueGenerated.OnAddOrUpdate)
+            .ToArray());
 
     private static byte[] NextToken()
     {

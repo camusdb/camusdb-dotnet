@@ -24,7 +24,7 @@ namespace CamusDB.Client.Transport;
 ///
 /// Lines are distinguished by their first JSON token: objects are the header / trailer, arrays are rows.
 /// Row cells use the identical compact-raw positional encoding as the buffered endpoint, so decoding is
-/// shared through <see cref="CamusResultSet.DecodeRowInto"/>.
+/// decoded by <see cref="CamusResultSet.TryDecodeRowInto"/>, which mirrors the buffered decoder.
 ///
 /// <para><b>In-band failure:</b> because the 200 header (and possibly rows) can already be on the wire
 /// before an autocommit transaction commits, a conflict that surfaces mid-stream cannot change the HTTP
@@ -43,9 +43,9 @@ internal sealed class NdjsonStreamRowSource : CamusRowSource
     private readonly IDisposable? responseHandle;
     private readonly Stream stream;
 
-    // Byte-level line framing: each line is a slice of the reader's pooled buffer, parsed in place by
-    // JsonDocument and fully decoded (or copied) before the next line is read — no per-row string and no
-    // UTF-8→UTF-16→UTF-8 round trip.
+    // Byte-level line framing: each line is a slice of the reader's pooled buffer, parsed in place by a
+    // Utf8JsonReader and fully decoded (or copied) before the next line is read — no per-row string, no
+    // per-row document, and no UTF-8→UTF-16→UTF-8 round trip.
     private readonly Utf8LineReader reader;
 
     private readonly string[] names;
@@ -178,15 +178,11 @@ internal sealed class NdjsonStreamRowSource : CamusRowSource
             return null;
         }
 
-        // The document reads the pooled line buffer in place; it is fully decoded into ColumnValues
-        // (which copy out any strings/bytes) and disposed before the next line overwrites that buffer.
-        using JsonDocument doc = JsonDocument.Parse(line.Value);
-        JsonElement root = doc.RootElement;
-
-        if (root.ValueKind == JsonValueKind.Array)
+        // A row is read from the pooled line buffer in place, with no document per row; it is fully
+        // decoded into ColumnValues (which copy out any strings/bytes) before the next line overwrites
+        // that buffer.
+        if (CamusResultSet.TryDecodeRowInto(line.Value.Span, types, scratch))
         {
-            CamusResultSet.DecodeRowInto(root, types, scratch);
-
             // Publish the array just filled and keep the other one for the next decode, so the row the
             // caller is reading is never the row being written.
             ColumnValue[] decoded = scratch;
@@ -194,7 +190,11 @@ internal sealed class NdjsonStreamRowSource : CamusRowSource
             return decoded;
         }
 
-        // Object => trailer. This is the terminal line; a failed status is an in-band error.
+        // Not an array => trailer, read once per stream as a document. This is the terminal line; a failed
+        // status is an in-band error.
+        using JsonDocument doc = JsonDocument.Parse(line.Value);
+        JsonElement root = doc.RootElement;
+
         finished = true;
         ThrowIfFailed(root);
         return null;

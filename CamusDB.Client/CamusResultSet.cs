@@ -134,34 +134,221 @@ public sealed class CamusResultSet
     }
 
     /// <summary>
-    /// Decodes one positional row array (a JSON array aligned to <paramref name="types"/>) into
-    /// caller-owned storage. The streaming NDJSON reader calls this per row against one array it reuses,
-    /// so a large result leaves no row array behind per row; cell decoding stays identical to the
-    /// buffered <see cref="FromWire"/> path, because the wire row encoding is the same and only the
-    /// framing differs.
+    /// Decodes one positional row line (a JSON array aligned to <paramref name="types"/>) into
+    /// caller-owned storage, reading the UTF-8 bytes with a <see cref="Utf8JsonReader"/>. The streaming
+    /// NDJSON reader calls this per row against one array it reuses, and a reader allocates nothing of its
+    /// own, where a <see cref="JsonDocument"/> per row did. Returns false, and writes nothing, when the line
+    /// is not an array: that line is the stream's trailer object.
+    ///
+    /// <para>The cell decoders below mirror <see cref="DecodeCell(JsonElement, ColumnType)"/> and its
+    /// helpers, which the buffered <see cref="FromWire"/> path uses. The wire row encoding is the same and
+    /// only the framing differs, so a change to one set must be made to the other.</para>
     ///
     /// <para>Every position of <paramref name="cells"/> is written: the ones the row supplies take its
     /// values, and the rest are cleared to <see cref="ColumnValue.Null"/> — so no cell of an earlier row,
-    /// and no reference it held, survives into this one.</para>
+    /// and no reference it held, survives into this one. A malformed line throws part way, so the caller
+    /// decodes into an array that no reader is looking at.</para>
     /// </summary>
-    internal static void DecodeRowInto(JsonElement rowArray, ColumnType[] types, ColumnValue[] cells)
+    internal static bool TryDecodeRowInto(ReadOnlySpan<byte> line, ColumnType[] types, ColumnValue[] cells)
     {
+        Utf8JsonReader reader = new(line);
+
+        // An empty line throws here, as JsonDocument.Parse does.
+        reader.Read();
+
+        if (reader.TokenType != JsonTokenType.StartArray)
+            return false;
+
         int c = 0;
 
-        if (rowArray.ValueKind == JsonValueKind.Array)
+        while (ReadToken(ref reader) != JsonTokenType.EndArray)
         {
-            foreach (JsonElement cell in rowArray.EnumerateArray())
+            if (c < types.Length)
             {
-                if (c >= types.Length)
-                    break;
-
-                cells[c] = DecodeCell(cell, types[c]);
+                cells[c] = DecodeCell(ref reader, types[c]);
                 c++;
+            }
+            else
+            {
+                reader.Skip();
             }
         }
 
+        // Anything after the row other than white space is malformed, as it is for JsonDocument.Parse.
+        // The reader throws for it; a second value it did not throw for is refused here.
+        if (reader.Read())
+            throw new JsonException("A row line holds more than one JSON value.");
+
         for (int i = c; i < cells.Length; i++)
             cells[i] = ColumnValue.Null;
+
+        return true;
+    }
+
+    private static JsonTokenType ReadToken(ref Utf8JsonReader reader)
+    {
+        // A complete line never runs out of tokens inside an open array; the reader throws first.
+        if (!reader.Read())
+            throw new JsonException("A row line ended inside an array.");
+
+        return reader.TokenType;
+    }
+
+    /// <summary>The <see cref="Utf8JsonReader"/> form of <see cref="DecodeCell(JsonElement, ColumnType)"/>.
+    /// The reader is on the cell's first token, and it is on the cell's last token on return.</summary>
+    private static ColumnValue DecodeCell(ref Utf8JsonReader reader, ColumnType declared)
+    {
+        if (reader.TokenType == JsonTokenType.Null)
+            return ColumnValue.Null;
+
+        switch (declared)
+        {
+            case ColumnType.Id:
+                return new ColumnValue { Type = ColumnType.Id, StrValue = reader.GetString() };
+
+            case ColumnType.Bytes:
+                return new ColumnValue { Type = ColumnType.Bytes, BytesValue = reader.GetBytesFromBase64() };
+
+            case ColumnType.Date:
+                return new ColumnValue { Type = ColumnType.Date, LongValue = reader.GetInt64() };
+
+            case ColumnType.DateTime:
+                return new ColumnValue { Type = ColumnType.DateTime, LongValue = reader.GetInt64() };
+
+            case ColumnType.Uuid:
+                return DecodeUuid(ref reader);
+
+            case ColumnType.Array:
+                return DecodeArray(ref reader);
+
+            default:
+                // The mis-tagged UUID recovery of the DOM decoder: any array here goes through the UUID
+                // decoder, which accepts only the two-element form and gives Null for every other array.
+                if (reader.TokenType == JsonTokenType.StartArray)
+                    return DecodeUuid(ref reader);
+
+                return DecodeScalarByToken(ref reader, declared);
+        }
+    }
+
+    /// <summary>
+    /// The <see cref="Utf8JsonReader"/> form of <see cref="DecodeUuid(JsonElement)"/>. The DOM form
+    /// checks the element count first and then reads both elements with <c>GetInt64</c>. This form reads
+    /// the elements as it counts them, and it keeps a failed read until the count is known. Thus an array
+    /// that is not two elements long gives Null, and a two-element array with a bad element throws the
+    /// exception that <c>GetInt64</c> throws.
+    /// </summary>
+    private static ColumnValue DecodeUuid(ref Utf8JsonReader reader)
+    {
+        if (reader.TokenType == JsonTokenType.String)
+            return new ColumnValue { Type = ColumnType.Uuid, UuidValue = reader.GetString() };
+
+        if (reader.TokenType != JsonTokenType.StartArray)
+        {
+            reader.Skip();
+            return ColumnValue.Null;
+        }
+
+        int count = 0;
+        long high = 0, low = 0;
+        Exception? highError = null, lowError = null;
+
+        while (ReadToken(ref reader) != JsonTokenType.EndArray)
+        {
+            if (count == 0)
+                highError = TryReadInt64(ref reader, out high);
+            else if (count == 1)
+                lowError = TryReadInt64(ref reader, out low);
+
+            reader.Skip();
+            count++;
+        }
+
+        if (count != 2)
+            return ColumnValue.Null;
+
+        if (highError is not null)
+            throw highError;
+
+        if (lowError is not null)
+            throw lowError;
+
+        return new ColumnValue { Type = ColumnType.Uuid, UuidHigh = high, LongValue = low };
+    }
+
+    // The exception JsonElement.GetInt64 throws for the same token, or null when the value was read.
+    private static Exception? TryReadInt64(ref Utf8JsonReader reader, out long value)
+    {
+        value = 0;
+
+        if (reader.TokenType != JsonTokenType.Number)
+            return new InvalidOperationException($"The requested operation requires an element of type 'Number', but the target element has type '{reader.TokenType}'.");
+
+        if (!reader.TryGetInt64(out value))
+            return new FormatException("The JSON value is not a valid Int64.");
+
+        return null;
+    }
+
+    /// <summary>The <see cref="Utf8JsonReader"/> form of <see cref="DecodeArray(JsonElement)"/>.</summary>
+    private static ColumnValue DecodeArray(ref Utf8JsonReader reader)
+    {
+        if (reader.TokenType != JsonTokenType.StartArray)
+        {
+            reader.Skip();
+            return ColumnValue.Null;
+        }
+
+        // Count on a copy first, so the list is sized once as the DOM form sizes it from GetArrayLength.
+        Utf8JsonReader counter = reader;
+        int length = 0;
+
+        while (ReadToken(ref counter) != JsonTokenType.EndArray)
+        {
+            counter.Skip();
+            length++;
+        }
+
+        List<ColumnValue> values = new(length);
+        ColumnType elementType = ColumnType.Null;
+
+        while (ReadToken(ref reader) != JsonTokenType.EndArray)
+        {
+            ColumnValue decoded = DecodeScalarByToken(ref reader, ColumnType.Null);
+            if (decoded.Type != ColumnType.Null)
+                elementType = decoded.Type;
+            values.Add(decoded);
+        }
+
+        return new ColumnValue { Type = ColumnType.Array, ArrayValues = values, ArrayElementType = elementType };
+    }
+
+    /// <summary>The <see cref="Utf8JsonReader"/> form of <see cref="DecodeScalarByToken(JsonElement, ColumnType)"/>.</summary>
+    private static ColumnValue DecodeScalarByToken(ref Utf8JsonReader reader, ColumnType declared)
+    {
+        switch (reader.TokenType)
+        {
+            case JsonTokenType.String:
+                return new ColumnValue { Type = ColumnType.String, StrValue = reader.GetString() };
+
+            case JsonTokenType.True:
+            case JsonTokenType.False:
+                return new ColumnValue { Type = ColumnType.Bool, BoolValue = reader.GetBoolean() };
+
+            case JsonTokenType.Number:
+                if (declared is ColumnType.Float64 or ColumnType.Float32)
+                    return new ColumnValue { Type = declared, FloatValue = reader.GetDouble() };
+
+                if (reader.TryGetInt64(out long l))
+                    return new ColumnValue { Type = ColumnType.Integer64, LongValue = l };
+
+                return new ColumnValue { Type = ColumnType.Float64, FloatValue = reader.GetDouble() };
+
+            default:
+                // An object or a nested array: step over it, so the reader ends on its last token.
+                reader.Skip();
+                return ColumnValue.Null;
+        }
     }
 
     public ColumnValue GetCell(int row, int column) => cells[row * ColumnCount + column];
