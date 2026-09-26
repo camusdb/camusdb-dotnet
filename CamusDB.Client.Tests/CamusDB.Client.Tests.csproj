@@ -26,5 +26,6 @@
   <ItemGroup>
     <ProjectReference Include="..\CamusDB.Client\CamusDB.Client.csproj" />
     <ProjectReference Include="..\CamusDB.EntityFrameworkCore\CamusDB.EntityFrameworkCore.csproj" />
+    <ProjectReference Include="..\CamusDB.Dapper\CamusDB.Dapper.csproj" />
   </ItemGroup>
 </Project>

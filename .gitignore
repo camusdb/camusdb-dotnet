@@ -8,6 +8,8 @@ CamusDB.Client.Tests/.vs
 CamusDB.EntityFrameworkCore/bin
 CamusDB.EntityFrameworkCore/obj
 CamusDB.EntityFrameworkCore/.idea/
+CamusDB.Dapper/obj
+CamusDB.Dapper/bin
 nupkg/
 nupkgs/
 artifacts

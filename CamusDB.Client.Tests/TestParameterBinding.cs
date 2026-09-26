@@ -55,14 +55,76 @@ public class TestParameterBinding
     [Fact]
     public void TypedArrayAgreesWithTheGeneralEnumerablePath()
     {
-        // The same values as a List<long> take the general path; both must produce the same value.
+        // The same values as a lazy sequence take the general path; both must produce the same value.
         ColumnValue viaArray = Build(new long[] { 7, 8, 9 });
-        ColumnValue viaEnumerable = Build(new List<long> { 7, 8, 9 });
+        ColumnValue viaEnumerable = Build(new long[] { 7, 8, 9 }.Select(v => v));
 
         Assert.Equal(viaEnumerable.ArrayElementType, viaArray.ArrayElementType);
         Assert.Equal(
             Elements(viaEnumerable).Select(e => e.LongValue),
             Elements(viaArray).Select(e => e.LongValue));
+    }
+
+    /// <summary>
+    /// The typed paths must give what the general path gives for the same values. A lazy sequence
+    /// always takes the general path, so it is the reference.
+    /// </summary>
+    public static TheoryData<object, object, ColumnType> TypedAndGeneralPairs() => new()
+    {
+        { new float[] { 1.5f, -2f }, new float[] { 1.5f, -2f }.Select(v => v), ColumnType.Null },
+        { new List<long> { 1, 2 }, new long[] { 1, 2 }.Select(v => v), ColumnType.Null },
+        { new List<int> { 3, 4 }, new[] { 3, 4 }.Select(v => v), ColumnType.Null },
+        { new List<double> { 0.5 }, new[] { 0.5 }.Select(v => v), ColumnType.Null },
+        { new List<float> { 0.25f }, new[] { 0.25f }.Select(v => v), ColumnType.Null },
+        { new List<bool> { true, false }, new[] { true, false }.Select(v => v), ColumnType.Null },
+        { new List<string?> { null, "x" }, new string?[] { null, "x" }.Select(v => v), ColumnType.Null },
+        { new long?[] { null, 5, null }, new long?[] { null, 5, null }.Select(v => v), ColumnType.Null },
+        { new int?[] { 6, null }, new int?[] { 6, null }.Select(v => v), ColumnType.Null },
+        { new double?[] { null, 1.25 }, new double?[] { null, 1.25 }.Select(v => v), ColumnType.Null },
+        { new float?[] { 2.5f }, new float?[] { 2.5f }.Select(v => v), ColumnType.Null },
+        { new bool?[] { false, null }, new bool?[] { false, null }.Select(v => v), ColumnType.Null },
+        { new long?[] { 1, null }, new long?[] { 1, null }.Select(v => v), ColumnType.String },
+        { new float[] { 1.5f }, new float[] { 1.5f }.Select(v => v), ColumnType.Float64 },
+        { new long?[] { null, null }, new long?[] { null, null }.Select(v => v), ColumnType.Integer64 },
+        { Array.Empty<long?>(), Array.Empty<long?>().Select(v => v), ColumnType.Null },
+    };
+
+    [Theory]
+    [MemberData(nameof(TypedAndGeneralPairs))]
+    public void TypedPathsAgreeWithTheGeneralPath(object typed, object general, ColumnType declared)
+    {
+        ColumnValue viaTyped = Build(typed, declared);
+        ColumnValue viaGeneral = Build(general, declared);
+
+        Assert.Equal(viaGeneral.ArrayElementType, viaTyped.ArrayElementType);
+        Assert.Equal(
+            Elements(viaGeneral).Select(e => (e.Type, e.LongValue, e.FloatValue, e.BoolValue, e.StrValue)),
+            Elements(viaTyped).Select(e => (e.Type, e.LongValue, e.FloatValue, e.BoolValue, e.StrValue)));
+    }
+
+    [Fact]
+    public void NullableGuidArrayAgreesWithTheGeneralPath()
+    {
+        Guid guid = Guid.NewGuid();
+
+        foreach (ColumnType declared in new[] { ColumnType.Null, ColumnType.Id, ColumnType.Uuid })
+        {
+            ColumnValue viaTyped = Build(new Guid?[] { null, guid }, declared);
+            ColumnValue viaGeneral = Build(new Guid?[] { null, guid }.Select(v => v), declared);
+
+            Assert.Equal(viaGeneral.ArrayElementType, viaTyped.ArrayElementType);
+            Assert.Equal(
+                Elements(viaGeneral).Select(e => (e.Type, e.UuidHigh, e.LongValue, e.StrValue)),
+                Elements(viaTyped).Select(e => (e.Type, e.UuidHigh, e.LongValue, e.StrValue)));
+        }
+    }
+
+    [Fact]
+    public void AllNullNullableArrayCannotInferItsElementType()
+    {
+        CamusException ex = Assert.Throws<CamusException>(() => Build(new long?[] { null, null }));
+
+        Assert.Equal("CADB0400", ex.Code);
     }
 
     [Fact]
@@ -160,6 +222,76 @@ public class TestParameterBinding
         values[0] = 42;
 
         Assert.Equal(42L, Elements(command.GetCommandParameters(CamusProtocol.Rest)!["@a"])[0].LongValue);
+    }
+
+    // ─── Untyped parameters ───────────────────────────────────────────────────
+
+    private enum Color { Red = 1, Blue = 7 }
+
+    private static ColumnValue BuildUntyped(object value, Action<CamusParameter>? configure = null)
+    {
+        CamusCommand command = Command();
+        CamusParameter parameter = (CamusParameter)command.CreateParameter();
+        parameter.ParameterName = "@a";
+        parameter.Value = value;
+        configure?.Invoke(parameter);
+        command.Parameters.Add(parameter);
+
+        return command.GetCommandParameters(CamusProtocol.Rest)!["@a"];
+    }
+
+    [Fact]
+    public void UntypedParameterTakesItsTypeFromItsValue()
+    {
+        DateTime instant = new(2026, 5, 1, 10, 30, 0, DateTimeKind.Utc);
+
+        ColumnValue dateTime = BuildUntyped(instant);
+        Assert.Equal(ColumnType.DateTime, dateTime.Type);
+        Assert.Equal(instant.Ticks, dateTime.LongValue);
+
+        Assert.Equal(ColumnType.Date, BuildUntyped(new DateOnly(2026, 5, 1)).Type);
+        Assert.Equal(ColumnType.Integer64, BuildUntyped(42).Type);
+        Assert.Equal(ColumnType.String, BuildUntyped("text").Type);
+        Assert.Equal(ColumnType.Uuid, BuildUntyped(Guid.NewGuid()).Type);
+        Assert.Equal(ColumnType.Bytes, BuildUntyped(new byte[] { 1 }).Type);
+    }
+
+    [Fact]
+    public void UntypedEnumAndCharBindAsIntegerAndString()
+    {
+        ColumnValue color = BuildUntyped(Color.Blue);
+        Assert.Equal(ColumnType.Integer64, color.Type);
+        Assert.Equal(7, color.LongValue);
+
+        ColumnValue letter = BuildUntyped('x');
+        Assert.Equal(ColumnType.String, letter.Type);
+        Assert.Equal("x", letter.StrValue);
+    }
+
+    [Fact]
+    public void UntypedSequenceBindsAsAnArray()
+    {
+        ColumnValue array = BuildUntyped(new long[] { 1, 2 });
+
+        Assert.Equal(ColumnType.Array, array.Type);
+        Assert.Equal(new long[] { 1, 2 }, Elements(array).Select(e => e.LongValue));
+    }
+
+    [Fact]
+    public void ObjectDbTypeWithAScalarValueBindsTheScalar()
+    {
+        ColumnValue value = BuildUntyped("text", p => p.DbType = System.Data.DbType.Object);
+
+        Assert.Equal(ColumnType.String, value.Type);
+        Assert.Equal("text", value.StrValue);
+    }
+
+    [Fact]
+    public void UntypedValueWithNoColumnTypeIsRefused()
+    {
+        CamusException ex = Assert.Throws<CamusException>(() => BuildUntyped(TimeSpan.FromSeconds(1)));
+
+        Assert.Contains("'@a'", ex.Message);
     }
 
     // ─── UUID parameters ──────────────────────────────────────────────────────

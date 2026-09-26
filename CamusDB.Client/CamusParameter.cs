@@ -89,8 +89,29 @@ public sealed class CamusParameter : DbParameter, ICloneable
 
     public override bool IsNullable { get; set; }
 
+    private string _parameterName = "";
+
+    // The name as the placeholder it binds: ParameterName with an '@' in front when it has none. Built on
+    // first use and dropped when the name changes, so an execution does not concatenate a new string.
+    private string? _placeholderName;
+
     [AllowNull]
-    public override string ParameterName { get; set; } = "";
+    public override string ParameterName
+    {
+        get => _parameterName;
+        set
+        {
+            _parameterName = value!;
+            _placeholderName = null;
+        }
+    }
+
+    /// <summary>
+    /// <see cref="ParameterName"/> in its placeholder form, <c>@name</c>. The caller has already
+    /// rejected an empty name.
+    /// </summary>
+    internal string PlaceholderName
+        => _placeholderName ??= _parameterName[0] == '@' ? _parameterName : "@" + _parameterName;
 
     public override int Size { get; set; }
 

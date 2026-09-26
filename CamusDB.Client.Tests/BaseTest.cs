@@ -38,22 +38,30 @@ public class BaseTest
         return cmConnection;
     }
 
-    protected static async Task<string> CreateTempRobotsTableAsync(CamusConnection connection)
+    protected static Task<string> CreateTempRobotsTableAsync(CamusConnection connection) =>
+        CreateTempTableAsync(
+            connection,
+            "robots",
+            " id OID PRIMARY KEY NOT NULL," +
+            " name STRING NOT NULL," +
+            " type STRING," +
+            " year INT64," +
+            " price FLOAT64," +
+            " enabled BOOL");
+
+    /// <summary>
+    /// Creates a table with a unique name from <paramref name="prefix"/> and the column list
+    /// <paramref name="columns"/>, and returns its name.
+    /// </summary>
+    protected static async Task<string> CreateTempTableAsync(CamusConnection connection, string prefix, string columns)
     {
         await schemaLock.WaitAsync();
         try
         {
             for (int attempt = 0; attempt < 5; attempt++)
             {
-                string tableName = "robots_" + Guid.NewGuid().ToString("n");
-                string sql =
-                    $"CREATE TABLE {tableName} (" +
-                    " id OID PRIMARY KEY NOT NULL," +
-                    " name STRING NOT NULL," +
-                    " type STRING," +
-                    " year INT64," +
-                    " price FLOAT64," +
-                    " enabled BOOL)";
+                string tableName = prefix + "_" + Guid.NewGuid().ToString("n");
+                string sql = $"CREATE TABLE {tableName} ({columns})";
 
                 try
                 {

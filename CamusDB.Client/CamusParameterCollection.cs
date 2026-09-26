@@ -25,6 +25,13 @@ public sealed class CamusParameterCollection : DbParameterCollection, IEnumerabl
     /// <inheritdoc />
     public override object SyncRoot => _innerList;
 
+    /// <summary>
+    /// The parameter at <paramref name="index"/>, typed. Internal paths iterate by index with this: a
+    /// <c>foreach</c> goes through the <see cref="IEnumerator"/> this type must return, and that boxes
+    /// the list's enumerator on every execution.
+    /// </summary>
+    internal CamusParameter ParameterAt(int index) => _innerList[index];
+
     /// <inheritdoc />
     IEnumerator<CamusParameter> IEnumerable<CamusParameter>.GetEnumerator() => _innerList.GetEnumerator();
 

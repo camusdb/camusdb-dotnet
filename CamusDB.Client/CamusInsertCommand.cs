@@ -28,6 +28,9 @@ public class CamusInsertCommand : CamusCommand
     }
 
     /// <inheritdoc />
+    protected override bool BindsPlaceholders => false;
+
+    /// <inheritdoc />
     public override async Task<int> ExecuteNonQueryAsync(CancellationToken cancellationToken)
     {
         ICamusTransport transport = builder.GetTransport();

@@ -240,10 +240,10 @@ public class TestPreparedStatements : BaseTest
     }
 
     /// <summary>
-    /// Placeholder names bind exactly, with the leading <c>@</c>, because that is what an inline
-    /// execution requires: the engine looks a placeholder up by its literal text. Preparing a command
-    /// must not quietly widen that, or a statement would work one way before it crossed the auto-prepare
-    /// threshold and fail after it.
+    /// A placeholder name binds the same way before and after a command is prepared. The driver adds the
+    /// leading <c>@</c> to a bare name on both paths, because the engine looks a placeholder up by its
+    /// literal text. If only one path added it, a statement would work one way before it crossed the
+    /// auto-prepare threshold and another way after it.
     /// </summary>
     [Fact]
     public async Task TestParameterNamesBindExactlyAsInline()
@@ -257,27 +257,31 @@ public class TestPreparedStatements : BaseTest
 
         string sql = $"SELECT name FROM {table} WHERE year = @year";
 
-        // Inline: a name missing its '@' does not resolve.
+        // Inline: a name without its '@' resolves to the placeholder.
         await using (CamusCommand inline = connection.CreateCamusCommand(sql))
         {
             inline.Parameters.Add("year", ColumnType.Integer64, 2020);
-            await Assert.ThrowsAnyAsync<CamusException>(async () => await inline.ExecuteReaderAsync());
+
+            await using CamusDataReader inlineReader = await inline.ExecuteReaderAsync();
+
+            Assert.True(await inlineReader.ReadAsync());
+            Assert.Equal("bare", inlineReader.GetString(0));
         }
 
-        // Prepared: the same, rather than the looser spelling suddenly working.
+        // Prepared: both spellings resolve, as they do inline.
         await using CamusCommand select = connection.CreateCamusCommand(sql);
         await select.PrepareAsync();
 
-        select.Parameters.Add("year", ColumnType.Integer64, 2020);
-        await Assert.ThrowsAnyAsync<CamusException>(async () => await select.ExecuteReaderAsync());
+        foreach (string name in new[] { "year", "@year" })
+        {
+            select.Parameters.Clear();
+            select.Parameters.Add(name, ColumnType.Integer64, 2020);
 
-        select.Parameters.Clear();
-        select.Parameters.Add("@year", ColumnType.Integer64, 2020);
+            await using CamusDataReader reader = await select.ExecuteReaderAsync();
 
-        await using CamusDataReader reader = await select.ExecuteReaderAsync();
-
-        Assert.True(await reader.ReadAsync());
-        Assert.Equal("bare", reader.GetString(0));
+            Assert.True(await reader.ReadAsync());
+            Assert.Equal("bare", reader.GetString(0));
+        }
     }
 
     /// <summary>

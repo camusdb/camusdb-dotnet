@@ -2,12 +2,13 @@
 
 .NET idiomatic client libraries for [CamusDB](https://github.com/camusdb/camusdb)
 
-This repository contains two packages:
+This repository contains three packages:
 
 | Package | Description |
 | --- | --- |
 | `CamusDB.Client` | ADO.NET provider — recommended for direct database access from .NET |
 | `CamusDB.EntityFrameworkCore` | Entity Framework Core provider built on top of `CamusDB.Client` |
+| `CamusDB.Dapper` | Dapper support: typed parameters, native array parameters and type handlers |
 
 ---
 
@@ -1517,6 +1518,83 @@ await ctx.SaveChangesAsync();                    // throws DbUpdateConcurrencyEx
 - `[ConcurrencyCheck]` is supported on `short`/`int`/`long`; `[Timestamp]`/`IsRowVersion()` is supported on `byte[]` (provider-managed). A stale write raises `DbUpdateConcurrencyException`.
 - Views are read-only (no writes through a view) and are not scaffolded into a model. `WithCache(...)` on a query that reads through a view is accepted but inert — the response reports `bypass` / `derived-source` and the rows come from live storage. Materialized views are writable only by `REFRESH`, and do cache.
 - `WithCache(...)` only takes effect on single-table, autocommit reads; the hint is inert on queries with a join or run inside an explicit transaction (they read live storage).
+
+---
+
+## CamusDB.Dapper (Dapper)
+
+[Dapper](https://github.com/DapperLib/Dapper) works with a `CamusConnection` as it is, because the connection is a plain ADO.NET `DbConnection`. The `CamusDB.Dapper` package adds the CamusDB types that Dapper does not know.
+
+### Installation
+
+```shell
+dotnet add package CamusDB.Dapper
+```
+
+### Usage
+
+```csharp
+using CamusDB.Client;
+using CamusDB.Dapper;
+using Dapper;
+
+// Once at startup: registers the handler for CamusObjectIdValue.
+CamusDapper.Register();
+
+await using CamusConnection connection = new("Endpoint=http://localhost:5095;Database=test");
+
+IEnumerable<Robot> robots = await connection.QueryAsync<Robot>(
+    "SELECT * FROM robots WHERE year >= @from ORDER BY year",
+    new { from = 1977 });
+
+int inserted = await connection.ExecuteAsync(
+    "INSERT INTO robots (id, name, year) VALUES (GEN_ID(), @Name, @Year)",
+    new[] { new { Name = "R2-D2", Year = 1977 }, new { Name = "T-800", Year = 1984 } });
+
+long count = await connection.ExecuteScalarAsync<long>("SELECT COUNT(*) FROM robots");
+```
+
+Dapper binds each parameter by its bare name (`from`, not `@from`). The driver adds the `@` for a SQL command, so a bare name and a name with the `@` bind the same placeholder.
+
+Dapper types a parameter by its CLR type. The driver maps that type as the [Data Types](#data-types) table shows. A `Guid` binds as a `UUID`, a `DateOnly` binds as a `DATE`, and an enum binds as its integer value. On read, Dapper converts each column into the property type, for example `INT64` into `int` or `DATE` into `DateOnly`.
+
+### Typed values: `CamusValue`
+
+`CamusValue` binds a value as a column type that the CLR type cannot express:
+
+| Value | Binds as |
+| --- | --- |
+| `CamusValue.Id("65f1…")` | An `OID` from its hex string. Dapper sends a plain `string` as `STRING`. |
+| `CamusValue.Uuid(guid)` | A `UUID`, also when the value is `null`. |
+| `CamusValue.Array(values)` | One native `ARRAY(T)`. The element type comes from `T`, so an empty array works too. |
+| `CamusValue.Vector(floats)` | A float32 vector in a `BYTES` column, in the [`CamusVector`](#data-types) layout. |
+| `new CamusValue(ColumnType.X, value)` | Any column type. |
+
+```csharp
+IEnumerable<string> names = await connection.QueryAsync<string>(
+    "SELECT name FROM robots WHERE year = ANY(@years)",
+    new { years = CamusValue.Array(new long[] { 1977, 2001 }) });
+```
+
+A `CamusValue` also works as a value in `DynamicParameters`.
+
+### Arrays and `IN` lists
+
+By default, Dapper expands a sequence parameter into a list: `WHERE name IN @names` becomes `WHERE name IN (@names1, @names2, …)`. This works with CamusDB with no change.
+
+To bind a sequence as one `ARRAY(T)` value, wrap it in `CamusValue.Array`. To read an `ARRAY(T)` column into a `T[]` property, register an array type handler:
+
+```csharp
+CamusDapper.RegisterArrayTypeHandlers();       // long[], int[], double[], bool[], string[], Guid[]
+CamusDapper.RegisterArrayTypeHandler<float>(); // any other element type
+```
+
+A handler for `T[]` also changes how Dapper binds a `T[]` parameter. The parameter becomes one `ARRAY(T)` value, so `IN @values` no longer expands for that type. Use `= ANY(@values)` for it. A `List<T>` parameter still expands. Without a handler, an `ARRAY(T)` column reads as `object[]`.
+
+### Limitations
+
+- Dapper reads through `ExecuteReaderAsync`, which buffers the whole result. For a very large result, use `CamusCommand.ExecuteStreamReaderAsync` and parse rows with `reader.GetRowParser<T>()`.
+- Dapper type handlers are process-wide. Call the `CamusDapper` registration methods once, at startup.
 
 ---
 

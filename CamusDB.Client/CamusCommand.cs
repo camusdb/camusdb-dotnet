@@ -283,21 +283,37 @@ public class CamusCommand : DbCommand, ICloneable
     internal Dictionary<string, ColumnValue>? GetCommandParameters(CamusProtocol protocol)
         => BuildCommandParameters(uuidAsString: protocol != CamusProtocol.Grpc);
 
+    /// <summary>
+    /// Whether a bound name without the <c>@</c> sigil is sent as the placeholder it names. The server
+    /// matches a placeholder by its full token, <c>@name</c>, so a parameter named <c>name</c> would
+    /// otherwise fail with "Unknown placeholder". Other ADO.NET providers accept both spellings, and
+    /// generic callers such as Dapper always bind the bare name. <see cref="CamusInsertCommand"/> binds
+    /// column names, not placeholders, so it turns this off.
+    /// </summary>
+    protected virtual bool BindsPlaceholders => true;
+
     private Dictionary<string, ColumnValue>? BuildCommandParameters(bool uuidAsString)
     {
         if (Parameters.Count == 0)
             return null;
 
-        Dictionary<string, ColumnValue> commandParameters = new(Parameters.Count);
+        CamusParameterCollection parameters = Parameters;
+        Dictionary<string, ColumnValue> commandParameters = new(parameters.Count);
 
-        foreach (CamusParameter parameter in Parameters)
+        // By index, not foreach: the collection's enumerator is an interface, and one per execution is garbage.
+        for (int i = 0; i < parameters.Count; i++)
         {
+            CamusParameter parameter = parameters.ParameterAt(i);
+
             if (string.IsNullOrEmpty(parameter.ParameterName))
                 throw new CamusException("CADB0400", "Parameter name cannot be null or empty");
 
-            commandParameters.Add(
-                parameter.ParameterName,
-                BuildColumnValue(parameter.ParameterName, parameter.ColumnType, parameter.Value, parameter.ArrayElementType, uuidAsString));
+            string name = BindsPlaceholders ? parameter.PlaceholderName : parameter.ParameterName;
+
+            if (!commandParameters.TryAdd(
+                    name,
+                    BuildColumnValue(name, parameter.ColumnType, parameter.Value, parameter.ArrayElementType, uuidAsString)))
+                throw new CamusException("CADB0400", $"Parameter '{name}' is bound more than once");
         }
 
         return commandParameters;
@@ -305,8 +321,14 @@ public class CamusCommand : DbCommand, ICloneable
 
     private static ColumnValue BuildColumnValue(string name, ColumnType columnType, object? value, ColumnType arrayElementType, bool uuidAsString = true)
     {
-        if (value is null or DBNull || columnType == ColumnType.Null)
+        if (value is null or DBNull)
             return new() { Type = ColumnType.Null };
+
+        // A parameter that nobody typed carries its type in its value. Dapper leaves DbType unset for a
+        // DateTime, and a caller can set only Value. Sent as NULL, such a value was lost with no error.
+        // DbType.Object maps to Array, so an untyped scalar can also arrive typed Array.
+        if (columnType == ColumnType.Null || (columnType == ColumnType.Array && value is string or not IEnumerable))
+            columnType = InferValueColumnType(name, value);
 
         switch (columnType)
         {
@@ -578,7 +600,28 @@ public class CamusCommand : DbCommand, ICloneable
         _ => throw new CamusException("CADB0400", $"Cannot map date/datetime parameter '{name}' from {value.GetType().Name}")
     };
 
-    private static ColumnType InferColumnType(Type type) => type switch
+    private static ColumnType InferValueColumnType(string name, object value)
+    {
+        Type type = value.GetType();
+
+        if (type.IsEnum)
+            return ColumnType.Integer64;
+
+        if (type == typeof(char))
+            return ColumnType.String;
+
+        ColumnType columnType = InferColumnType(type);
+
+        if (columnType != ColumnType.Null)
+            return columnType;
+
+        if (value is IEnumerable and not string)
+            return ColumnType.Array;
+
+        throw new CamusException("CADB0400", $"Cannot infer the type of parameter '{name}' from {type.Name}; set CamusParameter.ColumnType explicitly");
+    }
+
+    internal static ColumnType InferColumnType(Type type) => type switch
     {
         _ when type == typeof(string) => ColumnType.String,
         _ when type == typeof(bool) => ColumnType.Bool,
@@ -825,6 +868,17 @@ public class CamusCommand : DbCommand, ICloneable
         using DbDataReader reader = ExecuteDbDataReader(CommandBehavior.SingleRow);
 
         if (!reader.Read() || reader.FieldCount == 0)
+            return null;
+
+        return reader.GetValue(0);
+    }
+
+    /// <inheritdoc />
+    public override async Task<object?> ExecuteScalarAsync(CancellationToken cancellationToken)
+    {
+        await using DbDataReader reader = await ExecuteDbDataReaderAsync(CommandBehavior.SingleRow, cancellationToken).ConfigureAwait(false);
+
+        if (!await reader.ReadAsync(cancellationToken).ConfigureAwait(false) || reader.FieldCount == 0)
             return null;
 
         return reader.GetValue(0);
