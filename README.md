@@ -1201,6 +1201,36 @@ ctx.Robots.Remove(robot);
 await ctx.SaveChangesAsync();
 ```
 
+### Bulk Update and Delete
+
+`ExecuteUpdate` and `ExecuteDelete` run a single `UPDATE`/`DELETE` on the server without loading the
+entities:
+
+```csharp
+int paid = await ctx.Orders
+    .Where(o => o.Status == "open" && o.Total > 100)
+    .ExecuteUpdateAsync(s => s
+        .SetProperty(o => o.Status, "paid")
+        .SetProperty(o => o.Total, o => o.Total * 2));
+
+int removed = await ctx.Orders
+    .Where(o => ctx.Customers.Any(c => c.Id == o.CustomerId && c.Name == "bob"))
+    .ExecuteDeleteAsync();
+```
+
+CamusDB's `UPDATE`/`DELETE` take no alias on the target table and always need a `WHERE`, so the
+provider writes the target's columns by their bare names and adds `WHERE TRUE` when there is no filter.
+A filter on the target table alone is sent as the statement's own `WHERE`. Any other filter — a
+navigation or `Any(...)` subquery, a `join`, or `OrderBy`/`Take`/`Skip` — is sent as
+`WHERE <pk> IN (SELECT ...)`, because the server cannot evaluate a subquery correlated with the target
+row inside an `UPDATE`/`DELETE`. That form needs a single-column primary key.
+
+- A value in `SetProperty` can use constants, parameters and the row's own columns. A value that reads
+  another table (a navigation, a joined column, or a correlated subquery) throws `InvalidOperationException`.
+- Like all EF Core bulk operations, these bypass the change tracker: tracked entities are not updated,
+  and a provider-managed `[Timestamp]` row version is **not** advanced — set it in `SetProperty` if
+  other writers rely on it.
+
 ### Migrations
 
 The provider supports EF Core migrations for the following DDL operations:
@@ -1518,6 +1548,7 @@ await ctx.SaveChangesAsync();                    // throws DbUpdateConcurrencyEx
 - `[ConcurrencyCheck]` is supported on `short`/`int`/`long`; `[Timestamp]`/`IsRowVersion()` is supported on `byte[]` (provider-managed). A stale write raises `DbUpdateConcurrencyException`.
 - Views are read-only (no writes through a view) and are not scaffolded into a model. `WithCache(...)` on a query that reads through a view is accepted but inert — the response reports `bypass` / `derived-source` and the rows come from live storage. Materialized views are writable only by `REFRESH`, and do cache.
 - `WithCache(...)` only takes effect on single-table, autocommit reads; the hint is inert on queries with a join or run inside an explicit transaction (they read live storage).
+- `ExecuteUpdate` cannot set a value read from another table, and `ExecuteUpdate`/`ExecuteDelete` with a join, a correlated subquery or `Take`/`Skip` need a single-column primary key (see [Bulk Update and Delete](#bulk-update-and-delete)).
 
 ---
 
