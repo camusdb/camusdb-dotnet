@@ -76,13 +76,15 @@ public class CamusDatabaseCreator : RelationalDatabaseCreator
             await cmd.ExecuteDDLAsync(cancellationToken).ConfigureAwait(false);
         }
 
-        foreach (var entityType in model.GetEntityTypes())
+        bool foreignKeys = CamusForeignKeySyntax.IsEnabled(_currentContext.Context);
+
+        foreach (var entityType in OrderForCreation(model.GetEntityTypes(), foreignKeys))
         {
             var tableName = entityType.GetTableName();
             if (tableName is null)
                 continue;
 
-            var ddl = BuildCreateTableSql(entityType, tableName);
+            var ddl = BuildCreateTableSql(entityType, tableName, foreignKeys);
             var cmd = camusConn.CreateCamusCommand(ddl);
 
             try
@@ -100,6 +102,85 @@ public class CamusDatabaseCreator : RelationalDatabaseCreator
         => ex.Message.Contains("already exists", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
+    /// Orders the entity types so that the table of each principal is created before the tables that
+    /// reference it. The server checks that the referenced table exists when it creates the child.
+    /// Otherwise the model order stays.
+    /// </summary>
+    /// <remarks>
+    /// The server refuses a cycle of two or more tables (<c>CADB0416</c>), so a model with one cannot get
+    /// its foreign keys. This method refuses it before any table is created, and names the tables.
+    /// </remarks>
+    internal static IReadOnlyList<IEntityType> OrderForCreation(IEnumerable<IEntityType> entityTypes, bool foreignKeys)
+    {
+        List<IEntityType> pending = entityTypes.ToList();
+        if (!foreignKeys)
+            return pending;
+
+        // The tables each table must wait for: the other tables its foreign keys reference.
+        Dictionary<string, HashSet<string>> dependencies = new(StringComparer.Ordinal);
+        foreach (var entityType in pending)
+        {
+            if (entityType.GetTableName() is not { } tableName)
+                continue;
+
+            if (!dependencies.TryGetValue(tableName, out HashSet<string>? tables))
+                dependencies[tableName] = tables = new(StringComparer.Ordinal);
+
+            foreach (var constraint in GetForeignKeyConstraints(entityType, tableName))
+            {
+                if (!string.Equals(constraint.PrincipalTable.Name, tableName, StringComparison.Ordinal))
+                    tables.Add(constraint.PrincipalTable.Name);
+            }
+        }
+
+        List<IEntityType> ordered = new(pending.Count);
+        HashSet<string> created = new(StringComparer.Ordinal);
+
+        while (pending.Count > 0)
+        {
+            int ready = pending.FindIndex(e =>
+                e.GetTableName() is not { } t || dependencies[t].All(d => created.Contains(d) || !dependencies.ContainsKey(d)));
+
+            if (ready < 0)
+            {
+                string tables = string.Join(", ", pending.Select(e => e.GetTableName()).Distinct().Select(t => $"'{t}'"));
+                throw new NotSupportedException(
+                    $"The foreign keys of the tables {tables} form a cycle. CamusDB refuses a foreign-key cycle " +
+                    "of two or more tables (CADB0416). Remove a relationship from the cycle, or call " +
+                    "UseForeignKeyConstraints(false) to create the tables without foreign keys.");
+            }
+
+            IEntityType next = pending[ready];
+            pending.RemoveAt(ready);
+            ordered.Add(next);
+
+            if (next.GetTableName() is { } nextTable)
+                created.Add(nextTable);
+        }
+
+        return ordered;
+    }
+
+    /// <summary>
+    /// The foreign-key constraints that the foreign keys of <paramref name="entityType"/> map to in
+    /// <paramref name="tableName"/>. A foreign key between two entity types that share one table (table
+    /// splitting, an owned type) maps to no constraint, and so has none here.
+    /// </summary>
+    private static IEnumerable<IForeignKeyConstraint> GetForeignKeyConstraints(IEntityType entityType, string tableName)
+    {
+        HashSet<string> seen = new(StringComparer.Ordinal);
+
+        foreach (var foreignKey in entityType.GetForeignKeys())
+        {
+            foreach (var constraint in foreignKey.GetMappedConstraints())
+            {
+                if (string.Equals(constraint.Table.Name, tableName, StringComparison.Ordinal) && seen.Add(constraint.Name))
+                    yield return constraint;
+            }
+        }
+    }
+
+    /// <summary>
     /// Composes the <c>CREATE TABLE</c> behind <c>EnsureCreated</c>.
     ///
     /// <para>Every name is delimited through <see cref="CamusIdentifier"/>, the same rule the migration
@@ -108,7 +189,7 @@ public class CamusDatabaseCreator : RelationalDatabaseCreator
     /// runtime (tenant provisioning, a dynamic schema) compose SQL nobody wrote. The CHECK expression
     /// stays verbatim — it is a SQL fragment the model author wrote, not a name.</para>
     /// </summary>
-    internal static string BuildCreateTableSql(IEntityType entityType, string tableName)
+    internal static string BuildCreateTableSql(IEntityType entityType, string tableName, bool foreignKeys = true)
     {
         var sb = new StringBuilder();
         sb.Append("CREATE TABLE ").Append(CamusIdentifier.Delimit(tableName, nameof(tableName))).Append(" (");
@@ -176,6 +257,41 @@ public class CamusDatabaseCreator : RelationalDatabaseCreator
 
             sb.Append(", CONSTRAINT ").Append(CamusIdentifier.Delimit(checkName, "checkConstraintName"))
               .Append(" CHECK (").Append(check.Sql).Append(')');
+        }
+
+        // An alternate key is a unique index on the server. A foreign key can reference only a primary
+        // key or a unique index, so the principal key of HasPrincipalKey needs it.
+        var storeObject = StoreObjectIdentifier.Table(tableName);
+        foreach (var key in entityType.GetKeys())
+        {
+            if (key.IsPrimaryKey())
+                continue;
+
+            string keyName = key.GetName(storeObject)
+                ?? throw new InvalidOperationException($"The alternate key on '{tableName}' has no name.");
+
+            sb.Append(", UNIQUE KEY ").Append(CamusIdentifier.Delimit(keyName, "alternateKeyName")).Append(" (")
+              .Append(string.Join(", ", key.Properties.Select(p =>
+                  CamusIdentifier.Delimit(p.GetColumnName(storeObject) ?? p.GetColumnName(), "alternateKeyColumn"))))
+              .Append(')');
+        }
+
+        // The server creates the index each foreign key needs on the referencing columns, because
+        // EnsureCreated creates no index of the model.
+        if (foreignKeys)
+        {
+            foreach (var constraint in GetForeignKeyConstraints(entityType, tableName))
+            {
+                sb.Append(", ");
+                CamusForeignKeySyntax.AppendConstraint(
+                    sb,
+                    constraint.Name,
+                    constraint.Columns.Select(c => c.Name).ToList(),
+                    constraint.PrincipalTable.Name,
+                    constraint.PrincipalColumns.Select(c => c.Name).ToList(),
+                    constraint.OnDeleteAction,
+                    ReferentialAction.NoAction);
+            }
         }
 
         sb.Append(')');

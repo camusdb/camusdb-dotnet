@@ -19,6 +19,7 @@ public sealed class CamusDBOptionsExtension : RelationalOptionsExtension
         RetryDeadline = copyFrom.RetryDeadline;
         RetryMedianFirstDelay = copyFrom.RetryMedianFirstDelay;
         DefaultTransactionOptions = copyFrom.DefaultTransactionOptions;
+        ForeignKeyConstraintsEnabled = copyFrom.ForeignKeyConstraintsEnabled;
     }
 
     /// <summary>
@@ -29,6 +30,15 @@ public sealed class CamusDBOptionsExtension : RelationalOptionsExtension
     /// the connection-string / server defaults apply.
     /// </summary>
     public CamusTransactionOptions? DefaultTransactionOptions { get; private set; }
+
+    /// <summary>
+    /// When <see langword="true"/> (the default), <c>EnsureCreated</c> and migrations put the model's
+    /// relationships into the database as <c>FOREIGN KEY</c> constraints. When <see langword="false"/>,
+    /// no constraint is emitted and <c>AddForeignKey</c> / <c>DropForeignKey</c> produce no SQL, which
+    /// is the behavior of the provider before foreign-key support. Set via
+    /// <see cref="CamusDBDbContextOptionsBuilder.UseForeignKeyConstraints"/>.
+    /// </summary>
+    public bool ForeignKeyConstraintsEnabled { get; private set; } = true;
 
     public bool RetryOnFailureEnabled { get; private set; }
 
@@ -110,6 +120,13 @@ public sealed class CamusDBOptionsExtension : RelationalOptionsExtension
         return clone;
     }
 
+    public CamusDBOptionsExtension WithForeignKeyConstraints(bool enabled)
+    {
+        var clone = (CamusDBOptionsExtension)Clone();
+        clone.ForeignKeyConstraintsEnabled = enabled;
+        return clone;
+    }
+
     private sealed class ExtensionInfo(IDbContextOptionsExtension extension)
         : RelationalOptionsExtension.RelationalExtensionInfo(extension)
     {
@@ -142,6 +159,8 @@ public sealed class CamusDBOptionsExtension : RelationalOptionsExtension
             debugInfo["CamusDB:RetryMaxDelayMs"] = Extension.RetryMaxDelay.TotalMilliseconds.ToString("F0");
             debugInfo["CamusDB:RetryDeadlineMs"] = Extension.RetryDeadline.TotalMilliseconds.ToString("F0");
             debugInfo["CamusDB:RetryMedianFirstDelayMs"] = Extension.RetryMedianFirstDelay.TotalMilliseconds.ToString("F0");
+
+            debugInfo["CamusDB:ForeignKeyConstraints"] = Extension.ForeignKeyConstraintsEnabled.ToString();
 
             CamusTransactionOptions? txOptions = Extension.DefaultTransactionOptions;
             debugInfo["CamusDB:DefaultLocking"] = txOptions?.Locking?.ToString() ?? "(default)";

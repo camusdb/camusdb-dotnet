@@ -1,5 +1,6 @@
 using System.Globalization;
 using CamusDB.Client;
+using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Metadata;
 using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Migrations.Operations;
@@ -8,14 +9,111 @@ namespace CamusDB.EntityFrameworkCore;
 
 public class CamusMigrationsSqlGenerator : MigrationsSqlGenerator
 {
-    public CamusMigrationsSqlGenerator(MigrationsSqlGeneratorDependencies dependencies)
-        : base(dependencies) { }
+    public CamusMigrationsSqlGenerator(MigrationsSqlGeneratorDependencies dependencies, IDbContextOptions options)
+        : base(dependencies)
+    {
+        ForeignKeysEnabled = CamusForeignKeySyntax.IsEnabled(options);
+    }
+
+    /// <summary>
+    /// Whether this context emits foreign keys; see
+    /// <see cref="CamusDBDbContextOptionsBuilder.UseForeignKeyConstraints"/>. Read once from the options,
+    /// so a generator still works after its context is disposed.
+    /// </summary>
+    private bool ForeignKeysEnabled { get; }
+
+    /// <summary>
+    /// Moves each <c>CreateIndex</c> of a new table that has foreign keys into its <c>CREATE TABLE</c>,
+    /// as an inline <c>KEY</c>.
+    /// </summary>
+    /// <remarks>
+    /// Each foreign key needs an index on the child whose leading columns are the referencing columns.
+    /// The server reuses an index that the same <c>CREATE TABLE</c> declares, and creates an index of its
+    /// own, <c>~fk_{constraint}</c>, when there is none. EF Core emits the index of a foreign key
+    /// (<c>IX_…</c>) as a separate <c>CreateIndex</c> after the table. Without this step the child table
+    /// gets two equal indexes, and each write updates both.
+    /// </remarks>
+    public override IReadOnlyList<MigrationCommand> Generate(
+        IReadOnlyList<MigrationOperation> operations,
+        IModel? model = null,
+        MigrationsSqlGenerationOptions options = MigrationsSqlGenerationOptions.Default)
+        => base.Generate(ForeignKeysEnabled ? FoldIndexesIntoCreateTable(operations) : operations, model, options);
+
+    private static IReadOnlyList<MigrationOperation> FoldIndexesIntoCreateTable(IReadOnlyList<MigrationOperation> operations)
+    {
+        Dictionary<string, List<CreateIndexOperation>>? folded = null;
+
+        for (int i = 0; i < operations.Count; i++)
+        {
+            if (operations[i] is not CreateIndexOperation index || index.Table is null)
+                continue;
+
+            for (int j = 0; j < i; j++)
+            {
+                if (operations[j] is CreateTableOperation { ForeignKeys.Count: > 0 } table
+                    && string.Equals(table.Name, index.Table, StringComparison.Ordinal))
+                {
+                    folded ??= new(StringComparer.Ordinal);
+                    if (!folded.TryGetValue(table.Name, out List<CreateIndexOperation>? indexes))
+                        folded[table.Name] = indexes = [];
+                    indexes.Add(index);
+                    break;
+                }
+            }
+        }
+
+        if (folded is null)
+            return operations;
+
+        List<MigrationOperation> result = new(operations.Count);
+        foreach (MigrationOperation operation in operations)
+        {
+            if (operation is CreateIndexOperation { Table: { } indexTable } index
+                && folded.TryGetValue(indexTable, out List<CreateIndexOperation>? indexes)
+                && indexes.Contains(index))
+                continue;
+
+            if (operation is CreateTableOperation table && folded.TryGetValue(table.Name, out indexes))
+                result.Add(new CreateTableWithIndexesOperation(table, indexes));
+            else
+                result.Add(operation);
+        }
+
+        return result;
+    }
+
+    /// <summary>A <c>CreateTable</c> and the <c>CreateIndex</c> operations folded into it.</summary>
+    private sealed class CreateTableWithIndexesOperation(CreateTableOperation table, IReadOnlyList<CreateIndexOperation> indexes)
+        : MigrationOperation
+    {
+        public CreateTableOperation Table { get; } = table;
+
+        public IReadOnlyList<CreateIndexOperation> Indexes { get; } = indexes;
+    }
+
+    protected override void Generate(MigrationOperation operation, IModel? model, MigrationCommandListBuilder builder)
+    {
+        if (operation is CreateTableWithIndexesOperation folded)
+        {
+            GenerateCreateTable(folded.Table, folded.Indexes, builder, terminate: true);
+            return;
+        }
+
+        base.Generate(operation, model, builder);
+    }
 
     protected override void Generate(
         CreateTableOperation operation,
         IModel? model,
         MigrationCommandListBuilder builder,
         bool terminate = true)
+        => GenerateCreateTable(operation, [], builder, terminate);
+
+    private void GenerateCreateTable(
+        CreateTableOperation operation,
+        IReadOnlyList<CreateIndexOperation> indexes,
+        MigrationCommandListBuilder builder,
+        bool terminate)
     {
         var helper = Dependencies.SqlGenerationHelper;
         var pkCols = operation.PrimaryKey?.Columns ?? [];
@@ -57,6 +155,31 @@ public class CamusMigrationsSqlGenerator : MigrationsSqlGenerator
             builder.AppendLine(",")
                    .Append("CONSTRAINT ").Append(helper.DelimitIdentifier(check.Name))
                    .Append(" CHECK (").Append(check.Sql).Append(")");
+        }
+
+        // An alternate key (HasAlternateKey, or the principal key of HasPrincipalKey) is a unique index
+        // on the server. A foreign key can reference only a primary key or a unique index.
+        foreach (var unique in operation.UniqueConstraints)
+        {
+            builder.AppendLine(",")
+                   .Append("UNIQUE KEY ").Append(helper.DelimitIdentifier(unique.Name))
+                   .Append(" (").Append(DelimitList(unique.Columns)).Append(")");
+        }
+
+        foreach (var index in indexes)
+        {
+            builder.AppendLine(",")
+                   .Append(index.IsUnique ? "UNIQUE KEY " : "KEY ").Append(helper.DelimitIdentifier(index.Name))
+                   .Append(" (").Append(DelimitList(index.Columns)).Append(")");
+
+            if (index[CamusAnnotationNames.IndexComment] is string indexComment)
+                builder.Append(" COMMENT ").Append(CamusCommentSyntax.Literal(indexComment, $"index '{index.Table}.{index.Name}'"));
+        }
+
+        if (ForeignKeysEnabled)
+        {
+            foreach (var foreignKey in operation.ForeignKeys)
+                builder.AppendLine(",").Append(ForeignKeyConstraint(foreignKey));
         }
 
         builder.AppendLine().Append(")");
@@ -378,11 +501,49 @@ public class CamusMigrationsSqlGenerator : MigrationsSqlGenerator
         builder.EndCommand();
     }
 
+    /// <summary>
+    /// Emits <c>ALTER TABLE t ADD CONSTRAINT name FOREIGN KEY …</c>. The server reads every existing row
+    /// of the table first: a row without a parent fails the statement with <c>CADB0304</c>, and nothing
+    /// stays behind. See <see cref="CamusForeignKeySyntax"/> for the referential actions.
+    /// </summary>
     protected override void Generate(AddForeignKeyOperation operation, IModel? model, MigrationCommandListBuilder builder, bool terminate = true)
-        => throw new NotSupportedException("CamusDB does not support foreign key constraints.");
+    {
+        if (!ForeignKeysEnabled)
+            return;
 
+        builder.Append("ALTER TABLE ").Append(Dependencies.SqlGenerationHelper.DelimitIdentifier(operation.Table))
+               .Append(" ADD ").Append(ForeignKeyConstraint(operation));
+
+        if (terminate)
+            builder.EndCommand();
+    }
+
+    // DROP CONSTRAINT finds a constraint by name across CHECK, named NOT NULL and FOREIGN KEY. It also
+    // drops the index that the server created for the constraint, if there is one.
     protected override void Generate(DropForeignKeyOperation operation, IModel? model, MigrationCommandListBuilder builder, bool terminate = true)
-        => throw new NotSupportedException("CamusDB does not support foreign key constraints.");
+    {
+        if (!ForeignKeysEnabled)
+            return;
+
+        var helper = Dependencies.SqlGenerationHelper;
+        builder.Append("ALTER TABLE ").Append(helper.DelimitIdentifier(operation.Table))
+               .Append(" DROP CONSTRAINT ").Append(helper.DelimitIdentifier(operation.Name));
+
+        if (terminate)
+            builder.EndCommand();
+    }
+
+    private static string ForeignKeyConstraint(AddForeignKeyOperation operation)
+        => CamusForeignKeySyntax.Constraint(
+            operation.Name,
+            operation.Columns,
+            operation.PrincipalTable,
+            operation.PrincipalColumns,
+            operation.OnDelete,
+            operation.OnUpdate);
+
+    private string DelimitList(IEnumerable<string> names)
+        => string.Join(", ", names.Select(n => Dependencies.SqlGenerationHelper.DelimitIdentifier(n)));
 
     protected override void Generate(AddPrimaryKeyOperation operation, IModel? model, MigrationCommandListBuilder builder, bool terminate = true)
         => throw new NotSupportedException("CamusDB does not support ADD PRIMARY KEY via migrations.");
@@ -390,11 +551,23 @@ public class CamusMigrationsSqlGenerator : MigrationsSqlGenerator
     protected override void Generate(DropPrimaryKeyOperation operation, IModel? model, MigrationCommandListBuilder builder, bool terminate = true)
         => throw new NotSupportedException("CamusDB does not support DROP PRIMARY KEY via migrations.");
 
+    // A unique constraint is a unique index on the server, so it is added and dropped as one.
     protected override void Generate(AddUniqueConstraintOperation operation, IModel? model, MigrationCommandListBuilder builder)
-        => throw new NotSupportedException("CamusDB does not support inline UNIQUE constraints; use CreateIndex with IsUnique=true instead.");
+    {
+        var helper = Dependencies.SqlGenerationHelper;
+        builder.Append("CREATE UNIQUE INDEX ").Append(helper.DelimitIdentifier(operation.Name))
+               .Append(" ON ").Append(helper.DelimitIdentifier(operation.Table))
+               .Append(" (").Append(DelimitList(operation.Columns)).Append(")");
+        builder.EndCommand();
+    }
 
     protected override void Generate(DropUniqueConstraintOperation operation, IModel? model, MigrationCommandListBuilder builder)
-        => throw new NotSupportedException("CamusDB does not support inline UNIQUE constraints.");
+    {
+        var helper = Dependencies.SqlGenerationHelper;
+        builder.Append("ALTER TABLE ").Append(helper.DelimitIdentifier(operation.Table))
+               .Append(" DROP INDEX ").Append(helper.DelimitIdentifier(operation.Name));
+        builder.EndCommand();
+    }
 
     protected override void Generate(AddCheckConstraintOperation operation, IModel? model, MigrationCommandListBuilder builder)
     {

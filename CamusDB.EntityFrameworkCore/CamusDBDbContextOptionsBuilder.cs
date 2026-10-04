@@ -44,6 +44,26 @@ public sealed class CamusDBDbContextOptionsBuilder
         return this;
     }
 
+    /// <summary>
+    /// Sets whether <c>EnsureCreated</c> and migrations create the model's relationships as
+    /// <c>FOREIGN KEY</c> constraints. The default is <see langword="true"/>.
+    ///
+    /// <para>Pass <see langword="false"/> to keep the database free of constraints, as it was before the
+    /// provider supported them: for a model with a relationship cycle of two or more tables, which the
+    /// server refuses (<c>CADB0416</c>), or for an application that deletes a parent row while its child
+    /// rows remain. EF Core still orders inserts and deletes by the relationships in either case.</para>
+    /// </summary>
+    public CamusDBDbContextOptionsBuilder UseForeignKeyConstraints(bool enabled = true)
+    {
+        var infrastructure = (IDbContextOptionsBuilderInfrastructure)OptionsBuilder;
+        var extension = (CamusDBOptionsExtension)(
+            OptionsBuilder.Options.FindExtension<CamusDBOptionsExtension>() ?? new CamusDBOptionsExtension()
+        ).WithForeignKeyConstraints(enabled);
+
+        infrastructure.AddOrUpdateExtension(extension);
+        return this;
+    }
+
     public CamusDBDbContextOptionsBuilder EnableRetryOnFailure(
         int maxRetryCount = 15,
         TimeSpan? maxRetryDelay = null,

@@ -1025,7 +1025,7 @@ Arrays are not indexable and have no inline SQL literal, so an array value can o
 
 ### Database and Table Lifecycle
 
-`EnsureCreatedAsync()` creates the database and all tables defined in the model. Both operations are idempotent — it is safe to call on a database or tables that already exist:
+`EnsureCreatedAsync()` creates the database and all tables defined in the model. Both operations are idempotent — it is safe to call on a database or tables that already exist. It creates the table of each principal before the tables that reference it, and declares each relationship as a foreign key (see [Relationships and Foreign Keys](#relationships-and-foreign-keys)):
 
 ```csharp
 await using var ctx = new AppDbContext();
@@ -1246,6 +1246,10 @@ The provider supports EF Core migrations for the following DDL operations:
 | Alter column nullability | `ALTER TABLE t ALTER COLUMN col SET NOT NULL` / `DROP NOT NULL` |
 | Add check constraint | `ALTER TABLE t ADD CONSTRAINT name CHECK (expr)` |
 | Drop check constraint | `ALTER TABLE t DROP CONSTRAINT name` |
+| Add foreign key | `ALTER TABLE t ADD CONSTRAINT name FOREIGN KEY (col) REFERENCES p (col) [ON DELETE RESTRICT]` |
+| Drop foreign key | `ALTER TABLE t DROP CONSTRAINT name` |
+| Add unique constraint (alternate key) | `CREATE UNIQUE INDEX name ON t (col1, ...)` |
+| Drop unique constraint | `ALTER TABLE t DROP INDEX name` |
 | Create index | `CREATE INDEX name ON t (col1, col2)` |
 | Create unique index | `CREATE UNIQUE INDEX name ON t (col1, col2)` |
 | Drop index | `ALTER TABLE t DROP INDEX name` |
@@ -1488,6 +1492,72 @@ running the query; **reading an unpopulated materialized view is an error, not a
 forgotten refresh cannot pass for a correct answer. `REFRESH … CONCURRENTLY` is refused — the ordinary
 form already leaves readers unblocked, and incremental refresh is not implemented.
 
+### Relationships and Foreign Keys
+
+Each relationship of the model becomes a `FOREIGN KEY` constraint in the database, both through
+migrations and through `EnsureCreated`. The server checks each constraint at the end of each statement,
+inside the statement's transaction:
+
+```csharp
+modelBuilder.Entity<Customer>()
+    .HasMany(c => c.Orders)
+    .WithOne()
+    .HasForeignKey(o => o.CustomerId);
+```
+
+```sql
+CREATE TABLE IF NOT EXISTS `Orders` (
+`Id` INT64 NOT NULL,
+`CustomerId` INT64 NOT NULL,
+PRIMARY KEY (`Id`),
+KEY `IX_Orders_CustomerId` (`CustomerId`),
+CONSTRAINT `FK_Orders_Customers_CustomerId` FOREIGN KEY (`CustomerId`) REFERENCES `Customers` (`Id`)
+)
+```
+
+- **Delete behavior.** The server runs `NO ACTION` and `RESTRICT` only. EF Core gives a required
+  relationship `DeleteBehavior.Cascade` by default, so the provider renders `Cascade`, `SetNull` and
+  `SetDefault` as `NO ACTION` in the DDL. EF Core still deletes, or sets to null, the dependents that the
+  context tracks, as it does for `ClientCascade` and `ClientSetNull`. A delete of a principal whose
+  dependents are not tracked fails with `CADB0305`. Load the dependents first, or delete them first.
+  `DeleteBehavior.Restrict` renders as `ON DELETE RESTRICT`.
+- **The index on the foreign key.** The server needs an index whose leading columns are the referencing
+  columns. In a migration, the provider moves the `IX_…` index that EF Core declares for a new table into
+  its `CREATE TABLE`, and the server uses that index. `EnsureCreated` declares no index of the model, so
+  there the server creates one of its own, named `~fk_{constraint}`.
+- **Alternate keys.** A foreign key can reference only a primary key or a unique index. An alternate key
+  (`HasAlternateKey`, or the principal key of `HasPrincipalKey`) becomes a `UNIQUE KEY` in `CREATE TABLE`,
+  and `AddUniqueConstraint` / `DropUniqueConstraint` create and drop it as a unique index.
+- **Add a foreign key to a table with rows.** `AddForeignKey` reads every existing row first. If a row
+  has no parent, the statement fails with `CADB0304` and changes nothing.
+- **Cycles.** The server refuses a cycle of foreign keys between two or more tables (`CADB0416`). A
+  self-reference is accepted. `EnsureCreated` refuses a cycle before it creates a table.
+
+A violation surfaces as a `CamusException` with one of these codes, wrapped in `DbUpdateException` under
+`SaveChanges`:
+
+| Code | Meaning |
+| --- | --- |
+| `CADB0304` | An inserted or updated child has no parent, or `AddForeignKey` found a row without a parent. |
+| `CADB0305` | A delete removes a parent key that a child row still holds. |
+| `CADB0306` | An update changes a parent key that a child row still holds. |
+| `CADB0416` | The constraint closes a cycle of two or more tables. |
+| `CADB0530` | A schema change that the constraint blocks: `DROP TABLE` or `TRUNCATE` of a referenced table, `DROP COLUMN` of a referencing or a referenced column, `DROP INDEX` of an index that the constraint uses. |
+
+To keep the database free of constraints, as before the provider supported them, turn them off. The DDL
+then has no `FOREIGN KEY`, and `AddForeignKey` / `DropForeignKey` produce no SQL. EF Core still orders
+inserts and deletes by the relationships:
+
+```csharp
+optionsBuilder.UseCamusDB(connectionString, o => o.UseForeignKeyConstraints(false));
+```
+
+A database created by an earlier version of the provider has no foreign keys, and a migration does not add
+them, because the model snapshot already holds the relationships. To add one, write
+`migrationBuilder.AddForeignKey(...)` in a migration. Before you do, delete or fix the rows that have no
+parent. To drop a foreign key that the database does not have, remove the `DropForeignKey` step from the
+migration, because `DROP CONSTRAINT` of an unknown name fails.
+
 ### Concurrency Tokens
 
 The provider supports EF Core optimistic concurrency. When a tracked entity has a concurrency token,
@@ -1537,7 +1607,7 @@ await ctx.SaveChangesAsync();                    // throws DbUpdateConcurrencyEx
 ### Provider Limitations
 
 - No computed columns.
-- No foreign key constraints.
+- Foreign keys run `NO ACTION` and `RESTRICT` only; `Cascade`, `SetNull` and `SetDefault` apply to tracked dependents only (see [Relationships and Foreign Keys](#relationships-and-foreign-keys)). No foreign-key cycle of two or more tables.
 - No `LEFT`/`OUTER JOIN` — CamusDB supports only `INNER JOIN`. `Include`/collection navigations and optional-reference joins do not translate; use an explicit inner `join` projection.
 - No `UNION`/`UNION ALL` — LINQ `Union`/`Concat` do not translate; issue separate queries.
 - `ALTER COLUMN` only supports toggling nullability (`SET`/`DROP NOT NULL`), the storage strategy (`SET STORAGE`) and the comment; changing a column's stored type requires dropping and recreating the column.
