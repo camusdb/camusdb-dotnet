@@ -244,6 +244,12 @@ public class CamusCommand : DbCommand, ICloneable
 
     private static bool IsDmlStatement(string sql) => StartsWithAny(sql, DmlPrefixes);
 
+    private static readonly string[] InsertPrefixes = ["INSERT"];
+
+    /// <summary>An <c>INSERT</c> with a RETURNING list, which a query endpoint answers with rows.</summary>
+    private static bool IsInsertReturning(string sql)
+        => StartsWithAny(sql, InsertPrefixes) && CamusSqlSyntax.HasReturningKeyword(sql);
+
     /// <summary>
     /// The statements that own their internal transaction, which the server refuses inside an explicit
     /// one with <c>CADB0538</c> (<c>StatementNotAllowedInTransaction</c>).
@@ -748,8 +754,16 @@ public class CamusCommand : DbCommand, ICloneable
     /// can reach the client before the autocommit transaction commits, a late conflict is reported while
     /// reading (as a <see cref="CamusException"/>) rather than retried. Use the buffered
     /// <see cref="ExecuteReaderAsync()"/> — or drive an explicit transaction and retry yourself — when you
-    /// need that. Streaming applies to queries; a DML statement falls back to the buffered affected-row
-    /// reader. On the gRPC transport this currently buffers server-side and replays.</para>
+    /// need that. Streaming applies to queries and to <c>INSERT … RETURNING</c>; any other DML statement
+    /// falls back to the buffered affected-row reader. On the gRPC transport this currently buffers
+    /// server-side and replays.</para>
+    ///
+    /// <para>An <c>INSERT … RETURNING</c> goes to the query endpoint, which streams its rows. The server
+    /// sends no row before the commit, so a conflict never surfaces mid-read for it. Use this method for
+    /// a RETURNING result that is too large for the buffered reader: on gRPC, the buffered reader
+    /// receives all rows in one message and the server refuses a reply over 4 MiB with
+    /// <c>CADB0550</c>. The reader reports no <see cref="CamusDataReader.RecordsAffected"/> count on this
+    /// path; count the rows instead.</para>
     /// </summary>
     public Task<CamusDataReader> ExecuteStreamReaderAsync() =>
         ExecuteStreamReaderAsync(CancellationToken.None);
@@ -757,12 +771,15 @@ public class CamusCommand : DbCommand, ICloneable
     /// <inheritdoc cref="ExecuteStreamReaderAsync()"/>
     public async Task<CamusDataReader> ExecuteStreamReaderAsync(CancellationToken cancellationToken)
     {
-        if (IsDmlStatement(CommandText))
+        bool insertReturning = IsInsertReturning(CommandText);
+        if (!insertReturning && IsDmlStatement(CommandText))
             return await ExecuteDmlAsReaderAsync(cancellationToken).ConfigureAwait(false);
 
         // A learned route still steers the send — reuse costs nothing here — but the streaming
         // endpoint's trailer carries no routing metadata, so nothing is negotiated or learned.
-        (string endpoint, _, _) = await RouteEndpointAsync(CamusRouteOpKind.Query, cancellationToken).ConfigureAwait(false);
+        // An INSERT … RETURNING reuses the route learned for the write, which is where the rows live.
+        (string endpoint, _, _) = await RouteEndpointAsync(
+            insertReturning ? CamusRouteOpKind.NonQuery : CamusRouteOpKind.Query, cancellationToken).ConfigureAwait(false);
 
         TransportSqlRequest request = new()
         {
@@ -773,6 +790,9 @@ public class CamusCommand : DbCommand, ICloneable
             TxnIdPT = transaction?.TxnIdPT,
             TxnIdCounter = transaction?.TxnIdCounter,
             StreamSlot = transaction?.StreamSlot,
+            // A read runs in a read-only snapshot with no locking mode, but an autocommit INSERT on the
+            // query endpoint begins a writable transaction that honors the same options as a non-query.
+            AutocommitOptions = insertReturning && transaction is null ? ResolveAutocommitOptions() : null,
             TimeoutSeconds = CommandTimeout,
             Prepared = await ShouldPrepareAsync(endpoint, cancellationToken).ConfigureAwait(false),
         };
@@ -822,11 +842,22 @@ public class CamusCommand : DbCommand, ICloneable
         return new CamusDataReader(result.ResultSet, LastCacheMetadata);
     }
 
+    /// <summary>
+    /// Runs a DML statement on the non-query endpoint and wraps the result in a reader. For an
+    /// <c>INSERT … RETURNING</c>, the reader holds the RETURNING rows and reports the inserted-row count
+    /// in <see cref="CamusDataReader.RecordsAffected"/>. For any other statement, the reader has no rows
+    /// and reports the affected-row count only. The server decides which shape comes back, so the
+    /// driver does not need to parse the statement for it.
+    /// </summary>
     private async Task<CamusDataReader> ExecuteDmlAsReaderAsync(CancellationToken cancellationToken)
     {
-        int affectedRows = await ExecuteNonQueryCoreAsync(cancellationToken).ConfigureAwait(false);
+        NonQueryTransportResult result =
+            await ExecuteNonQueryCoreAsync(discardReturningRows: false, cancellationToken).ConfigureAwait(false);
 
-        return new CamusDataReader(affectedRows);
+        if (result.Returning is { } returning)
+            return new CamusDataReader(CamusRowSource.Buffered(returning, result.AffectedRows));
+
+        return new CamusDataReader(result.AffectedRows);
     }
 
     /// <summary>
@@ -835,8 +866,12 @@ public class CamusCommand : DbCommand, ICloneable
     /// concurrency options for the short transaction the server begins for this statement. The
     /// endpoint, negotiation flag and post-success learning follow the same routing rules as the
     /// query path.
+    ///
+    /// <para><paramref name="discardReturningRows"/> asks the server for the count only. It has no effect
+    /// on a statement without RETURNING, so <see cref="ExecuteNonQueryAsync(CancellationToken)"/> sets it
+    /// on every statement and does not parse the SQL to find the clause.</para>
     /// </summary>
-    private async Task<int> ExecuteNonQueryCoreAsync(CancellationToken cancellationToken)
+    private async Task<NonQueryTransportResult> ExecuteNonQueryCoreAsync(bool discardReturningRows, CancellationToken cancellationToken)
     {
         (string endpoint, CamusStatementRouter? router, long observedRevision) =
             await RouteEndpointAsync(CamusRouteOpKind.NonQuery, cancellationToken).ConfigureAwait(false);
@@ -854,6 +889,7 @@ public class CamusCommand : DbCommand, ICloneable
             TimeoutSeconds = CommandTimeout,
             Prepared = await ShouldPrepareAsync(endpoint, cancellationToken).ConfigureAwait(false),
             RoutingAcceptVersion = router is not null ? CamusRoutingAdvice.AcceptVersion : 0,
+            DiscardReturningRows = discardReturningRows,
         };
 
         NonQueryTransportResult result = await builder.GetTransport().ExecuteNonQueryAsync(request, cancellationToken).ConfigureAwait(false);
@@ -861,7 +897,7 @@ public class CamusCommand : DbCommand, ICloneable
         LastRoutingAdvice = result.Routing;
         router?.Learn(request.Database, request.Sql, CamusRouteOpKind.NonQuery, result.Routing, observedRevision);
 
-        return result.AffectedRows;
+        return result;
     }
 
     /// <summary>
@@ -875,6 +911,11 @@ public class CamusCommand : DbCommand, ICloneable
     }
 
     /// <inheritdoc />
+    /// <remarks>
+    /// For an <c>INSERT … RETURNING</c>, this returns the inserted-row count and the server does not send
+    /// the rows. The server still checks the RETURNING list and the SELECT privilege that it needs. To
+    /// read the rows, use <see cref="ExecuteReaderAsync()"/> or <see cref="ExecuteScalarAsync"/>.
+    /// </remarks>
     public override async Task<int> ExecuteNonQueryAsync(CancellationToken cancellationToken)
     {
         if (IsDdlStatement(CommandText))
@@ -883,7 +924,10 @@ public class CamusCommand : DbCommand, ICloneable
             return 0;
         }
 
-        return await ExecuteNonQueryCoreAsync(cancellationToken).ConfigureAwait(false);
+        NonQueryTransportResult result =
+            await ExecuteNonQueryCoreAsync(discardReturningRows: true, cancellationToken).ConfigureAwait(false);
+
+        return result.AffectedRows;
     }
 
     /// <summary>

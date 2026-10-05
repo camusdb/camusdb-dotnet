@@ -295,7 +295,10 @@ internal sealed class GrpcTransport(CamusEndpointPool endpoints, CamusTokenProvi
 
             ObserveToken(result.Token);
 
-            return new NonQueryTransportResult(result.AffectedRows, CamusRoutingAdvice.FromProto(result.Routing));
+            return new NonQueryTransportResult(
+                result.AffectedRows,
+                CamusRoutingAdvice.FromProto(result.Routing),
+                result.ReturningSchema is { } schema ? BuildResultSet(schema, result.ReturningRows) : null);
         }
         catch (RpcException ex)
         {
@@ -774,6 +777,9 @@ internal sealed class GrpcTransport(CamusEndpointPool endpoints, CamusTokenProvi
         // Forwarded for prepared and inline requests identically — negotiation is a property of the
         // statement's execution, not of how its text traveled. Zero (the default) asks for nothing.
         wire.RoutingAcceptVersion = request.RoutingAcceptVersion;
+
+        // Set only by the non-query path: the query RPCs refuse a request that asks for no rows.
+        wire.DiscardReturningRows = request.DiscardReturningRows;
 
         return wire;
     }

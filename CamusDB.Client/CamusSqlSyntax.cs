@@ -97,6 +97,96 @@ internal static class CamusSqlSyntax
     }
 
     /// <summary>
+    /// Whether <paramref name="sql"/> contains the keyword <c>RETURNING</c> as a token: not inside a
+    /// string literal, a delimited identifier or a comment, and not as part of a longer name or a
+    /// <c>@placeholder</c>.
+    ///
+    /// <para><c>RETURNING</c> is a reserved word on the server, so a token match is the clause itself.
+    /// A column or a table called <c>returning</c> must be written with backticks, which this skips.
+    /// The scan follows the lexer rules described above: a backslash and the character after it are one
+    /// unit, and a doubled quote stays inside the literal.</para>
+    /// </summary>
+    internal static bool HasReturningKeyword(string sql)
+    {
+        const string Keyword = "RETURNING";
+
+        ReadOnlySpan<char> text = sql;
+        int i = 0;
+        while (i < text.Length)
+        {
+            char c = text[i];
+
+            if (c is '\'' or '"' or '`')
+            {
+                i = SkipDelimited(text, i, c);
+                continue;
+            }
+
+            if (c == '-' && i + 1 < text.Length && text[i + 1] == '-')
+            {
+                int end = text[i..].IndexOf('\n');
+                i = end < 0 ? text.Length : i + end + 1;
+                continue;
+            }
+
+            if (c == '/' && i + 1 < text.Length && text[i + 1] == '*')
+            {
+                int end = text[(i + 2)..].IndexOf("*/".AsSpan());
+                i = end < 0 ? text.Length : i + 2 + end + 2;
+                continue;
+            }
+
+            if (IsWordChar(c))
+            {
+                int start = i;
+                while (i < text.Length && IsWordChar(text[i]))
+                    i++;
+
+                if (text[start..i].Equals(Keyword.AsSpan(), StringComparison.OrdinalIgnoreCase))
+                    return true;
+
+                continue;
+            }
+
+            i++;
+        }
+
+        return false;
+
+        // '@', '$' and '.' join the word so that "@returning" and "t.returning" are not the keyword.
+        static bool IsWordChar(char ch) => char.IsLetterOrDigit(ch) || ch is '_' or '@' or '$' or '.';
+
+        static int SkipDelimited(ReadOnlySpan<char> text, int open, char quote)
+        {
+            int j = open + 1;
+            while (j < text.Length)
+            {
+                char ch = text[j];
+                if (ch == '\\' && quote != '`')
+                {
+                    j += 2;
+                    continue;
+                }
+
+                if (ch == quote)
+                {
+                    if (j + 1 < text.Length && text[j + 1] == quote)
+                    {
+                        j += 2;
+                        continue;
+                    }
+
+                    return j + 1;
+                }
+
+                j++;
+            }
+
+            return text.Length;
+        }
+    }
+
+    /// <summary>
     /// Checks a name that is emitted into SQL as bare text rather than as a quoted literal or a delimited
     /// identifier — today the query result cache family name, which appears both inside a
     /// <c>{cache=…}</c> hint and inside an <c>EVICT CACHE</c> literal.

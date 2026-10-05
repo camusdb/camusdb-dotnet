@@ -89,9 +89,10 @@ public static class CamusPropertyBuilderExtensions
     /// entity is added to the context.</item>
     /// </list>
     ///
-    /// <para>The value is drawn on the client because CamusDB has no <c>RETURNING</c> clause: EF cannot
-    /// read back a value that the server generated. An entity that has a value other than the CLR
-    /// default keeps it, and the sequence does not advance for it.</para>
+    /// <para>The value is drawn on the client, so the entity has it before <c>SaveChanges</c>. An entity
+    /// that has a value other than the CLR default keeps it, and the sequence does not advance for it.
+    /// For a value that the server draws at insert time, use <c>HasDefaultValueSql("nextval('…')")</c>
+    /// with <c>ValueGeneratedOnAdd()</c>: EF reads the value back with <c>INSERT … RETURNING</c>.</para>
     ///
     /// <para>A sequence value is unique, but it is not an insert order. A rolled-back transaction does
     /// not return the values it drew. See <c>docs/sequences.md</c> in the server repository.</para>

@@ -748,10 +748,14 @@ internal sealed class GrpcBatcher : IAsyncDisposable
                     resp.QueryComplete.Routing));
                 break;
             case BatchExecuteResponse.PayloadOneofCase.NonQuery:
+                // returning_schema is a message field, so "unset" (no RETURNING, or count only) and
+                // "set with no rows" (RETURNING that inserted nothing) stay distinct.
                 Complete(op, new BatchNonQueryResult(
                     resp.NonQuery.AffectedRows,
                     new BatchCausalToken(resp.NonQuery.CausalTokenN, resp.NonQuery.CausalTokenL, resp.NonQuery.CausalTokenC),
-                    resp.NonQuery.Routing));
+                    resp.NonQuery.Routing,
+                    resp.NonQuery.ReturningSchema,
+                    resp.NonQuery.ReturningRows));
                 break;
             case BatchExecuteResponse.PayloadOneofCase.StartReply:
                 Complete(op, resp.StartReply);

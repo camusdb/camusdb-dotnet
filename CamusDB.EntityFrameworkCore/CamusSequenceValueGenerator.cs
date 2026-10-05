@@ -21,10 +21,11 @@ namespace CamusDB.EntityFrameworkCore;
 /// entity is added to the context.
 /// </summary>
 /// <remarks>
-/// <para><b>Why the value is drawn on the client.</b> CamusDB has no <c>RETURNING</c> clause, so EF
-/// cannot read back a value that a column default generated on the server. The generator draws the
-/// value first and EF sends it in the <c>INSERT</c>. The entity then has its real value before
-/// <c>SaveChanges</c>, and a key that uses it can be referenced at once.</para>
+/// <para><b>Why the value is drawn on the client.</b> The generator draws the value first and EF sends
+/// it in the <c>INSERT</c>. The entity then has its real value before <c>SaveChanges</c>, and a key that
+/// uses it can be referenced at once. For a value that the server draws at insert time, configure the
+/// column with <c>HasDefaultValueSql("nextval('…')")</c> and <c>ValueGeneratedOnAdd()</c> instead: EF
+/// then reads the value back with <c>INSERT … RETURNING</c> during <c>SaveChanges</c>.</para>
 ///
 /// <para><b>Blocks.</b> With a block size of 1 (<c>UseSequence</c>), each value costs one round trip.
 /// With a block size of <c>n</c> (<c>UseHiLo</c>), the sequence has <c>INCREMENT BY n</c>. Each

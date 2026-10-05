@@ -8,6 +8,12 @@ public class CamusUpdateSqlGenerator : UpdateSqlGenerator
     public CamusUpdateSqlGenerator(UpdateSqlGeneratorDependencies dependencies)
         : base(dependencies) { }
 
+    /// <summary>
+    /// Writes <c>INSERT INTO t (…) VALUES (…)</c>. When the entity has columns that the server
+    /// generates (a column default, a sequence default from <c>UseSequence</c>, or any other
+    /// store-generated value that the entity does not set), it adds <c>RETURNING</c> with those columns.
+    /// EF then reads the stored values back into the entity, in the order of the read modifications.
+    /// </summary>
     public override ResultSetMapping AppendInsertOperation(
         StringBuilder commandStringBuilder,
         IReadOnlyModificationCommand command,
@@ -49,8 +55,12 @@ public class CamusUpdateSqlGenerator : UpdateSqlGenerator
             first = false;
         }
 
-        commandStringBuilder.AppendLine(")");
-        return ResultSetMapping.NoResults;
+        commandStringBuilder.Append(')');
+
+        bool returns = AppendReturning(commandStringBuilder, modifications);
+
+        commandStringBuilder.AppendLine();
+        return returns ? ResultSetMapping.LastInResultSet : ResultSetMapping.NoResults;
     }
 
     public override ResultSetMapping AppendUpdateOperation(
@@ -113,6 +123,26 @@ public class CamusUpdateSqlGenerator : UpdateSqlGenerator
     private static bool IsUpdateWrite(IColumnModification op) => op.IsWrite && !op.IsKey;
 
     private static bool IsKeyCondition(IColumnModification op) => op.IsKey || op.IsCondition;
+
+    /// <summary>
+    /// Appends <c> RETURNING a, b</c> for the read modifications, and returns whether it appended one.
+    /// The server has <c>RETURNING</c> on <c>INSERT</c> only, so an update never reads values back: a
+    /// row version is stamped on the client, and the model refuses computed columns.
+    /// </summary>
+    private bool AppendReturning(StringBuilder commandStringBuilder, IReadOnlyList<IColumnModification> modifications)
+    {
+        bool first = true;
+        for (int i = 0; i < modifications.Count; i++)
+        {
+            var op = modifications[i];
+            if (!op.IsRead) continue;
+            commandStringBuilder.Append(first ? " RETURNING " : ", ");
+            commandStringBuilder.Append(SqlGenerationHelper.DelimitIdentifier(op.ColumnName));
+            first = false;
+        }
+
+        return !first;
+    }
 
     private static bool Any(IReadOnlyList<IColumnModification> modifications, Func<IColumnModification, bool> predicate)
     {

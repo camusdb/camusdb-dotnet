@@ -239,7 +239,13 @@ internal sealed class RestTransport(CamusEndpointPool endpoints, CamusTokenProvi
             if (response is null)
                 throw new CamusException("CADB0000", "Empty result returned");
 
-            return new NonQueryTransportResult(response.Rows, CamusRoutingAdvice.FromResponse(response.Routing));
+            // `columns` is present only for an INSERT … RETURNING whose rows were not discarded. The rows
+            // use the positional encoding of a query response, so the query decoder reads them.
+            CamusResultSet? returning = response.Columns is { ValueKind: JsonValueKind.Array } columns
+                ? CamusResultSet.FromWire(columns, response.ReturningRows ?? default)
+                : null;
+
+            return new NonQueryTransportResult(response.Rows, CamusRoutingAdvice.FromResponse(response.Routing), returning);
         }
         catch (FlurlHttpException ex)
         {
@@ -638,6 +644,13 @@ internal sealed class RestTransport(CamusEndpointPool endpoints, CamusTokenProvi
             wire.TxnIdPT = request.TxnIdPT!.Value;
             wire.TxnIdCounter = request.TxnIdCounter!.Value;
         }
+        else if (request.AutocommitOptions is { } options)
+        {
+            // Set only for an INSERT … RETURNING: a read leaves AutocommitOptions null.
+            wire.IsolationLevel = options.IsolationLevelWire;
+            wire.TransactionMode = options.ModeWire;
+            wire.Locking = options.LockingWire;
+        }
 
         wire.RoutingAcceptVersion = request.RoutingAcceptVersion;
 
@@ -672,6 +685,7 @@ internal sealed class RestTransport(CamusEndpointPool endpoints, CamusTokenProvi
         }
 
         wire.RoutingAcceptVersion = request.RoutingAcceptVersion;
+        wire.DiscardReturningRows = request.DiscardReturningRows;
 
         return wire;
     }

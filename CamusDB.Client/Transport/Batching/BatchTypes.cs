@@ -66,7 +66,12 @@ internal sealed class BatchQueryResult(
 }
 
 /// <summary>Result of a batched NON_QUERY: affected-row count plus the trailing causal token.</summary>
-internal sealed class BatchNonQueryResult(int affectedRows, BatchCausalToken token, RoutingAdvice? routing = null)
+internal sealed class BatchNonQueryResult(
+    int affectedRows,
+    BatchCausalToken token,
+    RoutingAdvice? routing = null,
+    ResultSchema? returningSchema = null,
+    IReadOnlyList<ResultRow>? returningRows = null)
 {
     public int AffectedRows { get; } = affectedRows;
 
@@ -74,6 +79,13 @@ internal sealed class BatchNonQueryResult(int affectedRows, BatchCausalToken tok
 
     /// <inheritdoc cref="BatchQueryResult.Routing"/>
     public RoutingAdvice? Routing { get; } = routing;
+
+    /// <summary>The output columns of an <c>INSERT … RETURNING</c>, or <see langword="null"/> for a
+    /// statement without RETURNING and for a request that set <c>discard_returning_rows</c>.</summary>
+    public ResultSchema? ReturningSchema { get; } = returningSchema;
+
+    /// <summary>The RETURNING rows, aligned to <see cref="ReturningSchema"/>. Empty when the schema is null.</summary>
+    public IReadOnlyList<ResultRow> ReturningRows { get; } = returningRows ?? [];
 }
 
 /// <summary>

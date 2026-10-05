@@ -75,6 +75,14 @@ internal sealed class TransportSqlRequest
     /// </summary>
     public int RoutingAcceptVersion { get; init; }
 
+    /// <summary>
+    /// Ask the non-query endpoint for the row count only, without the rows of an
+    /// <c>INSERT … RETURNING</c>. The server still checks the RETURNING list and the SELECT privilege
+    /// it needs. A statement without RETURNING is not affected, so the ADO layer can set it on every
+    /// <c>ExecuteNonQuery</c>. The query endpoints refuse it, so only the non-query path sets it.
+    /// </summary>
+    public bool DiscardReturningRows { get; init; }
+
     public bool HasTransaction => TxnIdPT.HasValue && TxnIdCounter.HasValue;
 }
 
@@ -147,10 +155,19 @@ internal sealed class QueryTransportResult(
 /// response carried. An envelope rather than a bare <see cref="int"/> so advisory response
 /// metadata has somewhere to travel without a second channel.
 /// </summary>
-internal sealed class NonQueryTransportResult(int affectedRows, CamusRoutingAdvice? routing = null)
+internal sealed class NonQueryTransportResult(
+    int affectedRows, CamusRoutingAdvice? routing = null, CamusResultSet? returning = null)
 {
     public int AffectedRows { get; } = affectedRows;
 
     /// <inheritdoc cref="QueryTransportResult.Routing"/>
     public CamusRoutingAdvice? Routing { get; } = routing;
+
+    /// <summary>
+    /// The rows of an <c>INSERT … RETURNING</c>, one for each inserted row, in insert order. Null for a
+    /// statement without RETURNING and for a request that set
+    /// <see cref="TransportSqlRequest.DiscardReturningRows"/>. Not null, with no rows, when the statement
+    /// inserted no rows.
+    /// </summary>
+    public CamusResultSet? Returning { get; } = returning;
 }

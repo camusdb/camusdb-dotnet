@@ -561,6 +561,41 @@ int insertedRows = await insert.ExecuteNonQueryAsync();
 
 See [Data Types](#data-types) above for inserting `bytes`, `float32`, `date`, `datetime` and `array(T)` values.
 
+#### Insert … RETURNING
+
+An `INSERT` can send back values from the rows that it inserted. The values are the stored values, so they include column defaults, sequence and identity values, and coerced types. Use `ExecuteReaderAsync` to read them:
+
+```csharp
+await using CamusCommand insert = connection.CreateCamusCommand("""
+    INSERT INTO robots (id, name, year) VALUES (GEN_ID(), @name, @year)
+    RETURNING id, name, year * 2 AS doubled
+    """);
+
+insert.Parameters.Add("@name", ColumnType.String, "R2-D2");
+insert.Parameters.Add("@year", ColumnType.Integer64, 1977);
+
+await using CamusDataReader reader = await insert.ExecuteReaderAsync();
+
+while (await reader.ReadAsync())
+{
+    string id      = reader.GetString(0);
+    long   doubled = reader.GetInt64(2);
+}
+
+int insertedRows = reader.RecordsAffected; // one row for each inserted row
+```
+
+- `ExecuteScalarAsync` returns the first column of the first row, for example a generated key.
+- `ExecuteNonQueryAsync` returns the count only. The driver tells the server not to send the rows. The server still checks the RETURNING list and the `SELECT` privilege.
+- The RETURNING list accepts `*`, columns, expressions, aliases and parameters. It does not accept aggregates, subqueries or sequence functions.
+- `INSERT … RETURNING` needs the `SELECT` privilege on the table, in addition to `INSERT`.
+- `RETURNING` is a reserved word. A column or a table called `returning` needs backticks.
+- The server has no `UPDATE … RETURNING` or `DELETE … RETURNING`.
+
+`ExecuteReaderAsync` and `ExecuteScalarAsync` receive all rows in one reply. On gRPC, the server refuses a reply that is larger than 4 MiB with `CADB0550`, before the commit, so the statement stores nothing. For a large `INSERT … SELECT … RETURNING`, use `ExecuteStreamReaderAsync`. It sends the statement to the query endpoint, which streams the rows. On that path, `RecordsAffected` is `-1`, so count the rows as you read them.
+
+See `docs/insert-returning.md` in the server repository for the full rules.
+
 #### Select Rows
 
 ```csharp
@@ -1054,6 +1089,21 @@ ctx.Robots.Add(new Robot
 
 await ctx.SaveChangesAsync(); // Id is generated automatically
 ```
+
+A property that the server generates is read back after the insert with `INSERT … RETURNING`. This applies to a property with `HasDefaultValue`, a property with `HasDefaultValueSql` and `ValueGeneratedOnAdd()`, and any other store-generated property that the entity does not set:
+
+```csharp
+modelBuilder.Entity<Robot>(b =>
+{
+    b.Property(e => e.CreatedAt).HasDefaultValueSql("now()");
+    b.Property(e => e.Serial).HasDefaultValueSql("nextval('robot_serial')").ValueGeneratedOnAdd();
+});
+
+ctx.Robots.Add(robot);
+await ctx.SaveChangesAsync(); // robot.CreatedAt and robot.Serial now have the stored values
+```
+
+`UseSequence` and `UseHiLo` still draw the value on the client, when the entity is added. The entity then has its value before `SaveChanges`. Use `HasDefaultValueSql("nextval('…')")` when the server must draw the value at insert time. An update reads nothing back, because the server has no `UPDATE … RETURNING`.
 
 ### Query
 
