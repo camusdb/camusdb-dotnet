@@ -46,6 +46,28 @@ public class CamusQuerySqlGenerator : QuerySqlGenerator
         return base.VisitColumn(columnExpression);
     }
 
+    // CamusDB has no lateral join. EF writes one for a SelectMany or a join whose inner sequence refers to
+    // the outer row in a way that is not an equality key, and the server answers only with a syntax error.
+    protected override Expression VisitCrossApply(CrossApplyExpression crossApplyExpression)
+        => throw ApplyNotSupported();
+
+    protected override Expression VisitOuterApply(OuterApplyExpression outerApplyExpression)
+        => throw ApplyNotSupported();
+
+    // CamusDB has no window functions. EF writes ROW_NUMBER() for Take/Skip on a sequence that is joined
+    // per outer row: a filtered Include, a SelectMany, a per-group First.
+    protected override Expression VisitRowNumber(RowNumberExpression rowNumberExpression)
+        => throw new InvalidOperationException(
+            "CamusDB cannot translate this query: it needs ROW_NUMBER() OVER (...), and CamusDB has no window functions. " +
+            "EF Core writes it for Take/Skip/First on a per-row sequence (a filtered Include, a SelectMany, a per-group First). " +
+            "Load that sequence in a separate query and apply Take/Skip on the client.");
+
+    private static InvalidOperationException ApplyNotSupported()
+        => new(
+            "CamusDB cannot translate this query: it needs a lateral join (CROSS APPLY / OUTER APPLY), which CamusDB does not support. " +
+            "EF Core writes one when the inner sequence of a SelectMany or a join refers to the outer row outside an equality key. " +
+            "Make the correlation an equality join key, or issue separate queries.");
+
     /// <summary>
     /// ExecuteUpdate. The server's form is <c>UPDATE t SET c = v[, ...] WHERE cond</c>: no target alias,
     /// no FROM, and a mandatory WHERE. It also cannot evaluate a subquery that is correlated with the

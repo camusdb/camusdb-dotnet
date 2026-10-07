@@ -1121,7 +1121,8 @@ List<Robot> active = await ctx.Robots
 
 The provider translates a broad set of LINQ shapes to server-side SQL: `Where`, `OrderBy`/`ThenBy`,
 `Skip`/`Take`, `Distinct`, scalar aggregates (`Count`, `Sum`, `Average`, `Min`, `Max`, `Any`),
-`GroupBy` + aggregate, inner `join`s, and correlated subqueries (`Where(x => x.Items.Any(...))`).
+`GroupBy` + aggregate, joins (see [Joins](#joins)), and correlated subqueries
+(`Where(x => x.Items.Any(...))`).
 
 The following `string` members translate to CamusDB's native scalar/predicate functions and run on
 the server (rather than forcing client-side evaluation):
@@ -1194,10 +1195,53 @@ CHECK-constraint predicates, the same patterns work in `HasCheckConstraint` (e.g
 `t.HasCheckConstraint("ck_email", "email ~* '^[^@]+@[^@]+$'")`). The set-returning functions
 `regexp_matches` / `regexp_split_to_table` are not supported by the server.
 
-> **Not translatable (server limitations):** `Include`/collection navigations and left/optional joins
-> — CamusDB supports only `INNER JOIN` (no `LEFT`/`OUTER JOIN`) — and set operators (`Union`/`Concat`)
-> — CamusDB has no `UNION`. These raise a translation or SQL error; project the shape with an explicit
-> inner `join` or issue separate queries instead.
+##### Joins
+
+The provider translates every LINQ join shape to the server's `INNER`, `LEFT`, `RIGHT` and `CROSS JOIN`
+(the outer and cross forms need a server with outer-join support):
+
+| LINQ | SQL |
+| --- | --- |
+| `join … on … equals …`, `Join(...)`, a required navigation | `INNER JOIN` |
+| `Include(...)` of a collection or an optional reference, an optional navigation (`o.Customer!.Name`), `join … into g from x in g.DefaultIfEmpty()`, `LeftJoin(...)` | `LEFT JOIN` |
+| `RightJoin(...)` | `RIGHT JOIN` |
+| `from a in A from b in B` (no correlation) | `CROSS JOIN` |
+
+```csharp
+// Customers with their orders; a customer with no order gets an empty collection.
+var customers = await ctx.Customers.Include(c => c.Orders).ToListAsync();
+
+// Every customer, with null for the total of a customer that has no order.
+var rows = await ctx.Customers
+    .LeftJoin(ctx.Orders, c => (long?)c.Id, o => o.CustomerId,
+              (c, o) => new { c.Name, Total = (long?)o!.Total })
+    .ToListAsync();
+```
+
+A row that has no match on the other side of an outer join comes back with every column of that side
+NULL (a *padded* row). EF Core materializes it as a `null` entity, a `null` member of a projection, or
+no element of an `Include`d collection.
+
+`RightJoin` gets one rewrite. The relational base keeps a `Where` on its left (null-extended) operand in
+the statement's `WHERE`, which runs after the padding and removes the padded rows. The provider moves a
+filtered left operand into a derived table, so the filter runs before the join and the padded rows
+stay. The same rewrite lets the left operand be a join (`A.Join(B, …).RightJoin(C, …)`), which the server
+refuses as plain SQL.
+
+Two shapes cannot be translated, because the server has no lateral join and no window functions. The
+provider throws `InvalidOperationException` with the cause:
+
+- A `SelectMany` or join whose inner sequence refers to the outer row outside an equality key, e.g.
+  `from o in ctx.Orders.Where(o => o.Total > c.Limit + 1)`. EF Core writes `CROSS APPLY`/`OUTER APPLY`
+  for it. Make the correlation an equality key, or issue separate queries.
+- `Take`/`Skip`/`First` on a per-row sequence: a filtered `Include(c => c.Orders.OrderBy(...).Take(n))`, a
+  `SelectMany` over `c.Orders.Take(n)`, or a per-group `First()`. EF Core writes `ROW_NUMBER() OVER (...)`
+  for it. Load that sequence in a separate query and apply `Take` on the client.
+
+`FULL JOIN` has no LINQ operator, and the server does not support it.
+
+> **Not translatable (server limitations):** set operators (`Union`/`Concat`) — CamusDB has no
+> `UNION`. These raise a translation or SQL error; issue separate queries instead.
 
 #### Query Result Cache
 
@@ -1658,7 +1702,7 @@ await ctx.SaveChangesAsync();                    // throws DbUpdateConcurrencyEx
 
 - No computed columns.
 - Foreign keys run `NO ACTION` and `RESTRICT` only; `Cascade`, `SetNull` and `SetDefault` apply to tracked dependents only (see [Relationships and Foreign Keys](#relationships-and-foreign-keys)). No foreign-key cycle of two or more tables.
-- No `LEFT`/`OUTER JOIN` — CamusDB supports only `INNER JOIN`. `Include`/collection navigations and optional-reference joins do not translate; use an explicit inner `join` projection.
+- No lateral join (`CROSS APPLY`/`OUTER APPLY`) and no window functions (`ROW_NUMBER()`): a `SelectMany` correlated outside an equality key, and `Take`/`Skip` on a per-row sequence (a filtered `Include`, a per-group `First`), throw `InvalidOperationException` (see [Joins](#joins)).
 - No `UNION`/`UNION ALL` — LINQ `Union`/`Concat` do not translate; issue separate queries.
 - `ALTER COLUMN` only supports toggling nullability (`SET`/`DROP NOT NULL`), the storage strategy (`SET STORAGE`) and the comment; changing a column's stored type requires dropping and recreating the column.
 - `CHECK` conditions must be deterministic single-row predicates — no subqueries, aggregates, or volatile functions (`now()`, `gen_uuid_v4/v7()`, …); a violated check surfaces as a `CamusException` with code `CADB0303` (wrapped in `DbUpdateException` under EF Core), and a NULL operand makes the predicate pass (SQL three-valued logic).
