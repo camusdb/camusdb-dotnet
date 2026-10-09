@@ -37,6 +37,39 @@ public sealed class CamusTypeMappingSource : RelationalTypeMappingSource
         }
     }
 
+    /// <summary>
+    /// Maps a <see cref="decimal"/> property to CamusDB's <c>NUMERIC</c> column: an exact decimal with
+    /// precision 38 and scale 9. This is the default for a plain <see cref="decimal"/> property, and also
+    /// the mapping for <c>HasColumnType("numeric")</c> and <c>HasColumnType("decimal")</c>.
+    ///
+    /// <para>The server has no <c>NUMERIC(P, S)</c>, so the store type never carries a precision or a
+    /// scale, and <c>HasPrecision</c> does not change the column. A literal is the typed
+    /// <c>NUMERIC '…'</c>: a bare decimal literal in an expression is a FLOAT64 on the server, and a
+    /// comparison with a float constant cannot use an index on a NUMERIC column.</para>
+    /// </summary>
+    private sealed class CamusNumericTypeMapping : DecimalTypeMapping
+    {
+        public CamusNumericTypeMapping()
+            : base(new RelationalTypeMappingParameters(
+                new CoreTypeMappingParameters(typeof(decimal)), "numeric", StoreTypePostfix.None, System.Data.DbType.Decimal)) { }
+
+        private CamusNumericTypeMapping(RelationalTypeMappingParameters parameters) : base(parameters) { }
+
+        protected override RelationalTypeMapping Clone(RelationalTypeMappingParameters parameters)
+            => new CamusNumericTypeMapping(parameters);
+
+        protected override string GenerateNonNullSqlLiteral(object value)
+            => $"NUMERIC '{CamusNumeric.ToText(Convert.ToDecimal(value, System.Globalization.CultureInfo.InvariantCulture))}'";
+
+        protected override void ConfigureParameter(DbParameter parameter)
+        {
+            base.ConfigureParameter(parameter);
+
+            if (parameter is CamusParameter camusParameter)
+                camusParameter.ColumnType = ColumnType.Numeric;
+        }
+    }
+
     private static readonly StringTypeMapping StringMapping = new("string", DbType.String);
     private static readonly BoolTypeMapping BoolMapping = new("bool");
     private static readonly ShortTypeMapping Int16Mapping = new("int64");
@@ -44,6 +77,7 @@ public sealed class CamusTypeMappingSource : RelationalTypeMappingSource
     private static readonly LongTypeMapping Int64Mapping = new("int64");
     private static readonly FloatTypeMapping Float32Mapping = new("float32", DbType.Single);
     private static readonly DoubleTypeMapping Float64Mapping = new("float64");
+    private static readonly CamusNumericTypeMapping NumericMapping = new();
     private static readonly ByteArrayTypeMapping BytesMapping = new("bytes", DbType.Binary);
     // Date is exposed as both DateOnly (preferred) and DateTime; DateTime is exposed as DateTime/DateTimeOffset.
     private static readonly DateOnlyTypeMapping DateOnlyMapping = new("date", DbType.Date);
@@ -101,6 +135,7 @@ public sealed class CamusTypeMappingSource : RelationalTypeMappingSource
         { typeof(long), Int64Mapping },
         { typeof(float), Float32Mapping },
         { typeof(double), Float64Mapping },
+        { typeof(decimal), NumericMapping },
         { typeof(byte[]), BytesMapping },
         { typeof(DateOnly), DateOnlyMapping },
         { typeof(DateTime), DateTimeMapping },
@@ -117,6 +152,8 @@ public sealed class CamusTypeMappingSource : RelationalTypeMappingSource
         { "float64", Float64Mapping },
         { "float32", Float32Mapping },
         { "real", Float32Mapping },
+        { "numeric", NumericMapping },
+        { "decimal", NumericMapping },
         { "bytes", BytesMapping },
         { "blob", BytesMapping },
         { "id",  IdStringMapping },

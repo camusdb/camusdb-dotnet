@@ -66,6 +66,15 @@ public sealed class CamusValue : SqlMapper.ICustomQueryParameter
     /// <summary>A <c>UUID</c>.</summary>
     public static CamusValue Uuid(Guid? value) => new(ColumnType.Uuid, value);
 
+    /// <summary>A <c>NUMERIC</c> value with every digit of <paramref name="value"/>.</summary>
+    public static CamusValue Numeric(decimal? value) => new(ColumnType.Numeric, value);
+
+    /// <summary>
+    /// A <c>NUMERIC</c> value from its decimal text, for example <c>"12345678901234567890.123456789"</c>.
+    /// Use this form for a value that a <see cref="decimal"/> cannot hold. The server validates the text.
+    /// </summary>
+    public static CamusValue Numeric(string? value) => new(ColumnType.Numeric, value);
+
     /// <summary>
     /// A native <c>ARRAY(T)</c>. The element type comes from <typeparamref name="T"/>, so an empty
     /// array binds with the correct type too. A <see langword="null"/> sequence binds as <c>NULL</c>.
@@ -97,7 +106,7 @@ public sealed class CamusValue : SqlMapper.ICustomQueryParameter
     {
         Type elementType = Nullable.GetUnderlyingType(type) ?? type;
 
-        ColumnType columnType = CamusCommand.InferColumnType(elementType);
+        ColumnType columnType = CamusCommand.InferArrayElementType(elementType);
 
         if (columnType == ColumnType.Null)
             throw new NotSupportedException(

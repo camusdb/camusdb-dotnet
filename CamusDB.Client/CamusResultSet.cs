@@ -218,6 +218,9 @@ public sealed class CamusResultSet
             case ColumnType.Uuid:
                 return DecodeUuid(ref reader);
 
+            case ColumnType.Numeric:
+                return DecodeNumeric(ref reader);
+
             case ColumnType.Array:
                 return DecodeArray(ref reader);
 
@@ -228,6 +231,22 @@ public sealed class CamusResultSet
                     return DecodeUuid(ref reader);
 
                 return DecodeScalarByToken(ref reader, declared);
+        }
+    }
+
+    /// <summary>The <see cref="Utf8JsonReader"/> form of <see cref="DecodeNumeric(JsonElement)"/>.</summary>
+    private static ColumnValue DecodeNumeric(ref Utf8JsonReader reader)
+    {
+        switch (reader.TokenType)
+        {
+            case JsonTokenType.String:
+                return new ColumnValue { Type = ColumnType.Numeric, StrValue = reader.GetString() };
+
+            case JsonTokenType.Number:
+                return new ColumnValue { Type = ColumnType.Numeric, StrValue = NumberText(reader.ValueSpan) };
+
+            default:
+                return DecodeScalarByToken(ref reader, ColumnType.Numeric);
         }
     }
 
@@ -429,6 +448,9 @@ public sealed class CamusResultSet
             case ColumnType.Uuid:
                 return DecodeUuid(cell);
 
+            case ColumnType.Numeric:
+                return DecodeNumeric(cell);
+
             case ColumnType.Array:
                 return DecodeArray(cell);
 
@@ -444,6 +466,19 @@ public sealed class CamusResultSet
                 return DecodeScalarByToken(cell, declared);
         }
     }
+
+    // NUMERIC is wired as a JSON string with its canonical decimal text. A JSON number can also arrive
+    // in a NUMERIC column: for a NULL p, SELECT COALESCE(p, 0) gives the int64 0 while the column metadata
+    // says numeric. Its raw text is exact, so it becomes a NUMERIC with that text and no double.
+    private static ColumnValue DecodeNumeric(JsonElement cell) => cell.ValueKind switch
+    {
+        JsonValueKind.String => new ColumnValue { Type = ColumnType.Numeric, StrValue = cell.GetString() },
+        JsonValueKind.Number => new ColumnValue { Type = ColumnType.Numeric, StrValue = cell.GetRawText() },
+        _ => DecodeScalarByToken(cell, ColumnType.Numeric),
+    };
+
+    // A JSON number token is ASCII, so its UTF-8 bytes are its characters.
+    private static string NumberText(ReadOnlySpan<byte> utf8) => System.Text.Encoding.ASCII.GetString(utf8);
 
     // Uuid is wired as [high, low] — two big-endian 64-bit halves (see ColumnValue.AsGuid). A canonical
     // string form is accepted as a fallback.

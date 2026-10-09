@@ -371,6 +371,11 @@ public class CamusCommand : DbCommand, ICloneable
             case ColumnType.Float64 or ColumnType.Float32 when value is IConvertible cf:
                 return new() { Type = columnType, FloatValue = cf.ToDouble(CultureInfo.InvariantCulture) };
 
+            // NUMERIC travels as decimal text, so a decimal binds with every digit and never through a
+            // double. A string passes through, so a value wider than a decimal can bind exactly.
+            case ColumnType.Numeric:
+                return new() { Type = columnType, StrValue = CamusNumeric.FromParameter(name, value) };
+
             case ColumnType.Bool when value is bool b:
                 return new() { Type = columnType, BoolValue = b };
 
@@ -413,7 +418,7 @@ public class CamusCommand : DbCommand, ICloneable
             {
                 if (item is null or DBNull)
                     continue;
-                elementType = InferColumnType(item.GetType());
+                elementType = InferArrayElementType(item.GetType());
                 break;
             }
 
@@ -693,6 +698,16 @@ public class CamusCommand : DbCommand, ICloneable
         throw new CamusException("CADB0400", $"Cannot infer the type of parameter '{name}' from {type.Name}; set CamusParameter.ColumnType explicitly");
     }
 
+    /// <summary>
+    /// The element type of an array whose elements are <paramref name="type"/>. The server has no
+    /// <c>ARRAY(NUMERIC)</c>, so an array of <see cref="decimal"/> keeps its FLOAT64 elements.
+    /// </summary>
+    internal static ColumnType InferArrayElementType(Type type)
+    {
+        ColumnType columnType = InferColumnType(type);
+        return columnType == ColumnType.Numeric ? ColumnType.Float64 : columnType;
+    }
+
     internal static ColumnType InferColumnType(Type type) => type switch
     {
         _ when type == typeof(string) => ColumnType.String,
@@ -702,7 +717,8 @@ public class CamusCommand : DbCommand, ICloneable
             || type == typeof(int) || type == typeof(uint)
             || type == typeof(long) || type == typeof(ulong) => ColumnType.Integer64,
         _ when type == typeof(float) => ColumnType.Float32,
-        _ when type == typeof(double) || type == typeof(decimal) => ColumnType.Float64,
+        _ when type == typeof(double) => ColumnType.Float64,
+        _ when type == typeof(decimal) => ColumnType.Numeric,
         _ when type == typeof(DateTime) || type == typeof(DateTimeOffset) => ColumnType.DateTime,
         _ when type == typeof(DateOnly) => ColumnType.Date,
         _ when type == typeof(Guid) => ColumnType.Uuid,

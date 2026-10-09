@@ -145,7 +145,8 @@ public sealed class CamusParameter : DbParameter, ICloneable
         DbType.Boolean => ColumnType.Bool,
         DbType.Byte => ColumnType.Integer64,
         DbType.SByte => ColumnType.Integer64,
-        DbType.Decimal => ColumnType.Float64,
+        DbType.Decimal => ColumnType.Numeric,
+        DbType.VarNumeric => ColumnType.Numeric,
         DbType.Double => ColumnType.Float64,
         DbType.Guid => ColumnType.Id,
         DbType.Int16 => ColumnType.Integer64,
@@ -180,6 +181,7 @@ public sealed class CamusParameter : DbParameter, ICloneable
         ColumnType.DateTime => DbType.DateTime,
         ColumnType.Array => DbType.Object,
         ColumnType.Uuid => DbType.Guid,
+        ColumnType.Numeric => DbType.Decimal,
         ColumnType.Null => DbType.Object,
         ColumnType.String => DbType.String,
         _ => DbType.String

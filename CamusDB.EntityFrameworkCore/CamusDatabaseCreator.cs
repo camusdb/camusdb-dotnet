@@ -321,12 +321,14 @@ public class CamusDatabaseCreator : RelationalDatabaseCreator
             "INT64"                   => "INT64",
             "FLOAT64"                 => "FLOAT64",
             "FLOAT32" or "REAL"       => "FLOAT32",
+            "NUMERIC" or "DECIMAL"    => "NUMERIC",
             "BYTES" or "BLOB"         => BytesDdl(property),
             "DATE"                    => "DATE",
             "DATETIME" or "TIMESTAMP" => "DATETIME",
             _ => clrType == typeof(bool) ? "BOOL"
                 : clrType == typeof(float) ? "FLOAT32"
                 : clrType == typeof(double) ? "FLOAT64"
+                : clrType == typeof(decimal) ? "NUMERIC"
                 : clrType == typeof(int) || clrType == typeof(long) || clrType == typeof(short) ? "INT64"
                 : clrType == typeof(byte[]) ? BytesDdl(property)
                 : clrType == typeof(DateOnly) ? "DATE"

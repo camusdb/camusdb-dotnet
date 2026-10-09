@@ -697,12 +697,14 @@ public class CamusMigrationsSqlGenerator : MigrationsSqlGenerator
             "INT64"                => "INT64",
             "FLOAT64"              => "FLOAT64",
             "FLOAT32" or "REAL"    => "FLOAT32",
+            "NUMERIC" or "DECIMAL" => "NUMERIC",
             "BYTES" or "BLOB"      => BytesDdl(col),
             "DATE"                 => "DATE",
             "DATETIME" or "TIMESTAMP" => "DATETIME",
             _ => col.ClrType == typeof(bool) ? "BOOL"
                 : col.ClrType == typeof(float) ? "FLOAT32"
                 : col.ClrType == typeof(double) ? "FLOAT64"
+                : col.ClrType == typeof(decimal) ? "NUMERIC"
                 : col.ClrType == typeof(int) || col.ClrType == typeof(long) || col.ClrType == typeof(short) ? "INT64"
                 : col.ClrType == typeof(byte[]) ? BytesDdl(col)
                 : col.ClrType == typeof(DateOnly) ? "DATE"
@@ -741,6 +743,7 @@ public class CamusMigrationsSqlGenerator : MigrationsSqlGenerator
         long l           => l.ToString(CultureInfo.InvariantCulture),
         float f          => f.ToString(CultureInfo.InvariantCulture),
         double d         => d.ToString(CultureInfo.InvariantCulture),
+        decimal m        => NumericLiteral(m),
         byte[] bytes     => ToHexLiteral(bytes),
         DateOnly d       => $"'{d.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture)}'",
         DateTime dt      => $"'{ToIso(dt)}'",
@@ -761,6 +764,7 @@ public class CamusMigrationsSqlGenerator : MigrationsSqlGenerator
         long l         => l.ToString(CultureInfo.InvariantCulture),
         float f        => f.ToString(CultureInfo.InvariantCulture),
         double d       => d.ToString(CultureInfo.InvariantCulture),
+        decimal m      => NumericLiteral(m),
         byte[] bytes   => ToHexLiteral(bytes),
         DateOnly d     => $"'{d.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture)}'",
         DateTime dt    => $"'{ToIso(dt)}'",
@@ -769,6 +773,9 @@ public class CamusMigrationsSqlGenerator : MigrationsSqlGenerator
         string s       => CamusSqlSyntax.Literal(s, "a seed data value"),
         _              => CamusSqlSyntax.Literal(value.ToString() ?? "", "a seed data value")
     };
+
+    // The typed literal keeps every digit: a bare decimal literal is a FLOAT64 in an expression.
+    private static string NumericLiteral(decimal value) => $"NUMERIC '{CamusNumeric.ToText(value)}'";
 
     // SQL bytes literals are 0x-prefixed hex (the JSON path uses base64 instead).
     private static string ToHexLiteral(byte[] bytes) => "0x" + Convert.ToHexString(bytes);

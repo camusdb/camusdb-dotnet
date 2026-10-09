@@ -144,6 +144,7 @@ public class CamusDataReader : DbDataReader
         ColumnType.DateTime => typeof(DateTime),
         ColumnType.Array => typeof(object[]),
         ColumnType.Uuid => typeof(Guid),
+        ColumnType.Numeric => typeof(decimal),
         ColumnType.Null => typeof(DBNull),
         ColumnType.String => typeof(string),
         _ => typeof(object)
@@ -164,6 +165,7 @@ public class CamusDataReader : DbDataReader
         ColumnType.DateTime => new DateTime(value.LongValue, DateTimeKind.Utc),
         ColumnType.Array => ConvertArray(in value),
         ColumnType.Uuid => value.AsGuid(),
+        ColumnType.Numeric => CamusNumeric.ToDecimal(value.StrValue),
         ColumnType.Null => DBNull.Value,
         ColumnType.String => value.StrValue ?? "",
         _ => DBNull.Value
@@ -492,7 +494,21 @@ public class CamusDataReader : DbDataReader
             DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal);
     }
 
-    public override decimal GetDecimal(int ordinal) => Convert.ToDecimal(GetValue(ordinal), CultureInfo.InvariantCulture);
+    /// <summary>
+    /// Reads a NUMERIC column as a <see cref="decimal"/>. A NUMERIC holds 38 digits and a
+    /// <see cref="decimal"/> holds 28 or 29, so a value that a <see cref="decimal"/> cannot hold exactly
+    /// throws <see cref="InvalidCastException"/> and is never rounded. <see cref="GetString"/> gives its
+    /// exact text.
+    /// </summary>
+    public override decimal GetDecimal(int ordinal)
+    {
+        ref readonly ColumnValue column = ref Cell(ordinal);
+
+        if (column.Type == ColumnType.Numeric)
+            return CamusNumeric.ToDecimal(column.StrValue);
+
+        return Convert.ToDecimal(GetValue(ordinal), CultureInfo.InvariantCulture);
+    }
 
     public override double GetDouble(int ordinal)
     {
@@ -503,6 +519,7 @@ public class CamusDataReader : DbDataReader
             ColumnType.Float64 => value.FloatValue,
             ColumnType.Float32 => (float)value.FloatValue,
             ColumnType.Integer64 => value.LongValue,
+            ColumnType.Numeric => CamusNumeric.ToDouble(value.StrValue),
             _ => throw new InvalidCastException()
         };
     }
@@ -528,6 +545,17 @@ public class CamusDataReader : DbDataReader
             if (typeof(T) == typeof(double) && cell.Type == ColumnType.Float64)
                 return (T)(object)cell.FloatValue;
 
+            // The boxed value of a NUMERIC cell is a decimal, which the base method cannot unbox as a
+            // double or a long.
+            if (cell.Type == ColumnType.Numeric)
+            {
+                if (typeof(T) == typeof(double))
+                    return (T)(object)GetDouble(ordinal);
+
+                if (typeof(T) == typeof(long))
+                    return (T)(object)GetInt64(ordinal);
+            }
+
             if (typeof(T) == typeof(bool) && cell.Type == ColumnType.Bool)
                 return (T)(object)cell.BoolValue;
 
@@ -535,6 +563,9 @@ public class CamusDataReader : DbDataReader
         }
 
         Type target = typeof(T);
+
+        if (target == typeof(decimal))
+            return (T)(object)GetDecimal(ordinal);
 
         if (target == typeof(DateOnly))
             return (T)(object)DateOnly.FromDateTime(GetDateTime(ordinal));
@@ -653,6 +684,7 @@ public class CamusDataReader : DbDataReader
         {
             ColumnType.Integer64 => value.LongValue,
             ColumnType.Float64 => checked((long)value.FloatValue),
+            ColumnType.Numeric => decimal.ToInt64(CamusNumeric.ToDecimal(value.StrValue)),
             _ => throw new InvalidCastException()
         };
     }
@@ -666,6 +698,8 @@ public class CamusDataReader : DbDataReader
             ColumnType.Id => value.StrValue ?? "",
             ColumnType.String => value.StrValue ?? "",
             ColumnType.Uuid => value.UuidValue ?? value.AsGuid().ToString("D"),
+            // The exact text, also for a value wider than a decimal.
+            ColumnType.Numeric => value.StrValue ?? "",
             _ => Convert.ToString(GetValue(ordinal), CultureInfo.InvariantCulture) ?? ""
         };
     }

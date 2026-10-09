@@ -25,4 +25,11 @@ public enum ColumnType
     DateTime = 9,
     Array = 10,
     Uuid = 11,
+
+    /// <summary>
+    /// Exact fixed-point number with precision 38 and scale 9 (SQL <c>NUMERIC</c>, alias <c>DECIMAL</c>).
+    /// It travels as its decimal text in <see cref="ColumnValue.StrValue"/>, so no digit goes through a
+    /// double. See <see cref="CamusNumeric"/> for the conversions to and from <see cref="decimal"/>.
+    /// </summary>
+    Numeric = 12,
 }

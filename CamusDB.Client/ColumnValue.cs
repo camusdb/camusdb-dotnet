@@ -19,6 +19,8 @@ namespace CamusDB.Client;
 ///   <item><see cref="ColumnType.Float64"/> / <see cref="ColumnType.Float32"/> — <see cref="FloatValue"/> (narrowed to float for Float32).</item>
 ///   <item><see cref="ColumnType.Bool"/> — <see cref="BoolValue"/>.</item>
 ///   <item><see cref="ColumnType.String"/> / <see cref="ColumnType.Id"/> — <see cref="StrValue"/>.</item>
+///   <item><see cref="ColumnType.Numeric"/> — <see cref="StrValue"/> as decimal text. The server sends the
+///     canonical form (no exponent, no trailing zeros, at most 9 fraction digits).</item>
 ///   <item><see cref="ColumnType.Date"/> / <see cref="ColumnType.DateTime"/> — <see cref="LongValue"/> as UTC <see cref="System.DateTime.Ticks"/> (Date truncated to midnight).</item>
 ///   <item><see cref="ColumnType.Bytes"/> — <see cref="BytesValue"/> (JSON base64).</item>
 ///   <item><see cref="ColumnType.Array"/> — <see cref="ArrayValues"/> + <see cref="ArrayElementType"/>.</item>

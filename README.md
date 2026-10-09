@@ -406,6 +406,7 @@ CamusDB columns are declared with these SQL types; each maps to a `ColumnType` o
 | `UUID` (alias `GUID`) | `Uuid` | `Guid` | Native 128-bit UUID; indexable, ordered by big-endian byte order. `gen_uuid_v4()` / `gen_uuid_v7()` generate values server-side. |
 | `INT64` (aliases `INT`, `INTEGER`) | `Integer64` | `long`, `int`, `short`, `byte` | 64-bit signed. |
 | `FLOAT64` | `Float64` | `double` | IEEE-754 double. |
+| `NUMERIC` (alias `DECIMAL`) | `Numeric` | `decimal`, `string` | Exact decimal: 38 digits, 9 after the point. See [NUMERIC](#numeric). |
 | `FLOAT32` (alias `REAL`) | `Float32` | `float` | Stored at single precision. |
 | `BOOL` (alias `BOOLEAN`) | `Bool` | `bool` | |
 | `STRING` / `STRING(N)` | `String` | `string` | `N` bounds the length (UTF-16 code units); over-length is rejected. |
@@ -413,6 +414,35 @@ CamusDB columns are declared with these SQL types; each maps to a `ColumnType` o
 | `DATETIME` (alias `TIMESTAMP`) | `DateTime` | `DateTime`, `DateTimeOffset` | Instant; normalized to UTC and read back as `DateTimeKind.Utc`. |
 | `BYTES` (alias `BLOB`) | `Bytes` | `byte[]` | base64 over JSON, `0x`-hex in SQL literals. Default max 10 MB. |
 | `ARRAY(T)` | `Array` | any `IEnumerable` of `T` | Homogeneous scalar list; not indexable, no inline SQL literal. |
+
+##### NUMERIC
+
+`NUMERIC` (alias `DECIMAL`) is an exact decimal with precision 38 and scale 9, as Spanner's NUMERIC. Its
+range is `-99999999999999999999999999999.999999999` to `99999999999999999999999999999.999999999`. The server
+refuses `NUMERIC(P, S)`, because the precision and the scale are fixed. A NUMERIC value travels as decimal
+text on REST and on gRPC, so no digit goes through a double.
+
+- A `decimal` parameter binds as `NUMERIC` with every digit, also with no `ColumnType` set and with
+  `DbType.Decimal`. The server rounds more than 9 fraction digits half away from zero. A value past the
+  range fails with `CADB0417`.
+- A `string` parameter typed `ColumnType.Numeric` binds its text as it is. Use it for a value that a
+  `decimal` cannot hold. A `long`, an `int` or a finite `double` typed `ColumnType.Numeric` also binds.
+- `GetDecimal`, `GetValue` and `GetFieldValue<decimal>` read a NUMERIC column as a `decimal`. A `decimal`
+  holds 28 or 29 significant digits, so a wider value throws `InvalidCastException` and is never rounded.
+  `GetString` gives the exact canonical text of every value. `GetDouble` rounds to the nearest double.
+- An array of `decimal` still binds as `ARRAY(FLOAT64)`, because the server has no `ARRAY(NUMERIC)`.
+
+```csharp
+insert.Parameters.Add("price", ColumnType.Numeric, 19.99m);
+insert.Parameters.Add("total", ColumnType.Numeric, "12345678901234567890.123456789");
+
+decimal price = reader.GetDecimal(0);
+string exact = reader.GetString(1);
+```
+
+> Before this version a `decimal` parameter was sent as a `FLOAT64`. It now binds as `NUMERIC`, which
+> needs a server that supports the type. Into a `FLOAT64` column the server converts a NUMERIC value to a
+> double, and a comparison of NUMERIC with FLOAT64 compares as doubles.
 
 ```csharp
 await using CamusCommand command = connection.CreateCamusCommand("""
@@ -1037,6 +1067,7 @@ b.ToTable("robots", t => t.HasCheckConstraint("ck_robots_price", "price >= 0"));
 | `short`, `int`, `long` | `int64` | `INT64` |
 | `float` | `float32` | `FLOAT32` |
 | `double` | `float64` | `FLOAT64` |
+| `decimal` | `numeric` (alias `decimal`) | `NUMERIC` |
 | `byte[]` | `bytes` (alias `blob`) | `BYTES` |
 | `DateOnly` | `date` | `DATE` |
 | `DateTime`, `DateTimeOffset` | `datetime` (alias `timestamp`) | `DATETIME` |
@@ -1045,6 +1076,8 @@ b.ToTable("robots", t => t.HasCheckConstraint("ck_robots_price", "price >= 0"));
 Use `HasColumnType("id")` (or the alias `"oid"`) on a `string` property for primary key columns backed by CamusDB ObjectIds. The provider sends the value as an OID on the wire.
 
 A `Guid` property maps to CamusDB's native `UUID` column — indexable and ordered by big-endian byte order. No `HasColumnType` is required. A `Guid` value always travels as a UUID, because a 16-byte GUID can never be a 12-byte ObjectId, so do not declare a `Guid` property with `HasColumnType("id")`: an `OID` column refuses its values.
+
+A `decimal` property maps to the `NUMERIC` column. `HasPrecision` does not change the column, because the precision and the scale are fixed (38 and 9). A `decimal` constant in a query becomes the typed literal `NUMERIC '9.99'`, so it compares exactly and an index on the column can serve it. A bare `9.99` is a `FLOAT64` on the server.
 
 Before 0.13.3 a plain `Guid` property defaulted to the `id`/OID store type. Inserts through that mapping never worked, so such a column holds only NULLs. A migration snapshot made before 0.13.3 records `id` for such a property, and the next migration then tries to change the column type to `uuid`, which CamusDB does not support. Drop the column and add it again in that migration, or keep the old type with `HasColumnType("id")` until then.
 
@@ -1707,7 +1740,7 @@ await ctx.SaveChangesAsync();                    // throws DbUpdateConcurrencyEx
 - `ALTER COLUMN` only supports toggling nullability (`SET`/`DROP NOT NULL`), the storage strategy (`SET STORAGE`) and the comment; changing a column's stored type requires dropping and recreating the column.
 - `CHECK` conditions must be deterministic single-row predicates — no subqueries, aggregates, or volatile functions (`now()`, `gen_uuid_v4/v7()`, …); a violated check surfaces as a `CamusException` with code `CADB0303` (wrapped in `DbUpdateException` under EF Core), and a NULL operand makes the predicate pass (SQL three-valued logic).
 - `array(T)` columns map for `long[]`, `string[]`, `double[]`, and `bool[]`. They are not indexable and have no SQL literal, so an array can only be written/read as a whole value — it cannot appear in a `Where` predicate or as a default/seed value.
-- No `decimal`/exact-numeric store type — use `double` (`float64`), accepting binary floating-point rounding.
+- A `decimal` reads exactly up to 28 or 29 significant digits. A `NUMERIC` value with more digits throws `InvalidCastException` when it is materialized into a `decimal` property.
 - Key CLR types must be one of: `string`, `int`, `long`, `short`, or `Guid`.
 - `[ConcurrencyCheck]` is supported on `short`/`int`/`long`; `[Timestamp]`/`IsRowVersion()` is supported on `byte[]` (provider-managed). A stale write raises `DbUpdateConcurrencyException`.
 - Views are read-only (no writes through a view) and are not scaffolded into a model. `WithCache(...)` on a query that reads through a view is accepted but inert — the response reports `bypass` / `derived-source` and the rows come from live storage. Materialized views are writable only by `REFRESH`, and do cache.
@@ -1761,6 +1794,7 @@ Dapper types a parameter by its CLR type. The driver maps that type as the [Data
 | --- | --- |
 | `CamusValue.Id("65f1…")` | An `OID` from its hex string. Dapper sends a plain `string` as `STRING`. |
 | `CamusValue.Uuid(guid)` | A `UUID`, also when the value is `null`. |
+| `CamusValue.Numeric("123…")` | A `NUMERIC` from its decimal text, for a value that a `decimal` cannot hold. A plain `decimal` already binds as `NUMERIC`. |
 | `CamusValue.Array(values)` | One native `ARRAY(T)`. The element type comes from `T`, so an empty array works too. |
 | `CamusValue.Vector(floats)` | A float32 vector in a `BYTES` column, in the [`CamusVector`](#data-types) layout. |
 | `new CamusValue(ColumnType.X, value)` | Any column type. |
