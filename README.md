@@ -1093,7 +1093,7 @@ Arrays are not indexable and have no inline SQL literal, so an array value can o
 
 ### Database and Table Lifecycle
 
-`EnsureCreatedAsync()` creates the database and all tables defined in the model. Both operations are idempotent — it is safe to call on a database or tables that already exist. It creates the table of each principal before the tables that reference it, and declares each relationship as a foreign key (see [Relationships and Foreign Keys](#relationships-and-foreign-keys)):
+`EnsureCreatedAsync()` creates the database and all tables defined in the model. Both operations are idempotent — it is safe to call on a database or tables that already exist. It creates the database only when it does not exist, so an account without superuser rights can call it on an existing database (see [Migrating without superuser rights](#migrating-without-superuser-rights)). It creates the table of each principal before the tables that reference it, and declares each relationship as a foreign key (see [Relationships and Foreign Keys](#relationships-and-foreign-keys)):
 
 ```csharp
 await using var ctx = new AppDbContext();
@@ -1518,6 +1518,28 @@ public partial class AddStockColumn : Migration
     }
 }
 ```
+
+#### Migrating without superuser rights
+
+`MigrateAsync()` and `EnsureCreatedAsync()` first ask the server whether the database exists, with
+`SHOW DATABASE`. They send `CREATE DATABASE IF NOT EXISTS` only when the answer is `CADB0010`
+(database does not exist). `CREATE DATABASE` requires a superuser, so an account with DDL grants on
+an existing database can migrate it without one:
+
+```sql
+GRANT SELECT, INSERT, CREATE TABLE, ALTER, INDEX ON shop.* TO migrator;
+```
+
+- The account applies the pending migrations and writes `__EFMigrationsHistory`. Add `DROP`,
+  `UPDATE` or `DELETE` when a migration drops objects or changes rows.
+- Against a database that does not exist, the account fails with `CADB0517` from `CREATE DATABASE`.
+  Create the database as a superuser first.
+- Any other error from the existence check (an unreachable endpoint, an authentication failure)
+  propagates. Before 0.14.4 the provider always reported "does not exist" and tried to create the
+  database, which hid such an error.
+
+The provider takes no migration lock: CamusDB has no advisory lock. Run one migrator at a time, for
+example behind a distributed lock in your deployment.
 
 ### Views
 

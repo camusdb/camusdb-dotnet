@@ -241,12 +241,13 @@ public class TestEntityFrameworkProvider
     }
 
     [Fact]
-    public void TestDatabaseCreatorExistsAlwaysReturnsFalse()
+    public void TestDatabaseCreatorExistsIsFalseForAMissingDatabase()
     {
-        // CamusDatabaseCreator.Exists() intentionally reports false so EnsureCreated always calls the
-        // idempotent Create() (which issues CREATE DATABASE ... IF NOT EXISTS).
+        // Exists() asks the server, so a database nobody created reports false and EnsureCreated
+        // creates it. TestEntityFrameworkDatabaseExists and TestEntityFrameworkMigrateLive cover the
+        // other answers.
         var options = new DbContextOptionsBuilder<SimpleProductContext>()
-            .UseCamusDB("Endpoint=http://localhost:5095;Database=test")
+            .UseCamusDB($"Endpoint=http://localhost:5095;Database=efmissing_{Guid.NewGuid():n}")
             .Options;
 
         using var ctx = new SimpleProductContext(options);

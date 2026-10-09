@@ -23,11 +23,72 @@ public class CamusDatabaseCreator : RelationalDatabaseCreator
         _currentContext = currentContext;
     }
 
-    // Return false so EnsureCreated always calls Create(), which uses IF NOT EXISTS and is idempotent.
-    public override bool Exists() => false;
+    // Server error codes the existence probe decides on. Match on the code, never on message text.
+    private const string DatabaseDoesntExistCode = "CADB0010";
+    private const string InsufficientPrivilegeCode = "CADB0517";
+    private const string TableAlreadyExistsCode = "CADB0013";
 
-    public override Task<bool> ExistsAsync(CancellationToken cancellationToken = default)
-        => Task.FromResult(false);
+    public override bool Exists()
+        => ExistsAsync(CancellationToken.None).GetAwaiter().GetResult();
+
+    /// <summary>
+    /// Asks the server whether the connection's database exists. <c>MigrateAsync</c> and
+    /// <c>EnsureCreated</c> call <see cref="CreateAsync"/> only when this answers <c>false</c>, and
+    /// <c>CREATE DATABASE</c> is a superuser statement. So a false "no" stops an account that holds DDL
+    /// grants on an existing database from migrating it.
+    ///
+    /// <list type="bullet">
+    ///   <item>The probe succeeds: the database exists.</item>
+    ///   <item><c>CADB0010</c> (<c>DatabaseDoesntExist</c>): it does not. This is the only answer that
+    ///     leads to <see cref="CreateAsync"/>.</item>
+    ///   <item><c>CADB0517</c> (<c>InsufficientPrivilege</c>): it exists. The server resolves the name
+    ///     before it checks the privilege, so the caller is only short of <c>SELECT</c>. A "no" would
+    ///     send it to <c>CREATE DATABASE</c>, which fails with a less useful error; the migration fails
+    ///     at its first real statement instead.</item>
+    ///   <item>Any other error propagates. A transport or server fault is not evidence that the
+    ///     database is missing.</item>
+    /// </list>
+    /// </summary>
+    public override async Task<bool> ExistsAsync(CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            await ProbeDatabaseAsync(cancellationToken).ConfigureAwait(false);
+            return true;
+        }
+        catch (CamusException ex) when (ex.Code == DatabaseDoesntExistCode)
+        {
+            return false;
+        }
+        catch (CamusException ex) when (ex.Code == InsufficientPrivilegeCode)
+        {
+            return true;
+        }
+    }
+
+    /// <summary>
+    /// Runs <c>SHOW DATABASE</c> against the connection's database. The server opens the database
+    /// before anything else, so a missing one fails with <c>CADB0010</c>, and the statement needs no
+    /// privilege beyond <c>SELECT</c>. It runs in autocommit and closes the connection only when it
+    /// opened it, like <see cref="CamusHistoryRepository.ExistsAsync"/>: EF calls this inside a
+    /// suppressed <c>TransactionScope</c>.
+    /// </summary>
+    internal virtual async Task ProbeDatabaseAsync(CancellationToken cancellationToken)
+    {
+        await _connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            await using var cmd = _connection.DbConnection.CreateCamusCommand("SHOW DATABASE");
+            await using var reader = await cmd.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+
+            // Drain the one row: a streamed response can carry its error after the header.
+            while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false)) { }
+        }
+        finally
+        {
+            await _connection.CloseAsync().ConfigureAwait(false);
+        }
+    }
 
     public override void Create()
         => CreateAsync(CancellationToken.None).GetAwaiter().GetResult();
@@ -99,7 +160,7 @@ public class CamusDatabaseCreator : RelationalDatabaseCreator
     }
 
     private static bool IsTableAlreadyExistsError(CamusDB.Client.CamusException ex)
-        => ex.Message.Contains("already exists", StringComparison.OrdinalIgnoreCase);
+        => ex.Code == TableAlreadyExistsCode;
 
     /// <summary>
     /// Orders the entity types so that the table of each principal is created before the tables that
