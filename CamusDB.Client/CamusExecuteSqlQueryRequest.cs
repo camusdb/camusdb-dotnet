@@ -50,7 +50,7 @@ public sealed class CamusExecuteSqlQueryRequest
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
     public int RoutingAcceptVersion { get; set; }
 
-    /// <summary>Isolation level for the autocommit transaction of an <c>INSERT … RETURNING</c> sent to
+    /// <summary>Isolation level for the autocommit transaction of a write with a RETURNING list sent to
     /// the query endpoint. A read ignores it. Omitted from the JSON when null.</summary>
     [JsonPropertyName("isolationLevel")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]

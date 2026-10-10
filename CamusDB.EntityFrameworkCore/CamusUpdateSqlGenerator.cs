@@ -63,6 +63,11 @@ public class CamusUpdateSqlGenerator : UpdateSqlGenerator
         return returns ? ResultSetMapping.LastInResultSet : ResultSetMapping.NoResults;
     }
 
+    /// <summary>
+    /// Writes <c>UPDATE t SET … WHERE key = …</c>. When the entity has store-generated columns that the
+    /// update does not write, it adds <c>RETURNING</c> with those columns, as an insert does. The server
+    /// returns the new row, so a column that the <c>SET</c> does not name returns the value it already had.
+    /// </summary>
     public override ResultSetMapping AppendUpdateOperation(
         StringBuilder commandStringBuilder,
         IReadOnlyModificationCommand command,
@@ -95,8 +100,10 @@ public class CamusUpdateSqlGenerator : UpdateSqlGenerator
 
         AppendKeyConditions(commandStringBuilder, modifications);
 
+        bool returns = AppendReturning(commandStringBuilder, modifications);
+
         commandStringBuilder.AppendLine();
-        return ResultSetMapping.NoResults;
+        return returns ? ResultSetMapping.LastInResultSet : ResultSetMapping.NoResults;
     }
 
     public override ResultSetMapping AppendDeleteOperation(
@@ -126,8 +133,8 @@ public class CamusUpdateSqlGenerator : UpdateSqlGenerator
 
     /// <summary>
     /// Appends <c> RETURNING a, b</c> for the read modifications, and returns whether it appended one.
-    /// The server has <c>RETURNING</c> on <c>INSERT</c> only, so an update never reads values back: a
-    /// row version is stamped on the client, and the model refuses computed columns.
+    /// An update has few of them: a row version is stamped on the client, and the model refuses computed
+    /// columns. A delete has none, so it never appends one.
     /// </summary>
     private bool AppendReturning(StringBuilder commandStringBuilder, IReadOnlyList<IColumnModification> modifications)
     {

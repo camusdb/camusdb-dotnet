@@ -76,8 +76,8 @@ internal sealed class TransportSqlRequest
     public int RoutingAcceptVersion { get; init; }
 
     /// <summary>
-    /// Ask the non-query endpoint for the row count only, without the rows of an
-    /// <c>INSERT … RETURNING</c>. The server still checks the RETURNING list and the SELECT privilege
+    /// Ask the non-query endpoint for the row count only, without the rows of an <c>INSERT</c>,
+    /// <c>UPDATE</c> or <c>DELETE</c> with a RETURNING list. The server still checks the RETURNING list and the SELECT privilege
     /// it needs. A statement without RETURNING is not affected, so the ADO layer can set it on every
     /// <c>ExecuteNonQuery</c>. The query endpoints refuse it, so only the non-query path sets it.
     /// </summary>
@@ -164,10 +164,11 @@ internal sealed class NonQueryTransportResult(
     public CamusRoutingAdvice? Routing { get; } = routing;
 
     /// <summary>
-    /// The rows of an <c>INSERT … RETURNING</c>, one for each inserted row, in insert order. Null for a
-    /// statement without RETURNING and for a request that set
-    /// <see cref="TransportSqlRequest.DiscardReturningRows"/>. Not null, with no rows, when the statement
-    /// inserted no rows.
+    /// The rows of an <c>INSERT</c>, <c>UPDATE</c> or <c>DELETE</c> with a RETURNING list, one for each
+    /// written row. An <c>INSERT</c> returns them in insert order; an <c>UPDATE</c> (the new row) or a
+    /// <c>DELETE</c> (the deleted row) returns them in no defined order. Null for a statement without
+    /// RETURNING and for a request that set <see cref="TransportSqlRequest.DiscardReturningRows"/>. Not
+    /// null, with no rows, when the statement wrote no rows.
     /// </summary>
     public CamusResultSet? Returning { get; } = returning;
 }

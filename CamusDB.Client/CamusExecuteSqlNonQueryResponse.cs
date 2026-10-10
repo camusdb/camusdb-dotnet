@@ -24,7 +24,7 @@ internal sealed class CamusExecuteSqlNonQueryResponse
     [JsonPropertyName("routing")]
     public CamusRoutingMetadataResponse? Routing { get; set; }
 
-    /// <summary>The output columns of an <c>INSERT … RETURNING</c>. Absent for a statement without
+    /// <summary>The output columns of a write with a RETURNING list. Absent for a statement without
     /// RETURNING and for a request that set <c>discardReturningRows</c>.</summary>
     [JsonPropertyName("columns")]
     public JsonElement? Columns { get; set; }

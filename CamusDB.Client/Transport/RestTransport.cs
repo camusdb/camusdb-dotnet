@@ -239,7 +239,7 @@ internal sealed class RestTransport(CamusEndpointPool endpoints, CamusTokenProvi
             if (response is null)
                 throw new CamusException("CADB0000", "Empty result returned");
 
-            // `columns` is present only for an INSERT … RETURNING whose rows were not discarded. The rows
+            // `columns` is present only for a write with RETURNING whose rows were not discarded. The rows
             // use the positional encoding of a query response, so the query decoder reads them.
             CamusResultSet? returning = response.Columns is { ValueKind: JsonValueKind.Array } columns
                 ? CamusResultSet.FromWire(columns, response.ReturningRows ?? default)
@@ -646,7 +646,7 @@ internal sealed class RestTransport(CamusEndpointPool endpoints, CamusTokenProvi
         }
         else if (request.AutocommitOptions is { } options)
         {
-            // Set only for an INSERT … RETURNING: a read leaves AutocommitOptions null.
+            // Set only for a write with RETURNING: a read leaves AutocommitOptions null.
             wire.IsolationLevel = options.IsolationLevelWire;
             wire.TransactionMode = options.ModeWire;
             wire.Locking = options.LockingWire;

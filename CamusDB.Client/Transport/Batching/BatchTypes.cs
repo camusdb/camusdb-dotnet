@@ -80,7 +80,7 @@ internal sealed class BatchNonQueryResult(
     /// <inheritdoc cref="BatchQueryResult.Routing"/>
     public RoutingAdvice? Routing { get; } = routing;
 
-    /// <summary>The output columns of an <c>INSERT … RETURNING</c>, or <see langword="null"/> for a
+    /// <summary>The output columns of a write with a RETURNING list, or <see langword="null"/> for a
     /// statement without RETURNING and for a request that set <c>discard_returning_rows</c>.</summary>
     public ResultSchema? ReturningSchema { get; } = returningSchema;
 

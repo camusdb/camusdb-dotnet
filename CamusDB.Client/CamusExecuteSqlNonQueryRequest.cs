@@ -66,7 +66,7 @@ public sealed class CamusExecuteSqlNonQueryRequest
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
     public int RoutingAcceptVersion { get; set; }
 
-    /// <summary>True to receive the row count only for an <c>INSERT … RETURNING</c>. False (omitted from
+    /// <summary>True to receive the row count only for a write with a RETURNING list. False (omitted from
     /// the JSON) keeps the request shape that a server without RETURNING accepts.</summary>
     [JsonPropertyName("discardReturningRows")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
