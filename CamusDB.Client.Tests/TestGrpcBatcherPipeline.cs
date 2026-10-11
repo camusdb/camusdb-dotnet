@@ -51,7 +51,7 @@ public class TestGrpcBatcherPipeline
         Assert.True(frame.Frame, "the pipeline travelled as one frame");
         Assert.Equal(["<Start>", "select a", "update a", "<CommitIfOk>"], frame.Ops);
 
-        TxnHandle handle = Assert.IsType<TxnHandle>(tasks[0].Result);
+        TxnHandle handle = Assert.IsType<TxnHandle>(await tasks[0]);
         int startId = frame.Items[0].RequestId;
         foreach (BatchExecuteRequest item in frame.Items.Skip(1))
         {
@@ -59,9 +59,9 @@ public class TestGrpcBatcherPipeline
             Assert.Null(item.Request.TxnHandle);
         }
 
-        Assert.Equal(2, Assert.IsType<BatchQueryResult>(tasks[1].Result).Rows.Count);
-        Assert.Equal(1, Assert.IsType<BatchNonQueryResult>(tasks[2].Result).AffectedRows);
-        Assert.Equal(5, Assert.IsType<BatchCausalToken>(tasks[3].Result).L);
+        Assert.Equal(2, Assert.IsType<BatchQueryResult>(await tasks[1]).Rows.Count);
+        Assert.Equal(1, Assert.IsType<BatchNonQueryResult>(await tasks[2]).AffectedRows);
+        Assert.Equal(5, Assert.IsType<BatchCausalToken>(await tasks[3]).L);
         Assert.Equal([handle.TxnIdPt], h.Transport(0).Committed);
     }
 
@@ -72,7 +72,7 @@ public class TestGrpcBatcherPipeline
 
         Task<object?>[] first = h.Batcher.EnqueuePipeline([Start(), Query("select a")], slotIndex: 0, default);
         await Task.WhenAll(first);
-        TxnHandle handle = (TxnHandle)first[0].Result!;
+        TxnHandle handle = (TxnHandle)(await first[0])!;
 
         Task<object?>[] second = h.Batcher.EnqueuePipeline(
             [NonQuery("update a", handle), NonQuery("update b", handle), CommitIfOk(handle)], slotIndex: 0, default);
@@ -198,7 +198,7 @@ public class TestGrpcBatcherPipeline
 
         Task<object?>[] first = h.Batcher.EnqueuePipeline([Start(), Query("select a")], slotIndex: 0, default);
         await Task.WhenAll(first);
-        TxnHandle handle = (TxnHandle)first[0].Result!;
+        TxnHandle handle = (TxnHandle)(await first[0])!;
 
         // The credential renewal retires the first stream; the transaction must finish there.
         h.Credential.Token = "token-2";
