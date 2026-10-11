@@ -26,11 +26,13 @@ internal sealed class GrpcBatchTransport : IBatchTransport
 {
     private readonly AsyncDuplexStreamingCall<BatchExecuteRequest, BatchExecuteResponse> call;
 
-    private volatile bool framesAnnounced;
+    private volatile int announcedVersion;
 
     public long Id { get; }
 
-    public bool FramesAnnounced => framesAnnounced;
+    public int AnnouncedVersion => announcedVersion;
+
+    public bool FramesAnnounced => announcedVersion >= 1;
 
     /// <param name="acceptResponseFrames">
     /// Tells the server, in this stream's request metadata, that response frames may be sent on it. Off
@@ -71,8 +73,7 @@ internal sealed class GrpcBatchTransport : IBatchTransport
         {
             global::Grpc.Core.Metadata responseHeaders = await call.ResponseHeadersAsync.ConfigureAwait(false);
 
-            if (BatchFrames.Announces(responseHeaders.GetValue(BatchFrames.HeaderName)))
-                framesAnnounced = true;
+            announcedVersion = BatchFrames.AnnouncedVersion(responseHeaders.GetValue(BatchFrames.HeaderName));
         }
         catch
         {

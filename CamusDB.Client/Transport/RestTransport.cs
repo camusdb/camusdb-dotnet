@@ -219,6 +219,10 @@ internal sealed class RestTransport(CamusEndpointPool endpoints, CamusTokenProvi
     public Task<NonQueryTransportResult> ExecuteNonQueryAsync(TransportSqlRequest request, CancellationToken cancellationToken)
         => WithPreparedAsync(request, ExecuteNonQueryCoreAsync, cancellationToken);
 
+    // REST has no frame to pack a transaction into; the pipeline costs one request per step here.
+    public Task<PipelineTransportResult> ExecutePipelineAsync(TransportPipelineRequest request, CancellationToken cancellationToken)
+        => SequentialPipeline.RunAsync(this, request, cancellationToken);
+
     private async Task<NonQueryTransportResult> ExecuteNonQueryCoreAsync(
         TransportSqlRequest request, PreparedBinding? binding, CancellationToken cancellationToken)
     {

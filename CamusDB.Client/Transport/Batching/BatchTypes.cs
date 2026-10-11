@@ -88,6 +88,23 @@ internal sealed class BatchNonQueryResult(
     public IReadOnlyList<ResultRow> ReturningRows { get; } = returningRows ?? [];
 }
 
+/// <summary>One op of a pipeline handed to <see cref="GrpcBatcher.EnqueuePipeline"/>, before the batcher
+/// assigns it a request id. <paramref name="ExpectedTransportId"/> is the stream a prepared execution's
+/// handle lives on, as for a lone op.</summary>
+internal readonly record struct PipelineOp(BatchStatementKind Kind, SqlRequest Request, long? ExpectedTransportId = null);
+
+/// <summary>
+/// Raised on every op of a pipeline that the batcher refused to write as one frame — because the stream's
+/// server announced a contract version below <see cref="BatchFrames.PipelineVersion"/>, frames are off,
+/// or the pipeline does not fit one frame — before any of it was written. Nothing ran, so the caller can
+/// run the same ops one exchange at a time, which is exactly what the pipeline replaces.
+/// </summary>
+internal sealed class PipelineUnsupportedException(string reason)
+    : InvalidOperationException("The pipeline cannot be written as one frame on this stream: " + reason)
+{
+    public string Reason { get; } = reason;
+}
+
 /// <summary>
 /// Tunables for the batcher. Defaults mirror the server's <c>CamusDB.Grpc.Client</c> (itself modeled on
 /// Kahuna). <see cref="ChannelPoolSize"/> bounds how many long-lived <c>BatchExecute</c> streams exist

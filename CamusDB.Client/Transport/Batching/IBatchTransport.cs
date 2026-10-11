@@ -23,12 +23,16 @@ internal interface IBatchTransport : IAsyncDisposable
     long Id { get; }
 
     /// <summary>
-    /// True once this stream's server has announced that it reads request frames (see
-    /// <see cref="BatchFrames"/>). Never blocks and never goes back to false; false until the announcement
-    /// arrives, and for good against a server that makes none. It is per stream, so a rebuilt or rotated
-    /// stream negotiates again by itself. The default is what a server built before frames looks like.
+    /// The frame contract version this stream's server announced (see <see cref="BatchFrames"/>), or 0
+    /// while it announced nothing — and for good against a server that never does. Never blocks and
+    /// never goes down. It is per stream, so a rebuilt or rotated stream negotiates again by itself. The
+    /// default is what a server built before frames looks like. Version 1 lets the batcher write frames;
+    /// <see cref="BatchFrames.PipelineVersion"/> lets it write a whole transaction as one.
     /// </summary>
-    bool FramesAnnounced => false;
+    int AnnouncedVersion => 0;
+
+    /// <summary>True once this stream's server has announced that it reads request frames.</summary>
+    bool FramesAnnounced => AnnouncedVersion >= 1;
 
     /// <summary>Writes one message — a single op, or a frame of ops — onto the stream. The message may be
     /// reused by the caller as soon as the returned task completes, so an implementation that keeps it

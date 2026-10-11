@@ -231,7 +231,7 @@ public sealed class CamusConnection : DbConnection
         CamusTransactionOptions effective = ResolveTransactionOptions(options);
         CamusStatementRouter? router = builder.Router;
 
-        if (router is null)
+        if (router is null && !effective.DeferBegin)
         {
             // Routing off: the pre-routing behavior, byte for byte — BEGIN on rotation, right now.
             string endpoint = builder.GetEndpoint();
@@ -250,7 +250,7 @@ public sealed class CamusConnection : DbConnection
 
         // An explicit affinity starts the transaction here, on the named statement's learned endpoint
         // (rotation when cold). Without one, the first statement chooses.
-        if (effective.Affinity is string affinity)
+        if (router is not null && effective.Affinity is string affinity)
         {
             string? learned = router.SelectEndpoint(database, affinity, CamusRouteOpKind.Query, out _);
             await deferred.EnsureStartedAsync(learned, cancellationToken).ConfigureAwait(false);

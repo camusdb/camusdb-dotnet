@@ -310,6 +310,261 @@ internal sealed class GrpcTransport(CamusEndpointPool endpoints, CamusTokenProvi
         }
     }
 
+    // ─── Pipelines ──────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Sends a whole pipeline as one stream message: the <c>START</c> its statements name by
+    /// <c>txn_start_ref</c>, the statements, and a <c>COMMIT_IF_OK</c>. One exchange, answered op by op.
+    ///
+    /// <para>The batcher decides, per stream and at the moment of writing, whether the pipeline may be
+    /// written as one frame (the stream's server must have announced the pipeline contract, frames must
+    /// be on, and the pipeline must fit one frame). When it may not, every op faults with
+    /// <see cref="PipelineUnsupportedException"/> before anything was written, and the same request runs
+    /// here one exchange per step instead — the pre-pipeline behavior, byte for byte.</para>
+    ///
+    /// <para>Prepared executions follow the lone-op rules (<see cref="ExecuteBatchedAsync"/>): a
+    /// registration found stale before the write is forgotten and the pipeline is retried once prepared,
+    /// then inline; a transaction finishing on a rotated-out stream runs inline from the start. A stale
+    /// handle the server reports after the pipeline began (<c>CADB0520</c>) is a statement failure like
+    /// any other, because the transaction it began is gone with it; the caller retries from
+    /// <c>BEGIN</c>, as it would for a conflict.</para>
+    /// </summary>
+    public async Task<PipelineTransportResult> ExecutePipelineAsync(TransportPipelineRequest request, CancellationToken cancellationToken)
+    {
+        await EnsureTokenAsync(cancellationToken).ConfigureAwait(false);
+
+        GrpcBatcher batcher = GetBatcher(request.Endpoint);
+        int slot = request.StreamSlot ?? batcher.ReserveSlot();
+
+        bool mayPrepare = !(request.TxnIdPT is long pt && request.TxnIdCounter is uint counter && batcher.IsBoundToRetiredStream(pt, counter));
+
+        (CancellationToken token, CancellationTokenSource? cts) = WithTimeout(request.TimeoutSeconds, cancellationToken);
+        try
+        {
+            for (int attempt = 0; ; attempt++)
+            {
+                bool prepared = mayPrepare && attempt < 2;
+                (List<PipelineOp> ops, PreparedSlotEntry?[] entries) =
+                    await BuildPipelineOpsAsync(batcher, slot, request, prepared, token).ConfigureAwait(false);
+
+                Task<object?>[] tasks = batcher.EnqueuePipeline(ops, slot, token);
+
+                try
+                {
+                    await Task.WhenAll(tasks).ConfigureAwait(false);
+                }
+                catch
+                {
+                    // Each task is read on its own below.
+                }
+
+                bool unsupported = false, stale = false, cancelled = false;
+                foreach (Task<object?> task in tasks)
+                {
+                    if (task.IsCanceled)
+                        cancelled = true;
+                    else if (task.Exception?.InnerException is PipelineUnsupportedException)
+                        unsupported = true;
+                    else if (task.Exception?.InnerException is PreparedStatementStaleException)
+                        stale = true;
+                }
+
+                if (cancelled)
+                    throw new OperationCanceledException(token);
+
+                // Nothing was written in either case, so the same request can be sent again.
+                if (unsupported)
+                    return await SequentialPipeline.RunAsync(this, request, cancellationToken).ConfigureAwait(false);
+
+                if (stale && attempt < 2)
+                {
+                    for (int i = 0; i < entries.Length; i++)
+                    {
+                        if (entries[i] is { } entry)
+                            batcher.InvalidatePrepared(slot, request.Database, request.Statements[i].Sql, entry);
+                    }
+                    continue;
+                }
+
+                return AssemblePipelineResult(request, tasks, slot);
+            }
+        }
+        catch (RpcException ex)
+        {
+            throw Translate(request.Endpoint, ex);
+        }
+        finally
+        {
+            cts?.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// The wire ops of a pipeline, in order, plus the prepared registration each statement used (null
+    /// for an inline one) so a stale one can be forgotten. A registration that cannot be obtained makes
+    /// that statement run inline, as for a lone op: preparing is an optimization.
+    /// </summary>
+    private async Task<(List<PipelineOp> Ops, PreparedSlotEntry?[] Entries)> BuildPipelineOpsAsync(
+        GrpcBatcher batcher, int slot, TransportPipelineRequest request, bool prepared, CancellationToken token)
+    {
+        List<PipelineOp> ops = new(request.Statements.Count + 2);
+        PreparedSlotEntry?[] entries = new PreparedSlotEntry?[request.Statements.Count];
+
+        if (request.Start is { } options)
+        {
+            ops.Add(new PipelineOp(BatchStatementKind.Start, new SqlRequest
+            {
+                Database = request.Database,
+                IsolationLevel = ToGrpcIsolation(options.IsolationLevel),
+                TransactionMode = ToGrpcMode(options.Mode),
+                Locking = ToGrpcLocking(options.Locking),
+            }));
+        }
+
+        for (int i = 0; i < request.Statements.Count; i++)
+        {
+            TransportPipelineStatement statement = request.Statements[i];
+            TransportSqlRequest sql = new()
+            {
+                Endpoint = request.Endpoint,
+                Database = request.Database,
+                Sql = statement.Sql,
+                Parameters = statement.Parameters,
+                TxnIdPT = request.TxnIdPT,
+                TxnIdCounter = request.TxnIdCounter,
+                StreamSlot = slot,
+                TimeoutSeconds = request.TimeoutSeconds,
+                Prepared = statement.Prepared,
+                DiscardReturningRows = statement.DiscardReturningRows,
+            };
+            BatchStatementKind kind = statement.Kind == PipelineStatementKind.Query ? BatchStatementKind.Query : BatchStatementKind.NonQuery;
+
+            if (prepared && statement.Prepared)
+            {
+                try
+                {
+                    PreparedSlotEntry entry = await batcher.EnsurePreparedAsync(slot, request.Database, statement.Sql, token).ConfigureAwait(false);
+                    entries[i] = entry;
+                    ops.Add(new PipelineOp(kind, BuildPreparedSqlRequest(sql, entry), entry.TransportId));
+                    continue;
+                }
+                catch (Exception ex) when (ex is CamusException or RpcException)
+                {
+                    // Runs inline instead, as a lone statement would.
+                }
+            }
+
+            ops.Add(new PipelineOp(kind, BuildSqlRequest(sql)));
+        }
+
+        if (request.Commit)
+        {
+            SqlRequest commit = new() { Database = request.Database };
+            if (request.HasTransaction)
+                commit.TxnHandle = BuildHandle(request.TxnIdPT!.Value, request.TxnIdCounter!.Value);
+            ops.Add(new PipelineOp(BatchStatementKind.CommitIfOk, commit));
+        }
+
+        return (ops, entries);
+    }
+
+    /// <summary>Reads one answered pipeline, op by op, into the transport-neutral result.</summary>
+    private PipelineTransportResult AssemblePipelineResult(TransportPipelineRequest request, Task<object?>[] tasks, int slot)
+    {
+        int next = 0;
+        StartTransactionResult? started = null;
+        Exception? startFailure = null;
+
+        if (request.Start is not null)
+        {
+            Task<object?> start = tasks[next++];
+            if (start.IsCompletedSuccessfully && start.Result is TxnHandle handle)
+            {
+                ObserveToken(handle.CausalTokenN, handle.CausalTokenL, handle.CausalTokenC);
+                started = new StartTransactionResult(handle.TxnIdPt, handle.TxnIdCounter, slot);
+            }
+            else
+            {
+                startFailure = FailureOf(request.Endpoint, start);
+
+                // Thrown, not reported, so the authenticating wrapper can renew the token and replay:
+                // a START refused for its token ran nothing, and neither did the ops that named it.
+                if (startFailure is CamusException { Code: Auth.CamusAuthErrorCodes.AuthenticationFailed })
+                    throw startFailure;
+            }
+        }
+
+        PipelineStatementOutcome[] outcomes = new PipelineStatementOutcome[request.Statements.Count];
+        for (int i = 0; i < outcomes.Length; i++)
+        {
+            Task<object?> task = tasks[next++];
+            if (!task.IsCompletedSuccessfully)
+            {
+                outcomes[i] = PipelineStatementOutcome.Failed(FailureOf(request.Endpoint, task));
+                continue;
+            }
+
+            switch (task.Result)
+            {
+                case BatchQueryResult query:
+                    ObserveToken(query.Token);
+                    outcomes[i] = new PipelineStatementOutcome
+                    {
+                        Query = new QueryTransportResult(
+                            BuildResultSet(query.Schema, query.Rows),
+                            CamusCacheMetadata.FromProto(query.CacheMetadata),
+                            CamusRoutingAdvice.FromProto(query.Routing)),
+                    };
+                    break;
+                case BatchNonQueryResult nonQuery:
+                    ObserveToken(nonQuery.Token);
+                    outcomes[i] = new PipelineStatementOutcome
+                    {
+                        NonQuery = new NonQueryTransportResult(
+                            nonQuery.AffectedRows,
+                            CamusRoutingAdvice.FromProto(nonQuery.Routing),
+                            nonQuery.ReturningSchema is { } schema ? BuildResultSet(schema, nonQuery.ReturningRows) : null),
+                    };
+                    break;
+                default:
+                    outcomes[i] = PipelineStatementOutcome.Failed(new CamusException("CADB0000", "Unexpected pipeline answer"));
+                    break;
+            }
+        }
+
+        bool committed = false;
+        Exception? commitFailure = null;
+        if (request.Commit)
+        {
+            Task<object?> commit = tasks[next];
+            if (commit.IsCompletedSuccessfully && commit.Result is BatchCausalToken token)
+            {
+                ObserveToken(token);
+                committed = true;
+            }
+            else
+            {
+                commitFailure = FailureOf(request.Endpoint, commit);
+            }
+        }
+
+        return new PipelineTransportResult
+        {
+            Started = started,
+            StartFailure = startFailure,
+            Statements = outcomes,
+            Committed = committed,
+            CommitFailure = commitFailure,
+            Exchanges = 1,
+        };
+    }
+
+    private Exception FailureOf(string endpoint, Task<object?> task)
+    {
+        Exception failure = task.Exception?.InnerException ?? new CamusException("CADB0000", "The op was not answered");
+        return failure is RpcException rpc ? Translate(endpoint, rpc) : failure;
+    }
+
     // ─── Prepared statements ────────────────────────────────────────────────────
 
     /// <summary>

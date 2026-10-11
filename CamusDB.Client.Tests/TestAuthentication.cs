@@ -481,6 +481,9 @@ public class TestAuthentication
 
         public CamusProtocol Protocol => CamusProtocol.Rest;
 
+        public Task<PipelineTransportResult> ExecutePipelineAsync(TransportPipelineRequest request, CancellationToken cancellationToken)
+            => SequentialPipeline.RunAsync(this, request, cancellationToken);
+
         public Task<NonQueryTransportResult> ExecuteNonQueryAsync(TransportSqlRequest request, CancellationToken cancellationToken)
         {
             Calls++;

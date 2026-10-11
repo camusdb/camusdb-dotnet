@@ -172,3 +172,125 @@ internal sealed class NonQueryTransportResult(
     /// </summary>
     public CamusResultSet? Returning { get; } = returning;
 }
+
+/// <summary>What one pipelined statement produces: a result set, or an affected-row count.</summary>
+internal enum PipelineStatementKind
+{
+    Query,
+    NonQuery,
+}
+
+/// <summary>
+/// One statement of a <see cref="TransportPipelineRequest"/>. The transaction it joins is the
+/// pipeline's, so it carries no handle of its own; everything else is what a
+/// <see cref="TransportSqlRequest"/> carries for a statement inside a transaction.
+/// </summary>
+internal sealed class TransportPipelineStatement
+{
+    public required PipelineStatementKind Kind { get; init; }
+
+    public required string Sql { get; init; }
+
+    public IReadOnlyDictionary<string, ColumnValue>? Parameters { get; init; }
+
+    /// <inheritdoc cref="TransportSqlRequest.Prepared"/>
+    public bool Prepared { get; init; }
+
+    /// <inheritdoc cref="TransportSqlRequest.DiscardReturningRows"/>
+    public bool DiscardReturningRows { get; init; }
+}
+
+/// <summary>
+/// Several statements of one transaction handed to an <see cref="ICamusTransport"/> together, to be
+/// answered together: optionally the transaction's <c>BEGIN</c> first, then the statements in order,
+/// then optionally a commit that happens only if every statement succeeded. A transport that can send
+/// the whole request as one exchange does (gRPC, to a server that reads the pipeline contract); any
+/// other runs it one exchange per step with the same outcome shape, so the caller never has to know.
+/// </summary>
+internal sealed class TransportPipelineRequest
+{
+    public required string Endpoint { get; init; }
+
+    public required string Database { get; init; }
+
+    /// <summary>The options of the transaction to begin as the pipeline's first step, or null when the
+    /// transaction identified by <see cref="TxnIdPT"/> / <see cref="TxnIdCounter"/> is already begun.</summary>
+    public CamusTransactionOptions? Start { get; init; }
+
+    /// <summary>The transaction every statement joins, when it is begun already; see <see cref="Start"/>.</summary>
+    public long? TxnIdPT { get; init; }
+
+    public uint? TxnIdCounter { get; init; }
+
+    /// <inheritdoc cref="TransportSqlRequest.StreamSlot"/>
+    public int? StreamSlot { get; init; }
+
+    public required IReadOnlyList<TransportPipelineStatement> Statements { get; init; }
+
+    /// <summary>Commit the transaction after the statements — only if every one of them succeeded.</summary>
+    public bool Commit { get; init; }
+
+    public int TimeoutSeconds { get; init; }
+
+    public bool HasTransaction => TxnIdPT.HasValue && TxnIdCounter.HasValue;
+}
+
+/// <summary>The outcome of one pipelined statement: exactly one of the three is set.</summary>
+internal sealed class PipelineStatementOutcome
+{
+    public QueryTransportResult? Query { get; init; }
+
+    public NonQueryTransportResult? NonQuery { get; init; }
+
+    public Exception? Failure { get; init; }
+
+    public static PipelineStatementOutcome Failed(Exception failure) => new() { Failure = failure };
+}
+
+/// <summary>
+/// What a <see cref="TransportPipelineRequest"/> came back with, step by step. A failed step is reported
+/// here rather than thrown, because the steps after it were still answered (by the server, or by the
+/// transport on its behalf) and the caller owns one result per statement. Only a failure of the whole
+/// call — cancellation, a timeout, a transport fault before anything was sent — is thrown.
+/// </summary>
+internal sealed class PipelineTransportResult
+{
+    /// <summary>The transaction the pipeline began, when <see cref="TransportPipelineRequest.Start"/> was
+    /// set and the <c>BEGIN</c> succeeded.</summary>
+    public StartTransactionResult? Started { get; init; }
+
+    /// <summary>Why the <c>BEGIN</c> failed. Every statement and the commit then carry the same failure,
+    /// and nothing ran.</summary>
+    public Exception? StartFailure { get; init; }
+
+    public required IReadOnlyList<PipelineStatementOutcome> Statements { get; init; }
+
+    /// <summary>True when the pipeline asked for a commit and the transaction committed.</summary>
+    public bool Committed { get; init; }
+
+    /// <summary>Why the commit did not happen: the first failed step, or the commit's own failure.
+    /// Null when no commit was asked for, or it succeeded.</summary>
+    public Exception? CommitFailure { get; init; }
+
+    /// <summary>Stream messages (gRPC) or HTTP round trips this pipeline cost — the number the
+    /// pipeline exists to lower.</summary>
+    public int Exchanges { get; init; }
+
+    /// <summary>The first thing that went wrong, in step order, or null.</summary>
+    public Exception? FirstFailure
+    {
+        get
+        {
+            if (StartFailure is not null)
+                return StartFailure;
+
+            foreach (PipelineStatementOutcome outcome in Statements)
+            {
+                if (outcome.Failure is not null)
+                    return outcome.Failure;
+            }
+
+            return CommitFailure;
+        }
+    }
+}

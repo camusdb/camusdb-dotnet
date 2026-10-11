@@ -62,7 +62,7 @@ public class CamusCommand : DbCommand, ICloneable
     /// through this command, or <see langword="null"/> if that query carried no <c>{cache=…}</c> hint
     /// (or no reader query has run yet). Also available on <see cref="CamusDataReader.CacheMetadata"/>.
     /// </summary>
-    public CamusCacheMetadata? LastCacheMetadata { get; private set; }
+    public CamusCacheMetadata? LastCacheMetadata { get; internal set; }
 
     /// <summary>
     /// Routing advice reported by the server for the most recent query or non-query executed through
@@ -855,6 +855,35 @@ public class CamusCommand : DbCommand, ICloneable
         router?.Learn(request.Database, request.Sql, CamusRouteOpKind.Query, result.Routing, observedRevision);
 
         return new CamusDataReader(result.ResultSet, LastCacheMetadata);
+    }
+
+    /// <summary>
+    /// What this command contributes to a <see cref="CamusPipeline"/>: the same statement, parameters
+    /// and prepare decision a lone execution would send, without sending it. <paramref name="asReader"/>
+    /// selects the reader shape: a <c>SELECT</c> runs as a query, a DML statement as a non-query whose
+    /// RETURNING rows (if any) are kept; a count-only execution discards them, as
+    /// <see cref="ExecuteNonQueryAsync(CancellationToken)"/> does.
+    /// </summary>
+    internal async ValueTask<TransportPipelineStatement> BuildPipelineStatementAsync(bool asReader, string endpoint, CancellationToken cancellationToken)
+    {
+        if (CommandType != CommandType.Text)
+            throw new NotSupportedException("Only a text command can be pipelined.");
+        if (IsDdlStatement(CommandText))
+            throw new InvalidOperationException("A DDL statement cannot be pipelined: it does not run inside the transaction.");
+        if (RunsInOwnTransaction(CommandText))
+            throw new InvalidOperationException("This statement runs in its own transaction and cannot be pipelined.");
+
+        bool dml = IsDmlStatement(CommandText);
+        PipelineStatementKind kind = asReader && !dml ? PipelineStatementKind.Query : PipelineStatementKind.NonQuery;
+
+        return new TransportPipelineStatement
+        {
+            Kind = kind,
+            Sql = GetRequestTarget(),
+            Parameters = GetCommandParameters(builder.GetTransport().Protocol),
+            Prepared = await ShouldPrepareAsync(endpoint, cancellationToken).ConfigureAwait(false),
+            DiscardReturningRows = kind == PipelineStatementKind.NonQuery && !asReader,
+        };
     }
 
     /// <summary>

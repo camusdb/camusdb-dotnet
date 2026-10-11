@@ -35,6 +35,13 @@ namespace CamusDB.Client.Transport.Batching;
 /// ops already in the inbox are packed, and a lone op is the plain single message it always was. It is
 /// a transport optimization only, with no atomicity and no ordering the stream does not already give.</para>
 ///
+/// <para><b>A whole transaction can travel as one frame.</b> <see cref="EnqueuePipeline"/> takes the ops of
+/// one transaction — a START its followers name instead of a handle, statements, a conditional commit —
+/// and places them on the inbox together, so they are written as one frame or not at all. The two
+/// items that make this possible are contract version 2, so a stream whose server announced less
+/// gets none of them: the pipeline faults before any byte is written and the caller runs the same
+/// ops one exchange at a time.</para>
+///
 /// <para><b>A stream is rotated when the credential it opened with is superseded.</b> A stream presents
 /// its bearer token once, in its opening metadata, and then outlives it: the provider renews the token
 /// every few minutes, the stream is meant to last a session. Whether the server tolerates that is the
@@ -125,6 +132,79 @@ internal sealed class GrpcBatcher : IAsyncDisposable
 
     public async Task EnqueueRollbackAsync(SqlRequest request, int slotIndex, CancellationToken ct)
         => await EnqueueAsync<object?>(BatchStatementKind.Rollback, request, slotIndex, ct).ConfigureAwait(false);
+
+    /// <summary>
+    /// Enqueues the ops of one transaction so that they travel as <b>one</b> frame, in the order given:
+    /// an optional START at the head, which every later op names by <c>txn_start_ref</c> instead of a
+    /// handle that does not exist yet; statements; and an optional COMMIT_IF_OK at the end. Returns one
+    /// task per op, completed by that op's own answer — a <see cref="TxnHandle"/>, a
+    /// <see cref="BatchQueryResult"/>, a <see cref="BatchNonQueryResult"/>, a <see cref="BatchCausalToken"/>
+    /// — or faulted with its own error, as a lone op's is.
+    ///
+    /// <para>The ops are placed on the slot's inbox together, so no other op of the same transaction can
+    /// come between them, and they are written together or not at all: a START named by its followers
+    /// and a COMMIT_IF_OK are contract version 2, so on a stream whose server announced less — or with
+    /// frames off, or when the pipeline does not fit one frame — nothing is written and every task faults
+    /// with <see cref="PipelineUnsupportedException"/> before any byte left, so the caller can run the
+    /// same ops one exchange at a time. A pipeline of plain statements on a known handle, with neither
+    /// item, needs no version and is staged as those ops would be alone, still in order.</para>
+    ///
+    /// <para>One cancellation token covers the whole pipeline. A pipeline with a cancelled member is
+    /// left out whole: writing the rest could commit a transaction that is missing one of its
+    /// statements.</para>
+    /// </summary>
+    public Task<object?>[] EnqueuePipeline(IReadOnlyList<PipelineOp> ops, int slotIndex, CancellationToken ct)
+    {
+        if (ops.Count == 0)
+            return [];
+
+        QueuedItem[] items = new QueuedItem[ops.Count];
+        Task<object?>[] tasks = new Task<object?>[ops.Count];
+        PendingOp? start = null;
+        bool conditionalCommit = false;
+        PipelineGroup group = new(items);
+
+        for (int i = 0; i < ops.Count; i++)
+        {
+            PipelineOp source = ops[i];
+            int id = Interlocked.Increment(ref requestIdSeq);
+            PendingOp op = new(id, source.Kind, HandleKey(source.Request.TxnHandle)) { Owner = this };
+            BatchExecuteRequest wire = new() { RequestId = id, Kind = source.Kind, Request = source.Request };
+
+            if (i == 0 && source.Kind == BatchStatementKind.Start)
+            {
+                start = op;
+            }
+            else if (start is not null)
+            {
+                // Named by request id: the handle is minted by the START, after this is written.
+                op.StartRef = start;
+                wire.TxnStartRef = start.RequestId;
+            }
+
+            conditionalCommit |= source.Kind == BatchStatementKind.CommitIfOk;
+
+            if (ct.CanBeCanceled)
+                op.Registration = ct.Register(static state =>
+                {
+                    PendingOp o = (PendingOp)state!;
+                    o.Owner!.Fault(o, new OperationCanceledException());
+                }, op);
+
+            pending[id] = op;
+            items[i] = new QueuedItem(wire, op, source.ExpectedTransportId, group);
+            tasks[i] = op.Promise.Task;
+        }
+
+        // A lone START, or a lone COMMIT_IF_OK-less run of statements by handle, is ordinary work.
+        group.NeedsPipelineContract = (start is not null && ops.Count > 1) || conditionalCommit;
+
+        Slot target = slots[slotIndex];
+        target.Inbox.Enqueue(items[0] with { Group = group });
+        TryStartPump(target);
+
+        return tasks;
+    }
 
     private async Task<T> EnqueueAsync<T>(
         BatchStatementKind kind, SqlRequest request, int? slotIndex, CancellationToken ct,
@@ -332,7 +412,10 @@ internal sealed class GrpcBatcher : IAsyncDisposable
                 {
                     while (slot.Inbox.TryDequeue(out QueuedItem item))
                     {
-                        await StageAsync(slot, item).ConfigureAwait(false);
+                        if (item.Group is { } group)
+                            await StageGroupAsync(slot, group).ConfigureAwait(false);
+                        else
+                            await StageAsync(slot, item).ConfigureAwait(false);
                         drained++;
                     }
 
@@ -431,6 +514,12 @@ internal sealed class GrpcBatcher : IAsyncDisposable
             return;
         }
 
+        await PlaceAsync(slot, item, lease).ConfigureAwait(false);
+    }
+
+    /// <summary>Writes a routed op alone, or adds it to the slot's run so it shares the next frame.</summary>
+    private async Task PlaceAsync(Slot slot, QueuedItem item, StreamLease lease)
+    {
         // Frames only to a server that announced them on this very stream. The announcement is read, never
         // awaited: until it arrives — and for good against a server that makes none — each op is its own
         // message, written at once as it always was.
@@ -441,7 +530,7 @@ internal sealed class GrpcBatcher : IAsyncDisposable
 
         if (!framed)
         {
-            await SendAsync(lease, item.Request, op).ConfigureAwait(false);
+            await SendAsync(lease, item.Request, item.Op).ConfigureAwait(false);
             return;
         }
 
@@ -477,6 +566,116 @@ internal sealed class GrpcBatcher : IAsyncDisposable
     }
 
     /// <summary>
+    /// Stages a pipeline: routes it as one (its ops are one transaction, so one stream), holds that
+    /// stream for every op, and either adds the whole group to the slot's run — flushing first when the
+    /// run is for another stream or has no room for all of it — or, for a group that needs no contract
+    /// version, places each op as a lone op would be placed, still in order. A group that cannot be
+    /// written as one frame faults whole before anything is held or written.
+    /// </summary>
+    private async Task StageGroupAsync(Slot slot, PipelineGroup group)
+    {
+        QueuedItem[] items = group.Items;
+        StreamLease lease;
+        int cost = 0;
+
+        try
+        {
+            // All or nothing, before anything is held: a group with a cancelled member is left out
+            // whole, because writing the rest could commit a transaction missing a statement.
+            for (int i = 0; i < items.Length; i++)
+            {
+                if (!MustStillBeWritten(items[i].Op))
+                    throw new OperationCanceledException();
+            }
+
+            lease = Route(slot, items[0].Op);
+            IBatchTransport transport = lease.Transport;
+
+            for (int i = 0; i < items.Length; i++)
+            {
+                if (items[i].ExpectedTransportId is long expected && transport.Id != expected)
+                    throw new PreparedStatementStaleException();
+            }
+
+            if (group.NeedsPipelineContract)
+            {
+                if (!options.RequestFrames)
+                    throw new PipelineUnsupportedException("request frames are off");
+                if (transport.AnnouncedVersion < BatchFrames.PipelineVersion)
+                    throw new PipelineUnsupportedException(
+                        $"the server announced frame contract version {transport.AnnouncedVersion}, below {BatchFrames.PipelineVersion}");
+                if (items.Length > BatchFrames.MaxItems)
+                    throw new PipelineUnsupportedException($"{items.Length} ops exceed the {BatchFrames.MaxItems}-item frame limit");
+
+                for (int i = 0; i < items.Length; i++)
+                    cost += FrameCost(items[i].Request);
+                if (cost > BatchFrames.MaxBytes)
+                    throw new PipelineUnsupportedException($"{cost} bytes exceed the {BatchFrames.MaxBytes}-byte frame limit");
+            }
+
+            for (int i = 0; i < items.Length; i++)
+            {
+                PendingOp op = items[i].Op;
+                op.TransportId = transport.Id;
+                Interlocked.Increment(ref lease.InFlight);
+                Volatile.Write(ref op.Lease, lease);
+            }
+
+            // Cancelled between the check above and the publish: nobody else releases the holds.
+            for (int i = 0; i < items.Length; i++)
+            {
+                if (!pending.ContainsKey(items[i].Op.RequestId))
+                {
+                    for (int j = 0; j < items.Length; j++)
+                        Release(items[j].Op);
+                    throw new OperationCanceledException();
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            FaultGroup(group, ex);
+            return;
+        }
+
+        if (!group.NeedsPipelineContract)
+        {
+            for (int i = 0; i < items.Length; i++)
+                await PlaceAsync(slot, items[i], lease).ConfigureAwait(false);
+            return;
+        }
+
+        if (slot.Run.Count > 0)
+        {
+            if (slot.RunBytes < 0)
+                slot.RunBytes = FrameCost(slot.Run[0].Request);
+
+            if (!ReferenceEquals(slot.RunLease, lease)
+                || slot.Run.Count + items.Length > BatchFrames.MaxItems
+                || (long)slot.RunBytes + cost > BatchFrames.MaxBytes)
+            {
+                await FlushAsync(slot).ConfigureAwait(false);
+            }
+        }
+
+        if (slot.Run.Count == 0)
+        {
+            slot.RunLease = lease;
+            slot.RunBytes = 0;
+        }
+
+        for (int i = 0; i < items.Length; i++)
+            slot.Run.Add(items[i]);
+        slot.RunBytes += cost;
+    }
+
+    private void FaultGroup(PipelineGroup group, Exception ex)
+    {
+        foreach (QueuedItem item in group.Items)
+            Fault(item.Op, ex);
+    }
+
+    /// <summary>
     /// Writes the slot's run: one frame, or the plain single message when only one op is left in it, so a
     /// quiet stream is byte-identical to one without frames.
     ///
@@ -493,10 +692,21 @@ internal sealed class GrpcBatcher : IAsyncDisposable
 
         try
         {
+            // A pipeline travels whole or not at all. One of its ops cancelled since it was staged
+            // means the others are left out too, and faulted, so a conditional commit never commits a
+            // transaction that is missing a statement.
+            foreach (QueuedItem item in slot.Run)
+            {
+                if (item.Group is { Broken: false } group && !MustStillBeWritten(item.Op))
+                    group.Broken = true;
+            }
+
             // Cancelled since it was staged: its hold on the stream is already released, leave it out.
             foreach (QueuedItem item in slot.Run)
             {
-                if (MustStillBeWritten(item.Op))
+                if (item.Group is { Broken: true })
+                    Fault(item.Op, new OperationCanceledException());
+                else if (MustStillBeWritten(item.Op))
                     frame.Items.Add(item.Request);
             }
 
@@ -787,9 +997,14 @@ internal sealed class GrpcBatcher : IAsyncDisposable
         // Before the op lets go of its stream: a START that has just been answered is the only thing
         // holding a retired stream open until its transaction is on the books.
         if (result is TxnHandle started && op.Kind == BatchStatementKind.Start)
-            TransactionBegan((started.TxnIdPt, started.TxnIdCounter), Volatile.Read(ref op.Lease));
-        else if (op.Kind is BatchStatementKind.Commit or BatchStatementKind.Rollback)
-            TransactionEnded(op.Transaction);
+        {
+            op.MintedHandle = (started.TxnIdPt, started.TxnIdCounter);
+            TransactionBegan(op.MintedHandle.Value, Volatile.Read(ref op.Lease));
+        }
+        else if (op.Kind is BatchStatementKind.Commit or BatchStatementKind.CommitIfOk or BatchStatementKind.Rollback)
+        {
+            TransactionEnded(op.TransactionOrStarted);
+        }
 
         Release(op);
         op.Dispose();
@@ -803,8 +1018,8 @@ internal sealed class GrpcBatcher : IAsyncDisposable
 
         // Only an answer from the server ends the transaction. A COMMIT that timed out or was cancelled
         // here may still be open there, and the ROLLBACK that usually follows must find its stream.
-        if (ex is CamusException && op.Kind is BatchStatementKind.Commit or BatchStatementKind.Rollback)
-            TransactionEnded(op.Transaction);
+        if (ex is CamusException && op.Kind is BatchStatementKind.Commit or BatchStatementKind.CommitIfOk or BatchStatementKind.Rollback)
+            TransactionEnded(op.TransactionOrStarted);
 
         Release(op);
         op.Dispose();
@@ -919,8 +1134,25 @@ internal sealed class GrpcBatcher : IAsyncDisposable
         public int Closed;
     }
 
+    /// <summary>An inbox entry: one op, or — when <paramref name="Group"/> is set on the entry the pump
+    /// dequeues — a whole pipeline, whose ops each carry the group too so the flush can keep them
+    /// together.</summary>
     private readonly record struct QueuedItem(
-        BatchExecuteRequest Request, PendingOp Op, long? ExpectedTransportId);
+        BatchExecuteRequest Request, PendingOp Op, long? ExpectedTransportId, PipelineGroup? Group = null);
+
+    /// <summary>The ops of one <see cref="EnqueuePipeline"/> call, staged and written together.</summary>
+    private sealed class PipelineGroup(QueuedItem[] items)
+    {
+        public readonly QueuedItem[] Items = items;
+
+        /// <summary>True when the group carries a START its followers name, or a COMMIT_IF_OK, and so
+        /// may only be written as one frame to a server of <see cref="BatchFrames.PipelineVersion"/>.</summary>
+        public bool NeedsPipelineContract;
+
+        /// <summary>Set by the flush when one op of the group was cancelled after staging: the rest
+        /// are then left out and faulted too. Touched only by the slot's pump.</summary>
+        public bool Broken;
+    }
 
     /// <summary>One in-flight op awaiting its terminal response, plus the accumulator a QUERY needs.</summary>
     private sealed class PendingOp(int requestId, BatchStatementKind kind, (long Pt, uint Counter)? transaction)
@@ -931,6 +1163,18 @@ internal sealed class GrpcBatcher : IAsyncDisposable
         /// <summary>The transaction this op belongs to, from the handle it carries; null for an
         /// autocommit op, and for a START, whose handle does not exist until it is answered.</summary>
         public readonly (long Pt, uint Counter)? Transaction = transaction;
+
+        /// <summary>For an op of a pipeline that names its START instead of carrying a handle: that
+        /// START, whose <see cref="MintedHandle"/> is the transaction this op belongs to once the
+        /// START has answered — which it always has before this op's own answer arrives.</summary>
+        public PendingOp? StartRef;
+
+        /// <summary>The handle a START was answered with, kept so the ops that named it can find
+        /// their transaction when they finish.</summary>
+        public (long Pt, uint Counter)? MintedHandle;
+
+        /// <summary>The transaction this op finishes, by its handle or by the START it names.</summary>
+        public (long Pt, uint Counter)? TransactionOrStarted => Transaction ?? StartRef?.MintedHandle;
 
         /// <summary>The stream this op was written to, held until the op terminates. Swapped to null
         /// atomically by whichever path releases it first.</summary>

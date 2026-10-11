@@ -36,6 +36,16 @@ public sealed record CamusTransactionOptions
     /// </summary>
     public string? Affinity { get; init; }
 
+    /// <summary>
+    /// Send <c>BEGIN</c> with the transaction's first statement — or inside its first
+    /// <see cref="CamusPipeline"/>, as part of the same stream message — instead of from
+    /// <c>BeginTransaction</c>. A pipelined transaction then costs no exchange for its <c>BEGIN</c> at
+    /// all. With learned routing on, <c>BEGIN</c> is deferred already and this changes nothing. The
+    /// observable consequences are those of the routed deferral: the identity reads as zero until the
+    /// first statement, and a failure to begin surfaces from that statement.
+    /// </summary>
+    public bool DeferBegin { get; init; }
+
     /// <summary>A pessimistic, read-write transaction at the server's default isolation level.</summary>
     public static CamusTransactionOptions Default { get; } = new();
 
@@ -58,6 +68,7 @@ public sealed record CamusTransactionOptions
             Mode = Mode ?? fallback.Mode,
             Locking = Locking ?? fallback.Locking,
             Affinity = Affinity ?? fallback.Affinity,
+            DeferBegin = DeferBegin || fallback.DeferBegin,
         };
     }
 

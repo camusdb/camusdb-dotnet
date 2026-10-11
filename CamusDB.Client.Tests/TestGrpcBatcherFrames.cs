@@ -435,7 +435,7 @@ public class TestGrpcBatcherFrames
 
         public long Id { get; } = id;
 
-        public bool FramesAnnounced => announced;
+        public int AnnouncedVersion => announced ? BatchFrames.Version : 0;
 
         public volatile bool FailFrames;
 

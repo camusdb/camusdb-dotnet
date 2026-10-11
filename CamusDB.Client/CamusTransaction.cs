@@ -52,6 +52,10 @@ public class CamusTransaction : DbTransaction
     /// <summary>True once the server minted this transaction and its endpoint is pinned.</summary>
     private volatile bool started;
 
+    /// <summary>True once a pipeline committed this transaction, so that a later finalize does not
+    /// ask the server about a transaction it no longer knows.</summary>
+    private volatile bool committed;
+
     /// <summary>
     /// The endpoint every statement and the finalize go to, or null while a deferred transaction is
     /// not started yet. A command must resolve it through <see cref="EnsureStartedAsync"/>, which
@@ -150,12 +154,55 @@ public class CamusTransaction : DbTransaction
             .StartTransactionAsync(target, builder.Config["Database"], Options, builder.CommandTimeout, cancellationToken)
             .ConfigureAwait(false);
 
+        Seat(result, target);
+    }
+
+    private void Seat(in StartTransactionResult result, string target)
+    {
         txnIdPT = result.TxnIdPT;
         txnIdCounter = result.TxnIdCounter;
         StreamSlot = result.StreamSlot;
         endpoint = target;
         started = true;
     }
+
+    /// <summary>
+    /// Several statements of this transaction sent as one exchange and answered together — see
+    /// <see cref="CamusPipeline"/>. A transaction begun with <see cref="CamusTransactionOptions.DeferBegin"/>
+    /// (or with learned routing on) puts its <c>BEGIN</c> inside the first pipeline too.
+    /// </summary>
+    public CamusPipeline CreatePipeline() => new(this, connection, builder);
+
+    /// <summary>
+    /// Lets a pipeline begin this transaction inside its first exchange. Returns true, with the
+    /// completion the pipeline must settle once the server has answered the <c>BEGIN</c>, when nothing
+    /// has begun it yet; false otherwise, with the <c>BEGIN</c> already under way (or null when it is
+    /// done) for the pipeline to await instead. The memoized <see cref="startTask"/> is what makes a
+    /// pipeline and a command that race to be the first statement agree on one <c>BEGIN</c>.
+    /// </summary>
+    internal bool TryClaimStart(out TaskCompletionSource? claim, out Task? pending)
+    {
+        lock (startSync)
+        {
+            if (started || startTask is not null)
+            {
+                claim = null;
+                pending = started ? null : startTask;
+                return false;
+            }
+
+            claim = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            startTask = claim.Task;
+            pending = null;
+            return true;
+        }
+    }
+
+    /// <summary>Seats the identity a pipeline's <c>BEGIN</c> minted; the pipeline settles its claim after this.</summary>
+    internal void SeatStart(in StartTransactionResult result, string target) => Seat(result, target);
+
+    /// <summary>Records that a pipeline's conditional commit committed this transaction.</summary>
+    internal void MarkCommitted() => committed = true;
 
     /// <summary>
     /// The ADO.NET view of this transaction's isolation level. CamusDB's default is Serializable, so an
@@ -218,6 +265,15 @@ public class CamusTransaction : DbTransaction
         // has nothing to undo and completes quietly, while a commit still reports the failed start.
         if (!commit && !started && startTask is { IsFaulted: true } or { IsCanceled: true })
             return;
+
+        // A pipeline already committed this transaction. A rollback has nothing to undo; a second
+        // commit is a caller mistake, and the server would only answer that the transaction is unknown.
+        if (committed)
+        {
+            if (commit)
+                throw new InvalidOperationException("The transaction was already committed by a pipeline.");
+            return;
+        }
 
         string target = await EnsureStartedAsync(preferredEndpoint: null, cancellationToken).ConfigureAwait(false);
 

@@ -56,7 +56,7 @@ Supported connection string keys:
 | `ChannelPoolSize` | No | gRPC only: long-lived `BatchExecute` streams per endpoint (default: `2`). See [Transport](#transport-rest--grpc). |
 | `CoalescingThreshold` | No | gRPC only: ops a drain must produce before the pump stops waiting for more (default: `10`; `1` disables coalescing). |
 | `CoalescingDelay` | No | gRPC only: milliseconds the pump waits after a multi-op drain to accumulate a larger burst (default: `0`, off; a single-op drain never waits). |
-| `RequestFrames` | No | gRPC only: write operations that wait together as one stream message, to a server that announced support (default: `true`). See [Transport](#transport-rest--grpc). |
+| `RequestFrames` | No | gRPC only: write operations that wait together as one stream message, to a server that announced support (default: `true`). Also gates [pipelined transactions](#pipelined-transactions). See [Transport](#transport-rest--grpc). |
 | `BackupEndpoint` | No | HTTP endpoint for the backup admin API. Defaults to `Endpoint`; required with `Protocol=grpc`. See [Backups](#backups). |
 | `BackupTimeout` | No | Backup admin request timeout in seconds (default: `300`). See [Backups](#backups). |
 | `AllowInsecureCredentials` | No | `true` waives the client-side refusal to send credentials to a remote plaintext endpoint. See [TLS](#tls). |
@@ -764,6 +764,70 @@ await transaction.CommitAsync();
 ```
 
 Use `await transaction.RollbackAsync()` to roll back instead.
+
+#### Pipelined transactions
+
+A transaction that awaits each statement pays one round trip per statement: six for a bank transfer
+(`BEGIN`, two reads, two writes, `COMMIT`). At high concurrency those round trips, not the statements,
+set its latency. A `CamusPipeline` sends the statements whose inputs are known together, as one stream
+message, and completes each statement's task from its own answer. `BEGIN` rides the first send when the
+transaction was begun with `DeferBegin = true` (or with learned routing on, which defers it already), and
+`CommitAsync` adds a commit that the server performs only if every statement of the transaction succeeded.
+
+```csharp
+CamusTransaction tx = await connection.BeginTransactionAsync(new CamusTransactionOptions
+{
+    Locking = CamusLocking.Optimistic,
+    DeferBegin = true,                              // BEGIN travels inside the first send
+});
+CamusPipeline pipeline = tx.CreatePipeline();
+
+// Exchange 1: [BEGIN, SELECT a, SELECT b]
+CamusCommand readA = connection.CreateSelectCommand("SELECT balance FROM accounts WHERE id = @id");
+readA.Parameters.Add("@id", ColumnType.Id, a);
+CamusCommand readB = connection.CreateSelectCommand("SELECT balance FROM accounts WHERE id = @id");
+readB.Parameters.Add("@id", ColumnType.Id, b);
+Task<CamusDataReader> balanceA = pipeline.QueueReader(readA);
+Task<CamusDataReader> balanceB = pipeline.QueueReader(readB);
+await pipeline.SendAsync();
+
+long fromBalance = await ReadBalance(await balanceA);
+long toBalance = await ReadBalance(await balanceB);
+
+// Exchange 2: [UPDATE a, UPDATE b, COMMIT] — the commit happens only if both updates succeeded.
+CamusCommand debit = connection.CreateCamusCommand("UPDATE accounts SET balance = @v WHERE id = @id");
+debit.Parameters.Add("@v", ColumnType.Integer64, fromBalance - amount);
+debit.Parameters.Add("@id", ColumnType.Id, a);
+CamusCommand credit = connection.CreateCamusCommand("UPDATE accounts SET balance = @v WHERE id = @id");
+credit.Parameters.Add("@v", ColumnType.Integer64, toBalance + amount);
+credit.Parameters.Add("@id", ColumnType.Id, b);
+Task<int> debited = pipeline.QueueNonQuery(debit);
+Task<int> credited = pipeline.QueueNonQuery(credit);
+await pipeline.CommitAsync();
+
+Console.WriteLine($"{pipeline.Exchanges} round trips");   // 2 over gRPC
+```
+
+What to expect:
+
+- **Results.** Every queued task completes with its own result or its own `CamusException`, exactly as a
+  lone execution would. `SendAsync` and `CommitAsync` also throw the first failure, so a caller that
+  awaits only the send still learns of it.
+- **Failure.** The statements after a failed one in the same exchange still get an answer; the
+  transaction has ended, so they fail too, and `CommitAsync` throws the first failure instead of
+  committing. The server has rolled the transaction back; `RollbackAsync` is then a harmless no-op.
+  Replay the whole transaction, from `BEGIN`, to retry — the rule for any failed statement.
+- **Order.** Queued statements run in queue order, after every statement of the transaction sent
+  before them. A pipeline can be sent more than once on one transaction, and an ordinary command can
+  run between sends. One send at a time per pipeline.
+- **Exchanges.** `pipeline.Exchanges` reports the round trips actually used. It is one per send over
+  gRPC to a server that announces frame contract version 2 or higher. Over REST, with
+  `RequestFrames=false`, or against an older server, the client runs the same statements one exchange
+  per step with the same results, and the count says so. Nothing is ever sent that an older server
+  could misread.
+- **What cannot be queued.** DDL (it does not run inside the transaction), `TRUNCATE`, the typed
+  `CamusInsertCommand`, and a command bound to another transaction. These throw at queue time or at
+  send; the pipeline is still usable.
 
 #### Isolation level, mode, and optimistic locking
 

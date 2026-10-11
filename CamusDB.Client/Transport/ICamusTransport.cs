@@ -55,6 +55,16 @@ internal interface ICamusTransport
     Task<NonQueryTransportResult> ExecuteNonQueryAsync(TransportSqlRequest request, CancellationToken cancellationToken);
 
     /// <summary>
+    /// Runs several statements of one transaction — optionally its <c>BEGIN</c> first and a commit last —
+    /// and answers them together. A transport that can send the request as one exchange does; any
+    /// other runs it one exchange per step (<see cref="SequentialPipeline"/>). A failed step is
+    /// reported in the result, not thrown, because every step gets an outcome; only a failure of the
+    /// whole call is thrown. Not "exactly one round-trip" like the other methods, by design: the
+    /// exchange count is the result's to report.
+    /// </summary>
+    Task<PipelineTransportResult> ExecutePipelineAsync(TransportPipelineRequest request, CancellationToken cancellationToken);
+
+    /// <summary>
     /// Inserts one row through the server's typed row-level surface — the same operation
     /// <c>INSERT INTO</c> performs, expressed as a table plus a column-to-value map instead of SQL text.
     /// Returns the affected-row count.

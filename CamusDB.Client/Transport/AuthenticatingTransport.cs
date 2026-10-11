@@ -52,6 +52,12 @@ internal sealed class AuthenticatingTransport(ICamusTransport inner, CamusTokenP
     public Task<NonQueryTransportResult> ExecuteNonQueryAsync(TransportSqlRequest request, CancellationToken cancellationToken)
         => RunAsync(ct => inner.ExecuteNonQueryAsync(request, ct), cancellationToken);
 
+    // A pipeline whose BEGIN was refused for its token throws rather than reporting it, precisely so
+    // that this replay can happen: nothing of it ran. A token refused later in the pipeline is reported
+    // in the result and not replayed, since the transaction it began is gone either way.
+    public Task<PipelineTransportResult> ExecutePipelineAsync(TransportPipelineRequest request, CancellationToken cancellationToken)
+        => RunAsync(ct => inner.ExecutePipelineAsync(request, ct), cancellationToken);
+
     public Task<int> InsertAsync(TransportInsertRequest request, CancellationToken cancellationToken)
         => RunAsync(ct => inner.InsertAsync(request, ct), cancellationToken);
 

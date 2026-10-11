@@ -334,6 +334,9 @@ public class TestSecurityHardening
 
         public CamusProtocol Protocol => CamusProtocol.Rest;
 
+        public Task<PipelineTransportResult> ExecutePipelineAsync(TransportPipelineRequest request, CancellationToken cancellationToken)
+            => SequentialPipeline.RunAsync(this, request, cancellationToken);
+
         public async Task<NonQueryTransportResult> ExecuteNonQueryAsync(TransportSqlRequest request, CancellationToken cancellationToken)
         {
             _ = await Auth!.GetTokenAsync(cancellationToken).ConfigureAwait(false);

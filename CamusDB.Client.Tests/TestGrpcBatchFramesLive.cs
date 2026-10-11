@@ -246,7 +246,7 @@ public sealed class TestGrpcBatchFramesLive : BaseTest
     {
         public long Id => inner.Id;
 
-        public bool FramesAnnounced => inner.FramesAnnounced;
+        public int AnnouncedVersion => inner.AnnouncedVersion;
 
         public Task SendAsync(BatchExecuteRequest request, CancellationToken cancellationToken)
         {
