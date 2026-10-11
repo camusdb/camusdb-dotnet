@@ -883,8 +883,17 @@ public class CamusCommand : DbCommand, ICloneable
             Parameters = GetCommandParameters(builder.GetTransport().Protocol),
             Prepared = await ShouldPrepareAsync(endpoint, cancellationToken).ConfigureAwait(false),
             DiscardReturningRows = kind == PipelineStatementKind.NonQuery && !asReader,
+            RoutingAcceptVersion = builder.Router is not null ? CamusRoutingAdvice.AcceptVersion : 0,
         };
     }
+
+    /// <summary>
+    /// The route-table kind this command's reply is learned under when it is pipelined: the kind the
+    /// server answers it as, which is also what a lone execution of it would learn — a DML statement
+    /// read for its RETURNING rows runs on the non-query path either way.
+    /// </summary>
+    internal CamusRouteOpKind PipelineRouteKind(bool asReader)
+        => asReader && !IsDmlStatement(CommandText) ? CamusRouteOpKind.Query : CamusRouteOpKind.NonQuery;
 
     /// <summary>
     /// Runs a DML statement on the non-query endpoint and wraps the result in a reader. For a statement

@@ -85,6 +85,7 @@ internal static class SequentialPipeline
                 TimeoutSeconds = request.TimeoutSeconds,
                 Prepared = statement.Prepared,
                 DiscardReturningRows = statement.DiscardReturningRows,
+                RoutingAcceptVersion = statement.RoutingAcceptVersion,
             };
 
             try

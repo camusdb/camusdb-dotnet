@@ -436,6 +436,7 @@ internal sealed class GrpcTransport(CamusEndpointPool endpoints, CamusTokenProvi
                 TimeoutSeconds = request.TimeoutSeconds,
                 Prepared = statement.Prepared,
                 DiscardReturningRows = statement.DiscardReturningRows,
+                RoutingAcceptVersion = statement.RoutingAcceptVersion,
             };
             BatchStatementKind kind = statement.Kind == PipelineStatementKind.Query ? BatchStatementKind.Query : BatchStatementKind.NonQuery;
 

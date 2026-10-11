@@ -198,6 +198,9 @@ internal sealed class TransportPipelineStatement
 
     /// <inheritdoc cref="TransportSqlRequest.DiscardReturningRows"/>
     public bool DiscardReturningRows { get; init; }
+
+    /// <inheritdoc cref="TransportSqlRequest.RoutingAcceptVersion"/>
+    public int RoutingAcceptVersion { get; init; }
 }
 
 /// <summary>

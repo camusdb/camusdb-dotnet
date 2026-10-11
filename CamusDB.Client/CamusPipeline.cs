@@ -143,9 +143,17 @@ public sealed class CamusPipeline
             string endpoint = transaction.Endpoint ?? ChooseEndpoint(batch);
             string database = builder.Config["Database"];
 
+            // Each statement's route entry is read before the exchange, pinned or not, for the same
+            // reason a lone command reads it: the reply's advice refreshes the route only if the entry
+            // has not moved since, so a late reply never overwrites what a faster one learned.
+            CamusStatementRouter? router = builder.Router;
+            long[] observed = new long[batch.Length];
             TransportPipelineStatement[] statements = new TransportPipelineStatement[batch.Length];
             for (int i = 0; i < batch.Length; i++)
+            {
                 statements[i] = await batch[i].Command.BuildPipelineStatementAsync(batch[i].AsReader, endpoint, cancellationToken).ConfigureAwait(false);
+                router?.SelectEndpoint(database, statements[i].Sql, batch[i].Command.PipelineRouteKind(batch[i].AsReader), out observed[i]);
+            }
 
             TransportPipelineRequest request = new()
             {
@@ -180,7 +188,17 @@ public sealed class CamusPipeline
             }
 
             for (int i = 0; i < batch.Length; i++)
-                batch[i].Settle(result.Statements[i]);
+            {
+                PipelineStatementOutcome outcome = result.Statements[i];
+                batch[i].Settle(outcome);
+
+                // A pipelined statement teaches the router what a lone one would: without this the
+                // first frame of every transaction starts on the pool's rotation, two thirds of them
+                // on a follower, and every statement of the transaction is forwarded from there.
+                CamusRoutingAdvice? advice = outcome.Query?.Routing ?? outcome.NonQuery?.Routing;
+                if (advice is not null)
+                    router?.Learn(database, statements[i].Sql, batch[i].Command.PipelineRouteKind(batch[i].AsReader), advice, observed[i]);
+            }
 
             if (commit && result.Committed)
                 transaction.MarkCommitted();
@@ -215,7 +233,7 @@ public sealed class CamusPipeline
     {
         if (builder.Router is { } router && batch.Length > 0)
         {
-            CamusRouteOpKind kind = batch[0].AsReader ? CamusRouteOpKind.Query : CamusRouteOpKind.NonQuery;
+            CamusRouteOpKind kind = batch[0].Command.PipelineRouteKind(batch[0].AsReader);
             if (router.SelectEndpoint(builder.Config["Database"], batch[0].Command.CommandText, kind, out _) is { } learned)
                 return learned;
         }

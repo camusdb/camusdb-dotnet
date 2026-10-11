@@ -103,6 +103,42 @@ public class TestTransactionRouting
     }
 
     [Fact]
+    public async Task APipelinedTransactionLearnsItsRouteFromItsRepliesAndTheNextOneBeginsThere()
+    {
+        using HttpTest httpTest = new();
+        MockNode(httpTest, 9340, advertise: "camus-b:7070");
+        MockNode(httpTest, 9342, advertise: "camus-b:7070");
+
+        using CamusConnection connection = new(Routed(9340, 9342));
+
+        // Cold router: the first pipelined transaction begins on rotation, A, and A's replies name B.
+        CamusTransaction first = await connection.BeginTransactionAsync(new CamusTransactionOptions { DeferBegin = true });
+        CamusPipeline pipeline = first.CreatePipeline();
+        Task<CamusDataReader> read = pipeline.QueueReader(connection.CreateSelectCommand("SELECT balance FROM t WHERE id = @id"));
+        Task<int> write = pipeline.QueueNonQuery(connection.CreateCamusCommand("UPDATE t SET balance = 1 WHERE id = @id"));
+        await pipeline.CommitAsync();
+        (await read).Dispose();
+        Assert.Equal(1, await write);
+        Assert.Equal("http://localhost:9340", first.Endpoint);
+
+        // Warm router: the next one begins where the first statement's advice pointed, B, and stays there.
+        CamusTransaction second = await connection.BeginTransactionAsync(new CamusTransactionOptions { DeferBegin = true });
+        pipeline = second.CreatePipeline();
+        read = pipeline.QueueReader(connection.CreateSelectCommand("SELECT balance FROM t WHERE id = @id"));
+        write = pipeline.QueueNonQuery(connection.CreateCamusCommand("UPDATE t SET balance = 1 WHERE id = @id"));
+        await pipeline.CommitAsync();
+        (await read).Dispose();
+        Assert.Equal(1, await write);
+
+        Assert.Equal("http://localhost:9342", second.Endpoint);
+        httpTest.ShouldHaveCalled(Url(9340, "start-transaction")).Times(1);
+        httpTest.ShouldHaveCalled(Url(9342, "start-transaction")).Times(1);
+        httpTest.ShouldHaveCalled(Url(9342, "execute-sql-query")).Times(1);
+        httpTest.ShouldHaveCalled(Url(9342, "execute-sql-non-query")).Times(1);
+        httpTest.ShouldHaveCalled(Url(9342, "commit-transaction")).Times(1);
+    }
+
+    [Fact]
     public async Task RoutingOffBeginsEagerlyOnRotation()
     {
         using HttpTest httpTest = new();
