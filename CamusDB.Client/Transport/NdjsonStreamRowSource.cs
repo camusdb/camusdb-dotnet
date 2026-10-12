@@ -51,6 +51,9 @@ internal sealed class NdjsonStreamRowSource : CamusRowSource
     private readonly string[] names;
     private readonly ColumnType[] types;
 
+    // Per-column array element type from the header; null when no column has one.
+    private readonly ColumnType[]? elementTypes;
+
     // The header is read at construction; to answer HasRows up front we also prefetch the first row, so a
     // pending row (or the knowledge that there is none) is held before the first Read.
     private ColumnValue[]? pending;
@@ -68,13 +71,15 @@ internal sealed class NdjsonStreamRowSource : CamusRowSource
     private ColumnValue[] spare;
 
     private NdjsonStreamRowSource(
-        IDisposable? responseHandle, Stream stream, Utf8LineReader reader, string[] names, ColumnType[] types)
+        IDisposable? responseHandle, Stream stream, Utf8LineReader reader,
+        string[] names, ColumnType[] types, ColumnType[]? elementTypes)
     {
         this.responseHandle = responseHandle;
         this.stream = stream;
         this.reader = reader;
         this.names = names;
         this.types = types;
+        this.elementTypes = elementTypes;
         scratch = new ColumnValue[types.Length];
         spare = new ColumnValue[types.Length];
     }
@@ -104,9 +109,9 @@ internal sealed class NdjsonStreamRowSource : CamusRowSource
         if (headerLine is null)
             throw new CamusException("CADB0000", "Streaming query response ended before the schema header.");
 
-        (string[] names, ColumnType[] types) = ParseHeader(headerLine.Value);
+        (string[] names, ColumnType[] types, ColumnType[]? elementTypes) = ParseHeader(headerLine.Value);
 
-        NdjsonStreamRowSource source = new(responseHandle, stream, reader, names, types);
+        NdjsonStreamRowSource source = new(responseHandle, stream, reader, names, types, elementTypes);
         source.pending = await source.ReadNextRowAsync(cancellationToken).ConfigureAwait(false);
         source.hasPending = true;
         return source;
@@ -181,7 +186,7 @@ internal sealed class NdjsonStreamRowSource : CamusRowSource
         // A row is read from the pooled line buffer in place, with no document per row; it is fully
         // decoded into ColumnValues (which copy out any strings/bytes) before the next line overwrites
         // that buffer.
-        if (CamusResultSet.TryDecodeRowInto(line.Value.Span, types, scratch))
+        if (CamusResultSet.TryDecodeRowInto(line.Value.Span, types, scratch, elementTypes))
         {
             // Publish the array just filled and keep the other one for the next decode, so the row the
             // caller is reading is never the row being written.
@@ -200,7 +205,7 @@ internal sealed class NdjsonStreamRowSource : CamusRowSource
         return null;
     }
 
-    private static (string[] Names, ColumnType[] Types) ParseHeader(ReadOnlyMemory<byte> headerLine)
+    private static (string[] Names, ColumnType[] Types, ColumnType[]? ElementTypes) ParseHeader(ReadOnlyMemory<byte> headerLine)
     {
         using JsonDocument doc = JsonDocument.Parse(headerLine);
         JsonElement root = doc.RootElement;
@@ -212,24 +217,9 @@ internal sealed class NdjsonStreamRowSource : CamusRowSource
         // before pulling rows, so this is rare).
         ThrowIfFailed(root);
 
-        if (!root.TryGetProperty("columns", out JsonElement columns) || columns.ValueKind != JsonValueKind.Array)
-            return ([], []);
-
-        int count = columns.GetArrayLength();
-        string[] names = new string[count];
-        ColumnType[] types = new ColumnType[count];
-
-        int i = 0;
-        foreach (JsonElement column in columns.EnumerateArray())
-        {
-            names[i] = column.TryGetProperty("name", out JsonElement name) ? name.GetString() ?? "" : "";
-            types[i] = column.TryGetProperty("type", out JsonElement type) && type.TryGetInt32(out int t)
-                ? (ColumnType)t
-                : ColumnType.Null;
-            i++;
-        }
-
-        return (names, types);
+        // The same schema reader as the buffered endpoint, so an array column's elementType reaches the
+        // row decoder here too.
+        return CamusResultSet.ReadSchema(root.TryGetProperty("columns", out JsonElement columns) ? columns : default);
     }
 
     private static void ThrowIfFailed(JsonElement meta)

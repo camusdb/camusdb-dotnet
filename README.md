@@ -516,6 +516,17 @@ DateOnly  day      = reader.GetFieldValue<DateOnly>(reader.GetOrdinal("day"));
 object?[] tags     = (object?[])reader.GetValue(reader.GetOrdinal("tags"));
 ```
 
+Both transports give the same values. On REST, an array element is a plain JSON value, so the client types
+it from the `elementType` that the server sends with each `ARRAY(T)` column of a result. An `ARRAY(DATE)`
+element is then a `Date` cell (a `DateTime` from `GetValue`), an `ARRAY(BYTES)` element a `Bytes` cell, an
+`ARRAY(UUID)` element a `Uuid` cell, and a `0` or `-0` in an `ARRAY(FLOAT64)` a `Float64` cell. A server
+older than the field sends no `elementType`. The elements are then typed from their JSON tokens, as
+before: a date or a whole float comes back as `Integer64`, a byte string as `String` and a UUID as null.
+
+A `FLOAT32` value, scalar or array element, reads back as the stored single-precision value, which
+`GetDouble` widens exactly, on both transports. A `-0.0` parameter or array element is sent as negative
+zero, and a negative zero in a result keeps its sign.
+
 #### Large values
 
 A server with large-value storage can store a large `string`, `bytes` or `ARRAY(T)` value compressed (LZ4), or under its own key outside the row. The form never changes a query result or the wire format, so reads and parameters work as before. It changes the I/O a query does and the size of each stored version: a query that does not name a column stored out of line never fetches it, and an update of another column does not rewrite it.

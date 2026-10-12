@@ -24,4 +24,13 @@ public sealed class CamusColumnSchema
 
     [JsonPropertyName("type")]
     public ColumnType Type { get; set; }
+
+    /// <summary>
+    /// For an <see cref="ColumnType.Array"/> column, the declared type of its elements. Null for other
+    /// columns, and when the server did not send one (a server older than the field, or an element type
+    /// it could not infer); the elements are then typed from their JSON tokens.
+    /// </summary>
+    [JsonPropertyName("elementType")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public ColumnType? ElementType { get; set; }
 }

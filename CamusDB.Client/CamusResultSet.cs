@@ -64,14 +64,18 @@ public sealed class CamusResultSet
         int columnCount = columns.Count;
         string[] names = new string[columnCount];
         ColumnType[] types = new ColumnType[columnCount];
+        ColumnType[]? elementTypes = null;
 
         for (int i = 0; i < columnCount; i++)
         {
             names[i] = columns[i].Name;
             types[i] = columns[i].Type;
+
+            if (columns[i].ElementType is { } elementType)
+                (elementTypes ??= new ColumnType[columnCount])[i] = elementType;
         }
 
-        return FromWireCore(names, types, rows);
+        return FromWireCore(names, types, elementTypes, rows);
     }
 
     /// <summary>
@@ -81,12 +85,27 @@ public sealed class CamusResultSet
     /// </summary>
     internal static CamusResultSet FromWire(JsonElement columns, JsonElement rows)
     {
+        (string[] names, ColumnType[] types, ColumnType[]? elementTypes) = ReadSchema(columns);
+
+        return FromWireCore(names, types, elementTypes, rows);
+    }
+
+    /// <summary>
+    /// Reads a response's <c>columns</c> DOM element: each entry's <c>name</c>, its <c>type</c>, and for
+    /// an array column the <c>elementType</c> of its elements. <c>ElementTypes</c> is null when no column
+    /// carries one (a result without array columns, or a server older than the field), and a column
+    /// without one holds <see cref="ColumnType.Null"/> there; either way its elements are then inferred
+    /// from their JSON tokens. Shared by the buffered decoder and the streaming header.
+    /// </summary>
+    internal static (string[] Names, ColumnType[] Types, ColumnType[]? ElementTypes) ReadSchema(JsonElement columns)
+    {
         if (columns.ValueKind != JsonValueKind.Array)
-            return FromWireCore([], [], rows);
+            return ([], [], null);
 
         int columnCount = columns.GetArrayLength();
         string[] names = new string[columnCount];
         ColumnType[] types = new ColumnType[columnCount];
+        ColumnType[]? elementTypes = null;
 
         int i = 0;
         foreach (JsonElement column in columns.EnumerateArray())
@@ -95,13 +114,19 @@ public sealed class CamusResultSet
             types[i] = column.TryGetProperty("type", out JsonElement type) && type.TryGetInt32(out int t)
                 ? (ColumnType)t
                 : ColumnType.Null;
+
+            // An elementType the client cannot read is ignored, never fatal: the elements are then inferred.
+            if (column.TryGetProperty("elementType", out JsonElement elementType) &&
+                elementType.ValueKind == JsonValueKind.Number && elementType.TryGetInt32(out int e))
+                (elementTypes ??= new ColumnType[columnCount])[i] = (ColumnType)e;
+
             i++;
         }
 
-        return FromWireCore(names, types, rows);
+        return (names, types, elementTypes);
     }
 
-    private static CamusResultSet FromWireCore(string[] names, ColumnType[] types, JsonElement rows)
+    private static CamusResultSet FromWireCore(string[] names, ColumnType[] types, ColumnType[]? elementTypes, JsonElement rows)
     {
         int columnCount = names.Length;
 
@@ -122,7 +147,7 @@ public sealed class CamusResultSet
                 if (c >= columnCount)
                     break;
 
-                cells[rowBase + c] = DecodeCell(cell, types[c]);
+                cells[rowBase + c] = DecodeCell(cell, types[c], elementTypes?[c] ?? ColumnType.Null);
                 c++;
             }
 
@@ -140,16 +165,20 @@ public sealed class CamusResultSet
     /// own, where a <see cref="JsonDocument"/> per row did. Returns false, and writes nothing, when the line
     /// is not an array: that line is the stream's trailer object.
     ///
-    /// <para>The cell decoders below mirror <see cref="DecodeCell(JsonElement, ColumnType)"/> and its
+    /// <para>The cell decoders below mirror <see cref="DecodeCell(JsonElement, ColumnType, ColumnType)"/> and its
     /// helpers, which the buffered <see cref="FromWire"/> path uses. The wire row encoding is the same and
     /// only the framing differs, so a change to one set must be made to the other.</para>
+    ///
+    /// <para><paramref name="elementTypes"/> is the per-column array element type from the stream header,
+    /// as <see cref="ReadSchema"/> returns it; null when no column has one.</para>
     ///
     /// <para>Every position of <paramref name="cells"/> is written: the ones the row supplies take its
     /// values, and the rest are cleared to <see cref="ColumnValue.Null"/> — so no cell of an earlier row,
     /// and no reference it held, survives into this one. A malformed line throws part way, so the caller
     /// decodes into an array that no reader is looking at.</para>
     /// </summary>
-    internal static bool TryDecodeRowInto(ReadOnlySpan<byte> line, ColumnType[] types, ColumnValue[] cells)
+    internal static bool TryDecodeRowInto(
+        ReadOnlySpan<byte> line, ColumnType[] types, ColumnValue[] cells, ColumnType[]? elementTypes = null)
     {
         Utf8JsonReader reader = new(line);
 
@@ -165,7 +194,7 @@ public sealed class CamusResultSet
         {
             if (c < types.Length)
             {
-                cells[c] = DecodeCell(ref reader, types[c]);
+                cells[c] = DecodeCell(ref reader, types[c], elementTypes?[c] ?? ColumnType.Null);
                 c++;
             }
             else
@@ -194,9 +223,9 @@ public sealed class CamusResultSet
         return reader.TokenType;
     }
 
-    /// <summary>The <see cref="Utf8JsonReader"/> form of <see cref="DecodeCell(JsonElement, ColumnType)"/>.
+    /// <summary>The <see cref="Utf8JsonReader"/> form of <see cref="DecodeCell(JsonElement, ColumnType, ColumnType)"/>.
     /// The reader is on the cell's first token, and it is on the cell's last token on return.</summary>
-    private static ColumnValue DecodeCell(ref Utf8JsonReader reader, ColumnType declared)
+    private static ColumnValue DecodeCell(ref Utf8JsonReader reader, ColumnType declared, ColumnType elementType)
     {
         if (reader.TokenType == JsonTokenType.Null)
             return ColumnValue.Null;
@@ -222,7 +251,7 @@ public sealed class CamusResultSet
                 return DecodeNumeric(ref reader);
 
             case ColumnType.Array:
-                return DecodeArray(ref reader);
+                return DecodeArray(ref reader, elementType);
 
             default:
                 // The mis-tagged UUID recovery of the DOM decoder: any array here goes through the UUID
@@ -309,8 +338,8 @@ public sealed class CamusResultSet
         return null;
     }
 
-    /// <summary>The <see cref="Utf8JsonReader"/> form of <see cref="DecodeArray(JsonElement)"/>.</summary>
-    private static ColumnValue DecodeArray(ref Utf8JsonReader reader)
+    /// <summary>The <see cref="Utf8JsonReader"/> form of <see cref="DecodeArray(JsonElement, ColumnType)"/>.</summary>
+    private static ColumnValue DecodeArray(ref Utf8JsonReader reader, ColumnType elementType)
     {
         if (reader.TokenType != JsonTokenType.StartArray)
         {
@@ -329,17 +358,26 @@ public sealed class CamusResultSet
         }
 
         List<ColumnValue> values = new(length);
-        ColumnType elementType = ColumnType.Null;
+
+        if (IsElementType(elementType))
+        {
+            while (ReadToken(ref reader) != JsonTokenType.EndArray)
+                values.Add(DecodeCell(ref reader, elementType, ColumnType.Null));
+
+            return new ColumnValue { Type = ColumnType.Array, ArrayValues = values, ArrayElementType = elementType };
+        }
+
+        ColumnType inferred = ColumnType.Null;
 
         while (ReadToken(ref reader) != JsonTokenType.EndArray)
         {
             ColumnValue decoded = DecodeScalarByToken(ref reader, ColumnType.Null);
             if (decoded.Type != ColumnType.Null)
-                elementType = decoded.Type;
+                inferred = decoded.Type;
             values.Add(decoded);
         }
 
-        return new ColumnValue { Type = ColumnType.Array, ArrayValues = values, ArrayElementType = elementType };
+        return new ColumnValue { Type = ColumnType.Array, ArrayValues = values, ArrayElementType = inferred };
     }
 
     /// <summary>The <see cref="Utf8JsonReader"/> form of <see cref="DecodeScalarByToken(JsonElement, ColumnType)"/>.</summary>
@@ -355,8 +393,11 @@ public sealed class CamusResultSet
                 return new ColumnValue { Type = ColumnType.Bool, BoolValue = reader.GetBoolean() };
 
             case JsonTokenType.Number:
-                if (declared is ColumnType.Float64 or ColumnType.Float32)
-                    return new ColumnValue { Type = declared, FloatValue = reader.GetDouble() };
+                if (declared == ColumnType.Float64)
+                    return new ColumnValue { Type = ColumnType.Float64, FloatValue = reader.GetDouble() };
+
+                if (declared == ColumnType.Float32)
+                    return new ColumnValue { Type = ColumnType.Float32, FloatValue = reader.TryGetSingle(out float f) ? f : (float)reader.GetDouble() };
 
                 if (reader.TryGetInt64(out long l))
                     return new ColumnValue { Type = ColumnType.Integer64, LongValue = l };
@@ -425,8 +466,9 @@ public sealed class CamusResultSet
     /// types (Id, Bytes, Date, DateTime, Uuid, Array) rely on the declared type being exact — it always
     /// is for real column references. JSON-native scalars are read by token so an over-broad inferred
     /// type on an expression column (e.g. a numeric projection reported as String) still round-trips.
+    /// <paramref name="elementType"/> is the column's array element type, used only for an Array cell.
     /// </summary>
-    private static ColumnValue DecodeCell(JsonElement cell, ColumnType declared)
+    private static ColumnValue DecodeCell(JsonElement cell, ColumnType declared, ColumnType elementType)
     {
         if (cell.ValueKind == JsonValueKind.Null || cell.ValueKind == JsonValueKind.Undefined)
             return ColumnValue.Null;
@@ -452,7 +494,7 @@ public sealed class CamusResultSet
                 return DecodeNumeric(cell);
 
             case ColumnType.Array:
-                return DecodeArray(cell);
+                return DecodeArray(cell, elementType);
 
             default:
                 // Defensive recovery for a server type-inference gap: JOIN projections can report a
@@ -498,27 +540,45 @@ public sealed class CamusResultSet
         return ColumnValue.Null;
     }
 
-    // The wire schema carries no per-element type for arrays, so element types are inferred from the JSON
-    // token. Fully faithful for JSON-native element types; string/array-encoded element types (uuid/date/
-    // bytes inside an array) are not reconstructed — arrays are not part of the EF workload.
-    private static ColumnValue DecodeArray(JsonElement cell)
+    // An array element is written exactly as a scalar cell of its type: Date/DateTime as ticks, Bytes as
+    // base64, Uuid as [high, low]. So when the column schema names the element type, each element goes
+    // through the cell decoder against it and comes out as the gRPC transport gives it — a Date element is
+    // a Date, and a 0 in a float64 array is a Float64. A server older than the column's elementType field
+    // names none; the element types are then inferred from the JSON tokens, which is faithful only for the
+    // JSON-native types (a date comes out as Integer64, a uuid as Null).
+    private static ColumnValue DecodeArray(JsonElement cell, ColumnType elementType)
     {
         if (cell.ValueKind != JsonValueKind.Array)
             return ColumnValue.Null;
 
         List<ColumnValue> values = new(cell.GetArrayLength());
-        ColumnType elementType = ColumnType.Null;
+
+        if (IsElementType(elementType))
+        {
+            foreach (JsonElement item in cell.EnumerateArray())
+                values.Add(DecodeCell(item, elementType, ColumnType.Null));
+
+            return new ColumnValue { Type = ColumnType.Array, ArrayValues = values, ArrayElementType = elementType };
+        }
+
+        ColumnType inferred = ColumnType.Null;
 
         foreach (JsonElement item in cell.EnumerateArray())
         {
             ColumnValue decoded = DecodeScalarByToken(item, ColumnType.Null);
             if (decoded.Type != ColumnType.Null)
-                elementType = decoded.Type;
+                inferred = decoded.Type;
             values.Add(decoded);
         }
 
-        return new ColumnValue { Type = ColumnType.Array, ArrayValues = values, ArrayElementType = elementType };
+        return new ColumnValue { Type = ColumnType.Array, ArrayValues = values, ArrayElementType = inferred };
     }
+
+    // A scalar type this client can decode an element as. Null means the server named none; Array (an
+    // array of arrays) and a number newer than this client are treated the same way, so their elements
+    // are inferred from the JSON tokens as before.
+    private static bool IsElementType(ColumnType elementType) =>
+        elementType is > ColumnType.Null and <= ColumnType.Numeric and not ColumnType.Array;
 
     private static ColumnValue DecodeScalarByToken(JsonElement cell, ColumnType declared)
     {
@@ -532,8 +592,14 @@ public sealed class CamusResultSet
                 return new ColumnValue { Type = ColumnType.Bool, BoolValue = cell.GetBoolean() };
 
             case JsonValueKind.Number:
-                if (declared is ColumnType.Float64 or ColumnType.Float32)
-                    return new ColumnValue { Type = declared, FloatValue = cell.GetDouble() };
+                if (declared == ColumnType.Float64)
+                    return new ColumnValue { Type = ColumnType.Float64, FloatValue = cell.GetDouble() };
+
+                // The server writes a float32 as the float's shortest text (e.g. -9.321863E+23). Read as a
+                // double, that text is a different number from the stored float; read as a float it is the
+                // stored value, which then widens exactly — the FloatValue the gRPC transport gives.
+                if (declared == ColumnType.Float32)
+                    return new ColumnValue { Type = ColumnType.Float32, FloatValue = cell.TryGetSingle(out float f) ? f : (float)cell.GetDouble() };
 
                 if (cell.TryGetInt64(out long l))
                     return new ColumnValue { Type = ColumnType.Integer64, LongValue = l };
