@@ -395,6 +395,32 @@ public class CamusConnectionStringBuilder
     public CamusProtocol Protocol => ParseEnum<CamusProtocol>("Protocol") ?? CamusProtocol.Rest;
 
     /// <summary>
+    /// The highest HTTP version the driver asks for on the server's HTTP API, from <c>HttpVersion=</c>:
+    /// <c>1.1</c> (default), <c>2</c> or <c>3</c> (<c>2.0</c> and <c>3.0</c> also work). Absent or
+    /// unrecognized values default to HTTP/1.1, the version every earlier driver sent.
+    ///
+    /// <para>It covers every REST call: statements, login and logout, and the backup admin API, which is
+    /// REST on any <c>Protocol=</c>. It does not touch <c>Protocol=grpc</c> statements, which are always
+    /// HTTP/2.</para>
+    ///
+    /// <para>The version is a ceiling with a silent fallback; see <see cref="Transport.CamusHttpRequest"/>.
+    /// HTTP/3 needs an <c>https://</c> endpoint on a server with <c>http3_enabled</c>, the port open for
+    /// UDP, and the platform QUIC library on the client host (<c>libmsquic</c> on Linux and macOS). The
+    /// first request to an endpoint goes over TCP and learns of HTTP/3 from the response's
+    /// <c>Alt-Svc</c> header; later requests use QUIC. If the QUIC connection fails, the driver sends
+    /// that request again over TCP, and the requests after it also go over TCP.</para>
+    /// </summary>
+    public Version HttpVersion
+        => Config.TryGetValue("HttpVersion", out string? raw)
+            ? raw.Trim() switch
+            {
+                "2" or "2.0" => System.Net.HttpVersion.Version20,
+                "3" or "3.0" => System.Net.HttpVersion.Version30,
+                _ => System.Net.HttpVersion.Version11,
+            }
+            : System.Net.HttpVersion.Version11;
+
+    /// <summary>
     /// Timeout in seconds for the backup admin API, from <c>BackupTimeout=</c>. Defaults to 300 (5
     /// minutes) rather than <see cref="CommandTimeout"/>: taking a full or coordinated backup copies a
     /// whole node's base image, which routinely outlasts a statement timeout of ten seconds.
@@ -602,7 +628,7 @@ public class CamusConnectionStringBuilder
             {
                 ICamusTransport inner = Protocol == CamusProtocol.Grpc
                     ? new GrpcTransport(EndpointPool, auth, BatchOptions)
-                    : new RestTransport(EndpointPool, auth);
+                    : new RestTransport(EndpointPool, auth, HttpVersion);
 
                 return new AuthenticatingTransport(inner, auth);
             }
@@ -616,7 +642,7 @@ public class CamusConnectionStringBuilder
     /// so a transport is never reused across servers, protocols or users — the credentials are hashed by
     /// <see cref="CamusTokenProvider.SharingKey"/> rather than held in a long-lived dictionary key — plus
     /// the batch tuning, which sizes a gRPC transport's stream pool and so cannot be retrofitted onto one
-    /// that already exists.
+    /// that already exists — and the HTTP version, which every request of a REST transport carries.
     /// </summary>
     private string TransportKey
     {
@@ -630,7 +656,8 @@ public class CamusConnectionStringBuilder
                 batch.ChannelPoolSize,
                 batch.CoalescingThreshold,
                 batch.CoalescingDelayMs,
-                batch.RequestFrames);
+                batch.RequestFrames,
+                HttpVersion);
         }
     }
 
@@ -720,7 +747,7 @@ public class CamusConnectionStringBuilder
     /// configure and no cross-protocol hop.
     /// </summary>
     private ICamusLoginClient GetLoginClient()
-        => GetTransport() is AuthenticatingTransport { Inner: ICamusLoginClient grpc } ? grpc : new RestLoginClient();
+        => GetTransport() is AuthenticatingTransport { Inner: ICamusLoginClient grpc } ? grpc : new RestLoginClient(HttpVersion);
 
     internal void MarkEndpointUnreachable(string endpoint)
     {

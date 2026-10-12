@@ -16,7 +16,7 @@ namespace CamusDB.Client.Auth;
 /// only routes that are exempt from the server's own authentication middleware, and the only place a
 /// password is ever put on the wire.
 /// </summary>
-internal sealed class RestLoginClient : ICamusLoginClient
+internal sealed class RestLoginClient(Version httpVersion) : ICamusLoginClient
 {
     public async Task<CamusLoginResult> LoginAsync(string endpoint, string user, string password, int timeoutSeconds, CancellationToken cancellationToken)
     {
@@ -28,7 +28,7 @@ internal sealed class RestLoginClient : ICamusLoginClient
                 Password = password
             };
 
-            byte[] responseBytes = await endpoint
+            byte[] responseBytes = await CamusHttpRequest.Start(endpoint, httpVersion)
                 .WithHeader("Accept", "application/json")
                 .WithTimeout(timeoutSeconds)
                 .AppendPathSegments("login")
@@ -74,7 +74,7 @@ internal sealed class RestLoginClient : ICamusLoginClient
     {
         try
         {
-            await endpoint
+            await CamusHttpRequest.Start(endpoint, httpVersion)
                 .WithHeader("Accept", "application/json")
                 .WithOAuthBearerToken(token)
                 .WithTimeout(timeoutSeconds)

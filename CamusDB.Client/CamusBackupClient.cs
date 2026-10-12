@@ -240,7 +240,7 @@ public sealed class CamusBackupClient
     /// </summary>
     private async Task<IFlurlRequest> AuthorizeAsync(string endpoint, CancellationToken cancellationToken)
     {
-        IFlurlRequest request = endpoint.WithHeader("Accept", "application/json");
+        IFlurlRequest request = CamusHttpRequest.Start(endpoint, builder.HttpVersion).WithHeader("Accept", "application/json");
 
         string? token = await auth.GetTokenAsync(cancellationToken).ConfigureAwait(false);
 

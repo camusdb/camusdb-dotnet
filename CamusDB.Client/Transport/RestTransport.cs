@@ -19,7 +19,7 @@ namespace CamusDB.Client.Transport;
 /// bookkeeping the ADO surface used before the transport seam existed. Behavior is byte-identical to the
 /// previous inlined code; it now lives behind <see cref="ICamusTransport"/> so gRPC can sit beside it.
 /// </summary>
-internal sealed class RestTransport(CamusEndpointPool endpoints, CamusTokenProvider auth) : ICamusTransport
+internal sealed class RestTransport(CamusEndpointPool endpoints, CamusTokenProvider auth, Version httpVersion) : ICamusTransport
 {
     public CamusProtocol Protocol => CamusProtocol.Rest;
 
@@ -33,7 +33,7 @@ internal sealed class RestTransport(CamusEndpointPool endpoints, CamusTokenProvi
     /// </summary>
     private async Task<IFlurlRequest> AuthorizeAsync(string endpoint, string accept, CancellationToken cancellationToken)
     {
-        IFlurlRequest request = endpoint.WithHeader("Accept", accept);
+        IFlurlRequest request = CamusHttpRequest.Start(endpoint, httpVersion).WithHeader("Accept", accept);
 
         string? token = await auth.GetTokenAsync(cancellationToken).ConfigureAwait(false);
 

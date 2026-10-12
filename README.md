@@ -47,6 +47,7 @@ Supported connection string keys:
 | `Database` | Yes | Database name sent with requests. |
 | `Timeout` | No | Request timeout in seconds (default: `10`). |
 | `Protocol` | No | Wire protocol: `rest` (default) or `grpc`. See [Transport](#transport-rest--grpc). |
+| `HttpVersion` | No | Highest HTTP version for REST calls: `1.1` (default), `2` or `3`. See [HTTP/2 and HTTP/3 over REST](#http2-and-http3-over-rest). |
 | `User` | No | User to authenticate as. Aliases: `UserId`, `Uid`, `Username`. See [Authentication](#authentication). |
 | `Password` | No | That user's password. Alias: `Pwd`. |
 | `AccessToken` | No | A bearer token obtained elsewhere, used verbatim instead of logging in. |
@@ -221,6 +222,32 @@ If you are coming from Cloud Spanner: `ChannelPoolSize` is the analogue of `NumC
 Both transports raise the same `CamusException` (carrying the server's `CADBxxxx` code), so error handling and the transaction retry contract are unchanged when you switch. A couple of differences are inherent to the gRPC API surface:
 
 - Database-admin operations (`CreateDatabaseAsync`, `DropDatabaseAsync`, `CreateBranchDatabaseAsync`, `ShowBranchesAsync`, `ShowAncestorsAsync`) are issued as SQL over gRPC (the gRPC service has no dedicated admin RPCs); they behave the same from the caller's side.
+
+#### HTTP/2 and HTTP/3 over REST
+
+The REST transport sends HTTP/1.1 by default. Set `HttpVersion` to ask for a later version:
+
+```csharp
+// HTTP/3 (QUIC) against a server with http3_enabled: true
+CamusConnectionStringBuilder h3 = new("Endpoint=https://db.example.com:7141;Database=test;HttpVersion=3");
+```
+
+`HttpVersion` accepts `1.1`, `2` or `3` (`2.0` and `3.0` also work). Any other value falls back to `1.1`. The key applies to every REST call: statements, login and logout, and the [backup admin API](#backups) on any `Protocol`. `Protocol=grpc` statements always use HTTP/2 and ignore the key.
+
+The value is the highest version the client asks for, not a demand. When the client knows that a later version is not available, it uses an earlier one:
+
+- `HttpVersion=2` gives HTTP/2 on an `https://` endpoint. On a plain `http://` endpoint the client stays on HTTP/1.1.
+- `HttpVersion=3` sends the first request to an endpoint over TCP. The server's `Alt-Svc` response header tells the client that HTTP/3 is available, and the next requests to that endpoint use QUIC. If the client host has no QUIC library, all requests stay on TCP.
+- If the QUIC connection to an endpoint fails, for example because the server aborts the TLS handshake or UDP is blocked, the client sends that request again over TCP and stops using HTTP/3 for that endpoint. The request did not reach the server on the first attempt, so a statement never runs twice. The second attempt adds a delay to that one request only.
+
+HTTP/3 needs all of these:
+
+- An `https://` endpoint on the server's HTTPS port. The plain HTTP port does not serve HTTP/3.
+- `http3_enabled: true` and `https_certificate` on the server.
+- The HTTPS port open for UDP as well as TCP, which includes Docker port mappings and firewall rules.
+- The platform QUIC library on the client host: `libmsquic` on Linux and macOS (`brew install libmsquic`), or Windows 11 / Windows Server 2022 and later. On macOS, .NET does not search the Homebrew library folder, so start the application with `DYLD_FALLBACK_LIBRARY_PATH=/opt/homebrew/lib`. macOS removes `DYLD_*` variables for system binaries such as `nohup`, so set the variable in the environment of the application itself.
+
+To confirm that the client uses HTTP/3, run `SHOW CONNECTIONS` on the server. The `protocol` column shows `HTTP/3` for a QUIC connection.
 
 ### Prepared Statements
 
