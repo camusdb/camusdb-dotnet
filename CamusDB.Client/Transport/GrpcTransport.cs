@@ -789,6 +789,86 @@ internal sealed class GrpcTransport(CamusEndpointPool endpoints, CamusTokenProvi
         }
     }
 
+    public async Task<CamusNodeStats> GetNodeStatsAsync(string endpoint, int timeoutSeconds, CancellationToken cancellationToken)
+    {
+        global::Grpc.Core.Metadata? headers = await HeadersAsync(cancellationToken).ConfigureAwait(false);
+
+        try
+        {
+            NodeStatsReply reply = await GetClient(endpoint)
+                .GetNodeStatsAsync(new NodeStatsRequest(), CallOptions(timeoutSeconds, headers, cancellationToken))
+                .ResponseAsync.ConfigureAwait(false);
+
+            return ToNodeStats(endpoint, reply);
+        }
+        catch (RpcException ex)
+        {
+            throw Translate(endpoint, ex);
+        }
+    }
+
+    /// <summary>
+    /// Copies the wire reply onto the transport-agnostic model. A message field the server left unset
+    /// (an older server) keeps the model's -1 defaults rather than becoming zeros.
+    /// </summary>
+    internal static CamusNodeStats ToNodeStats(string endpoint, NodeStatsReply reply)
+    {
+        CamusNodeStats stats = new() { Address = endpoint };
+
+        if (reply.Node is { } node)
+            stats.Node = new CamusNodeIdentity
+            {
+                NodeId = node.NodeId,
+                Endpoint = node.Endpoint,
+                Version = node.Version,
+                ClusterMode = node.ClusterMode,
+                UptimeSeconds = node.UptimeSeconds,
+                SampledAtUnixMs = node.SampledAtUnixMs,
+            };
+
+        foreach (DiskVolumeStats disk in reply.Disks)
+            stats.Disks.Add(new CamusDiskVolumeStats
+            {
+                Role = disk.Role,
+                Path = disk.Path,
+                MountPoint = disk.MountPoint,
+                TotalBytes = disk.TotalBytes,
+                FreeBytes = disk.FreeBytes,
+                AvailableBytes = disk.AvailableBytes,
+                UsedBytes = disk.UsedBytes,
+                MinFreeDiskBytes = disk.MinFreeDiskBytes,
+                BelowWatermark = disk.BelowWatermark,
+                EngineBytes = disk.EngineBytes,
+            });
+
+        if (reply.Cpu is { } cpu)
+            stats.Cpu = new CamusCpuStats
+            {
+                ProcessCpuPercent = cpu.ProcessCpuPercent,
+                ProcessCpuWindowMs = cpu.ProcessCpuWindowMs,
+                ProcessorCount = cpu.ProcessorCount,
+                LoadAverage1m = cpu.LoadAverage1M,
+                LoadAverage5m = cpu.LoadAverage5M,
+                LoadAverage15m = cpu.LoadAverage15M,
+            };
+
+        if (reply.Memory is { } memory)
+            stats.Memory = new CamusMemoryStats
+            {
+                ProcessWorkingSetBytes = memory.ProcessWorkingSetBytes,
+                GcHeapBytes = memory.GcHeapBytes,
+                GcCommittedBytes = memory.GcCommittedBytes,
+                GcMemoryLimitBytes = memory.GcMemoryLimitBytes,
+                HostTotalBytes = memory.HostTotalBytes,
+                HostAvailableBytes = memory.HostAvailableBytes,
+            };
+
+        foreach (NodeStatsError error in reply.Errors)
+            stats.Errors.Add(new CamusNodeStatsError { Field = error.Field, Message = error.Message });
+
+        return stats;
+    }
+
     // ─── Database admin (composed SQL) ──────────────────────────────────────────
 
     public Task CreateDatabaseAsync(

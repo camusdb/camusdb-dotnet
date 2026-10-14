@@ -350,6 +350,32 @@ Things worth knowing before you use it:
 
 **Restore is not exposed here.** `POST /v1/restore` rebuilds into a *fresh* data root, after which the operator stops the server and boots a new one against it — there is no hot in-place restore, so it is not an operation an application can drive to completion. It remains an operator runbook step; see the server's `backups-and-point-in-time-recovery` guide.
 
+### Node stats
+
+`connection.GetNodeStatsAsync()` returns the disk, CPU and memory of one node. It works over both `Protocol=rest` (`GET /v1/admin/stats`) and `Protocol=grpc` (`GetNodeStats`).
+
+```csharp
+CamusNodeStats stats = await connection.GetNodeStatsAsync();     // the next endpoint in rotation
+CamusDiskVolumeStats data = stats.DataVolume!;                    // the volume that holds data_dir
+
+Console.WriteLine($"{data.AvailableBytes} bytes free of {data.TotalBytes}");
+Console.WriteLine($"writes refused (below min_free_disk_bytes): {data.BelowWatermark}");
+
+foreach (string endpoint in connection.Endpoints)                 // one call per node of a cluster
+{
+    CamusNodeStats node = await connection.GetNodeStatsAsync(endpoint);
+    Console.WriteLine($"{node.Address}: {node.Cpu.ProcessCpuPercent:F1}% CPU, {node.Memory.HostAvailableBytes} bytes of memory free");
+}
+```
+
+Things worth knowing before you use it:
+
+- **Each node answers for itself.** `Address` says which configured endpoint answered. `GetNodeStatsAsync(endpoint)` accepts only an endpoint from `Endpoints`, so the connection's credentials never go to another address.
+- **`-1` means unknown.** A value the node could not read is `-1`, and `Errors` names the field and the reason. One failed probe never fails the call.
+- **`BelowWatermark` is the write gate's own answer.** While it is `true`, writes on that node fail with `CADB0536`.
+- **`MONITOR`, not superuser.** With authentication enabled, the account needs the superuser attribute or the `MONITOR` privilege: `GRANT MONITOR ON *.* TO monitoring;`. Other accounts get `CADB0517`.
+- **Cheap enough to poll.** The server answers from caches and a background sampler, so one call every minute from several monitors costs nothing measurable. See the server's `node-stats` guide for every field.
+
 ### Usage
 
 #### Database Management

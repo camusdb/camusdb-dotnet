@@ -76,6 +76,9 @@ internal sealed class AuthenticatingTransport(ICamusTransport inner, CamusTokenP
     public Task<bool> PingAsync(string endpoint, int timeoutSeconds, CancellationToken cancellationToken)
         => RunAsync(ct => inner.PingAsync(endpoint, timeoutSeconds, ct), cancellationToken);
 
+    public Task<CamusNodeStats> GetNodeStatsAsync(string endpoint, int timeoutSeconds, CancellationToken cancellationToken)
+        => RunAsync(ct => inner.GetNodeStatsAsync(endpoint, timeoutSeconds, ct), cancellationToken);
+
     public Task CreateDatabaseAsync(
         string endpoint, string database, bool ifNotExists, int timeoutSeconds, CancellationToken cancellationToken)
         => RunAsync(ct => inner.CreateDatabaseAsync(endpoint, database, ifNotExists, timeoutSeconds, ct), cancellationToken);

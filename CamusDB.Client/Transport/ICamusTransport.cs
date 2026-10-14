@@ -102,6 +102,13 @@ internal interface ICamusTransport
     /// <summary>Liveness check. Returns true when the server answers.</summary>
     Task<bool> PingAsync(string endpoint, int timeoutSeconds, CancellationToken cancellationToken);
 
+    /// <summary>
+    /// The disk, CPU and memory of the node at <paramref name="endpoint"/> (gRPC <c>GetNodeStats</c>,
+    /// REST <c>GET /v1/admin/stats</c>). Needs a superuser or the MONITOR privilege when the server
+    /// authenticates.
+    /// </summary>
+    Task<CamusNodeStats> GetNodeStatsAsync(string endpoint, int timeoutSeconds, CancellationToken cancellationToken);
+
     /// <summary>Creates a database. A single attempt — the caller owns the transient-retry loop.</summary>
     Task CreateDatabaseAsync(
         string endpoint, string database, bool ifNotExists, int timeoutSeconds, CancellationToken cancellationToken);

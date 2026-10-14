@@ -65,7 +65,11 @@ internal sealed class CamusEndpointPool
             .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
 
         quarantinedUntil = new long[endpoints.Length];
+        Endpoints = Array.AsReadOnly(endpoints);
     }
+
+    /// <summary>The configured endpoints, in configuration order, regardless of quarantine.</summary>
+    public IReadOnlyList<string> Endpoints { get; }
 
     /// <summary>
     /// The next endpoint to send to, skipping those in quarantine.

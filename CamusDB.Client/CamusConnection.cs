@@ -152,6 +152,39 @@ public sealed class CamusConnection : DbConnection
 
     private CamusBackupClient? backups;
 
+    /// <summary>The endpoints this connection string names (<c>Endpoint=</c>), in configuration order.</summary>
+    public IReadOnlyList<string> Endpoints => builder.EndpointPool.Endpoints;
+
+    /// <summary>
+    /// The disk, CPU and memory of the next node in the endpoint rotation — see <see cref="CamusNodeStats"/>
+    /// for every field. Use <see cref="GetNodeStatsAsync(string, CancellationToken)"/> to ask a given node;
+    /// each node answers only for itself.
+    ///
+    /// <para>Server-level, not scoped to <see cref="Database"/>. With authentication on, the account needs
+    /// the superuser attribute or the <c>MONITOR</c> privilege (<c>GRANT MONITOR ON *.* TO &lt;user&gt;</c>);
+    /// otherwise the call fails with <c>CADB0517</c>. Works over both <c>Protocol=Rest</c> and
+    /// <c>Protocol=Grpc</c>.</para>
+    /// </summary>
+    public Task<CamusNodeStats> GetNodeStatsAsync(CancellationToken cancellationToken = default)
+        => GetNodeStatsAsync(builder.GetEndpoint(), cancellationToken);
+
+    /// <summary>
+    /// The disk, CPU and memory of the node at <paramref name="endpoint"/>, which must be one of
+    /// <see cref="Endpoints"/> — the connection's credentials are sent only to the endpoints it was
+    /// configured with.
+    /// </summary>
+    public async Task<CamusNodeStats> GetNodeStatsAsync(string endpoint, CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(endpoint);
+
+        if (!builder.EndpointPool.Contains(endpoint))
+            throw new ArgumentException($"'{endpoint}' is not one of this connection's endpoints", nameof(endpoint));
+
+        return await builder.GetTransport()
+            .GetNodeStatsAsync(endpoint, builder.CommandTimeout, cancellationToken)
+            .ConfigureAwait(false);
+    }
+
     public override void ChangeDatabase(string databaseName)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(databaseName);

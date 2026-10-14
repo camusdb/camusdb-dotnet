@@ -530,6 +530,9 @@ public class TestAuthentication
         public Task<bool> PingAsync(string endpoint, int timeoutSeconds, CancellationToken cancellationToken)
             => throw new NotSupportedException();
 
+        public Task<CamusNodeStats> GetNodeStatsAsync(string endpoint, int timeoutSeconds, CancellationToken cancellationToken)
+            => throw new NotSupportedException();
+
         public Task CreateDatabaseAsync(string endpoint, string database, bool ifNotExists, int timeoutSeconds, CancellationToken cancellationToken)
             => throw new NotSupportedException();
 

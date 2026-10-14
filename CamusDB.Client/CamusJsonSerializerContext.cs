@@ -42,4 +42,5 @@ namespace CamusDB.Client;
 [JsonSerializable(typeof(CamusBackupGcResponse))]
 [JsonSerializable(typeof(CamusBackupGcDeletion))]
 [JsonSerializable(typeof(CamusBackupGcOrphan))]
+[JsonSerializable(typeof(CamusNodeStatsResponse))]
 internal sealed partial class CamusJsonSerializerContext : JsonSerializerContext;

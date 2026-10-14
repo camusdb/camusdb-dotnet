@@ -362,6 +362,37 @@ internal sealed class RestTransport(CamusEndpointPool endpoints, CamusTokenProvi
         }
     }
 
+    public async Task<CamusNodeStats> GetNodeStatsAsync(string endpoint, int timeoutSeconds, CancellationToken cancellationToken)
+    {
+        try
+        {
+            byte[] responseBytes = await (await AuthorizeAsync(endpoint, "application/json", cancellationToken).ConfigureAwait(false))
+                .WithTimeout(timeoutSeconds)
+                .AppendPathSegments("v1", "admin", "stats")
+                .GetBytesAsync(cancellationToken: cancellationToken)
+                .ConfigureAwait(false);
+
+            CamusNodeStatsResponse? response = JsonSerializer.Deserialize(responseBytes, CamusJsonSerializerContext.Default.CamusNodeStatsResponse);
+
+            if (response?.Status != "ok")
+                throw new CamusException(response?.Code ?? "CADB0000", response?.Message ?? "Node stats failed");
+
+            return new CamusNodeStats
+            {
+                Address = endpoint,
+                Node = response.Node ?? new CamusNodeIdentity(),
+                Disks = response.Disks ?? [],
+                Cpu = response.Cpu ?? new CamusCpuStats(),
+                Memory = response.Memory ?? new CamusMemoryStats(),
+                Errors = response.Errors ?? [],
+            };
+        }
+        catch (FlurlHttpException ex)
+        {
+            throw await TranslateAsync(ex, endpoint).ConfigureAwait(false);
+        }
+    }
+
     public async Task CreateDatabaseAsync(
         string endpoint, string database, bool ifNotExists, int timeoutSeconds, CancellationToken cancellationToken)
     {
