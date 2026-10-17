@@ -395,6 +395,13 @@ public class CamusConnectionStringBuilder
     public CamusProtocol Protocol => ParseEnum<CamusProtocol>("Protocol") ?? CamusProtocol.Rest;
 
     /// <summary>
+    /// Whether the driver's spans carry the SQL text as <c>db.query.text</c>, from <c>TraceQueryText=</c>
+    /// (<c>true</c>/<c>false</c>, default <c>false</c>). SQL text with literal values can contain
+    /// sensitive data, so it is opt-in. Parameter values are never recorded. See <see cref="CamusTelemetry"/>.
+    /// </summary>
+    public bool TraceQueryText => ParseBool("TraceQueryText", false);
+
+    /// <summary>
     /// The highest HTTP version the driver asks for on the server's HTTP API, from <c>HttpVersion=</c>:
     /// <c>1.1</c> (default), <c>2</c> or <c>3</c> (<c>2.0</c> and <c>3.0</c> also work). Absent or
     /// unrecognized values default to HTTP/1.1, the version every earlier driver sent.
@@ -612,6 +619,13 @@ public class CamusConnectionStringBuilder
     /// <see cref="CamusConnection.LoginAsync"/>, which detaches this builder onto a transport of its own
     /// first — is covered too.</para>
     /// </summary>
+    /// <summary>Makes this builder's connections use <paramref name="replacement"/>. For tests only.</summary>
+    internal void UseTransport(ICamusTransport replacement)
+    {
+        lock (transportLock)
+            transport = replacement;
+    }
+
     internal ICamusTransport GetTransport()
     {
         if (transport is not null)

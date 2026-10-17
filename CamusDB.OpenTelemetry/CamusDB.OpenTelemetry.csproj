@@ -1,0 +1,37 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFrameworks>net8.0;net9.0;net10.0</TargetFrameworks>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <PackageId>CamusDB.OpenTelemetry</PackageId>
+    <Version>0.15.4</Version>
+    <Description>OpenTelemetry registration for CamusDB.Client: AddCamusDBInstrumentation() for traces and metrics.</Description>
+    <Authors>CamusDB</Authors>
+    <Company>CamusDB</Company>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageDescription>CamusDB.OpenTelemetry registers the CamusDB.Client activity source and meter with the OpenTelemetry SDK.</PackageDescription>
+    <PackageProjectUrl>https://github.com/camusdb/camusdb-dotnet</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/camusdb/camusdb-dotnet</RepositoryUrl>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageTags>dotnet;camusdb;opentelemetry;tracing;metrics</PackageTags>
+  </PropertyGroup>
+
+  <!-- Only the API package: an application brings the SDK and the exporters it wants. -->
+  <ItemGroup>
+    <PackageReference Include="OpenTelemetry.Api" Version="1.18.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\CamusDB.Client\CamusDB.Client.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="../README.md">
+      <Pack>True</Pack>
+      <PackagePath>\</PackagePath>
+    </None>
+  </ItemGroup>
+
+</Project>

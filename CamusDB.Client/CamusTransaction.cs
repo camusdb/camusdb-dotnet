@@ -150,11 +150,22 @@ public class CamusTransaction : DbTransaction
     /// </summary>
     private async Task StartOnAsync(string target, CancellationToken cancellationToken)
     {
-        StartTransactionResult result = await builder.GetTransport()
-            .StartTransactionAsync(target, builder.Config["Database"], Options, builder.CommandTimeout, cancellationToken)
-            .ConfigureAwait(false);
+        CamusOperation? operation = CamusOperation.IsEnabled ? CamusOperation.Start(builder, "BEGIN") : null;
+        try
+        {
+            operation?.SetEndpoint(target);
 
-        Seat(result, target);
+            StartTransactionResult result = await builder.GetTransport()
+                .StartTransactionAsync(target, builder.Config["Database"], Options, builder.CommandTimeout, cancellationToken)
+                .ConfigureAwait(false);
+
+            Seat(result, target);
+            operation?.Complete();
+        }
+        catch (Exception ex) when (CamusOperation.Fail(operation, ex))
+        {
+            throw;
+        }
     }
 
     private void Seat(in StartTransactionResult result, string target)
@@ -277,20 +288,35 @@ public class CamusTransaction : DbTransaction
 
         string target = await EnsureStartedAsync(preferredEndpoint: null, cancellationToken).ConfigureAwait(false);
 
-        for (int attempt = 0; ; attempt++)
+        // One operation covers every attempt: the caller asked for one commit or rollback.
+        CamusOperation? operation = CamusOperation.IsEnabled
+            ? CamusOperation.Start(builder, commit ? "COMMIT" : "ROLLBACK")
+            : null;
+        operation?.SetEndpoint(target);
+
+        try
         {
-            try
+            for (int attempt = 0; ; attempt++)
             {
-                await builder.GetTransport()
-                    .FinalizeTransactionAsync(commit, target, builder.Config["Database"], txnIdPT, txnIdCounter, StreamSlot, builder.CommandTimeout, cancellationToken)
-                    .ConfigureAwait(false);
-                return;
+                try
+                {
+                    await builder.GetTransport()
+                        .FinalizeTransactionAsync(commit, target, builder.Config["Database"], txnIdPT, txnIdCounter, StreamSlot, builder.CommandTimeout, cancellationToken)
+                        .ConfigureAwait(false);
+                    operation?.Complete();
+                    return;
+                }
+                catch (CamusException ex)
+                    when (ex.Code == SerializableRetryHelper.FinalizeUnresolvedCode && attempt < MaxFinalizeAttempts)
+                {
+                    CamusMetrics.RecordRetry(CamusMetrics.RetryKind.Finalize, ex.Code, builder.Config["Database"], commit ? "COMMIT" : "ROLLBACK");
+                    await Task.Delay(ComputeFinalizeDelay(attempt), cancellationToken).ConfigureAwait(false);
+                }
             }
-            catch (CamusException ex)
-                when (ex.Code == SerializableRetryHelper.FinalizeUnresolvedCode && attempt < MaxFinalizeAttempts)
-            {
-                await Task.Delay(ComputeFinalizeDelay(attempt), cancellationToken).ConfigureAwait(false);
-            }
+        }
+        catch (Exception ex) when (CamusOperation.Fail(operation, ex))
+        {
+            throw;
         }
     }
 

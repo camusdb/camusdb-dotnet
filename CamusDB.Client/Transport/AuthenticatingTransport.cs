@@ -111,6 +111,7 @@ internal sealed class AuthenticatingTransport(ICamusTransport inner, CamusTokenP
         catch (CamusException ex) when (IsRenewable(ex, ref presented))
         {
             auth.Invalidate(presented);
+            CamusMetrics.RecordRetry(CamusMetrics.RetryKind.TokenRenewal, ex.Code);
         }
 
         return await operation(cancellationToken).ConfigureAwait(false);
@@ -128,6 +129,7 @@ internal sealed class AuthenticatingTransport(ICamusTransport inner, CamusTokenP
         catch (CamusException ex) when (IsRenewable(ex, ref presented))
         {
             auth.Invalidate(presented);
+            CamusMetrics.RecordRetry(CamusMetrics.RetryKind.TokenRenewal, ex.Code);
         }
 
         await operation(cancellationToken).ConfigureAwait(false);

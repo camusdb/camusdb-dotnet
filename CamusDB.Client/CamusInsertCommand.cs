@@ -33,21 +33,36 @@ public class CamusInsertCommand : CamusCommand
     /// <inheritdoc />
     public override async Task<int> ExecuteNonQueryAsync(CancellationToken cancellationToken)
     {
-        ICamusTransport transport = builder.GetTransport();
-        string endpoint = await GetEndpointAsync(cancellationToken).ConfigureAwait(false);
-
-        TransportInsertRequest request = new()
+        // The command text is a table name, not SQL, so it is the span's collection and never query text.
+        CamusOperation? operation = CamusOperation.IsEnabled
+            ? CamusOperation.Start(builder, "INSERT", collection: GetRequestTarget())
+            : null;
+        try
         {
-            Endpoint = endpoint,
-            Database = builder.Config["Database"],
-            Table = GetRequestTarget(),
-            Values = GetCommandParameters(transport.Protocol),
-            TxnIdPT = transaction?.TxnIdPT,
-            TxnIdCounter = transaction?.TxnIdCounter,
-            StreamSlot = transaction?.StreamSlot,
-            TimeoutSeconds = CommandTimeout,
-        };
+            ICamusTransport transport = builder.GetTransport();
+            string endpoint = await GetEndpointAsync(cancellationToken).ConfigureAwait(false);
+            operation?.SetEndpoint(endpoint);
 
-        return await transport.InsertAsync(request, cancellationToken).ConfigureAwait(false);
+            TransportInsertRequest request = new()
+            {
+                Endpoint = endpoint,
+                Database = builder.Config["Database"],
+                Table = GetRequestTarget(),
+                Values = GetCommandParameters(transport.Protocol),
+                TxnIdPT = transaction?.TxnIdPT,
+                TxnIdCounter = transaction?.TxnIdCounter,
+                StreamSlot = transaction?.StreamSlot,
+                TimeoutSeconds = CommandTimeout,
+            };
+
+            int affected = await transport.InsertAsync(request, cancellationToken).ConfigureAwait(false);
+
+            operation?.Complete();
+            return affected;
+        }
+        catch (Exception ex) when (CamusOperation.Fail(operation, ex))
+        {
+            throw;
+        }
     }
 }

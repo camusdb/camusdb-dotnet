@@ -20,6 +20,8 @@ public class CamusDataReader : DbDataReader
 
     private readonly string[] columnNames;
 
+    private readonly CamusOperation? operation;
+
     public override int Depth => 0;
 
     public override int FieldCount => columnNames.Length;
@@ -55,31 +57,62 @@ public class CamusDataReader : DbDataReader
     /// <see cref="CamusCommand.ExecuteStreamReaderAsync()"/>, or the buffered source the public
     /// constructors wrap. The schema (column names) is captured up front, so it is reported the same way
     /// regardless of delivery mode.
+    ///
+    /// <para><paramref name="operation"/> is the telemetry operation of a streaming read. The reader ends
+    /// it at the last row, at a read failure, or at close, whichever comes first.</para>
     /// </summary>
-    internal CamusDataReader(CamusRowSource source, CamusCacheMetadata? cacheMetadata = null)
+    internal CamusDataReader(CamusRowSource source, CamusCacheMetadata? cacheMetadata = null, CamusOperation? operation = null)
     {
         this.source = source;
         columnNames = source.ColumnNames;
         CacheMetadata = cacheMetadata;
+        this.operation = operation;
     }
 
     public override void Close()
     {
         isClosed = true;
+        operation?.Complete();
     }
 
     public override bool Read()
     {
         ThrowIfClosed();
 
-        return source.Read();
+        if (operation is null)
+            return source.Read();
+
+        try
+        {
+            bool read = source.Read();
+            if (!read)
+                operation.Complete();
+            return read;
+        }
+        catch (Exception ex) when (CamusOperation.Fail(operation, ex))
+        {
+            throw;
+        }
     }
 
     public override async Task<bool> ReadAsync(CancellationToken cancellationToken)
     {
         ThrowIfClosed();
 
-        return await source.ReadAsync(cancellationToken).ConfigureAwait(false);
+        if (operation is null)
+            return await source.ReadAsync(cancellationToken).ConfigureAwait(false);
+
+        try
+        {
+            bool read = await source.ReadAsync(cancellationToken).ConfigureAwait(false);
+            if (!read)
+                operation.Complete();
+            return read;
+        }
+        catch (Exception ex) when (CamusOperation.Fail(operation, ex))
+        {
+            throw;
+        }
     }
 
     public override bool NextResult() => false;

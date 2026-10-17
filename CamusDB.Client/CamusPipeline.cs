@@ -132,6 +132,13 @@ public sealed class CamusPipeline
         queued.Clear();
         sending = true;
 
+        // One operation for the exchange. The statements in it get no spans of their own: they travel
+        // together and the server answers them together.
+        CamusOperation? operation = CamusOperation.IsEnabled
+            ? CamusOperation.Start(builder, "BATCH", batchSize: batch.Length)
+            : null;
+        operation?.Activity?.SetTag("camusdb.pipeline.commit", commit);
+
         TaskCompletionSource? claim = null;
         try
         {
@@ -142,6 +149,7 @@ public sealed class CamusPipeline
 
             string endpoint = transaction.Endpoint ?? ChooseEndpoint(batch);
             string database = builder.Config["Database"];
+            operation?.SetEndpoint(endpoint);
 
             // Each statement's route entry is read before the exchange, pinned or not, for the same
             // reason a lone command reads it: the reply's advice refreshes the route only if the entry
@@ -205,9 +213,13 @@ public sealed class CamusPipeline
 
             if (result.FirstFailure is { } first)
                 ExceptionDispatchInfo.Capture(first).Throw();
+
+            operation?.Complete();
         }
         catch (Exception ex)
         {
+            operation?.Fail(ex);
+
             // A failure before or of the exchange itself: nothing has been settled, so settle it all
             // with the one failure, the claim included, so no caller waits forever.
             if (claim is not null)

@@ -114,6 +114,7 @@ public static class SerializableRetryHelper
                 if (++attempt >= maxAttempts)
                     throw;
 
+                CamusMetrics.RecordRetry(CamusMetrics.RetryKind.Autocommit, ex.Code);
                 await Task.Delay(ComputeDelay(attempt), cancellationToken).ConfigureAwait(false);
             }
         }
@@ -140,6 +141,7 @@ public static class SerializableRetryHelper
                 if (++attempt >= maxAttempts)
                     throw;
 
+                CamusMetrics.RecordRetry(CamusMetrics.RetryKind.Autocommit, ex.Code);
                 await Task.Delay(ComputeDelay(attempt), cancellationToken).ConfigureAwait(false);
             }
         }

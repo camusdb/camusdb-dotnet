@@ -147,12 +147,30 @@ internal sealed class CamusEndpointPool
     {
         lock (sync)
         {
-            for (int i = 0; i < endpoints.Length; i++)
+            int index = Array.FindIndex(endpoints, candidate => string.Equals(candidate, endpoint, StringComparison.OrdinalIgnoreCase));
+            if (index < 0)
+                return;
+
+            quarantinedUntil[index] = Environment.TickCount64 + (long)QuarantinePeriod.TotalMilliseconds;
+        }
+
+        CamusMetrics.RecordQuarantine(endpoint);
+    }
+
+    /// <summary>Adds each endpoint of the shared pools to <paramref name="into"/>, with whether one of the
+    /// pools has it in quarantine now. For the <c>camusdb.client.endpoint.quarantined</c> gauge.</summary>
+    internal static void CollectQuarantine(Dictionary<string, bool> into)
+    {
+        long now = Environment.TickCount64;
+
+        foreach (CamusEndpointPool pool in SharedPools.Values)
+        {
+            lock (pool.sync)
             {
-                if (string.Equals(endpoints[i], endpoint, StringComparison.OrdinalIgnoreCase))
+                for (int i = 0; i < pool.endpoints.Length; i++)
                 {
-                    quarantinedUntil[i] = Environment.TickCount64 + (long)QuarantinePeriod.TotalMilliseconds;
-                    return;
+                    bool quarantined = pool.quarantinedUntil[i] > now;
+                    into[pool.endpoints[i]] = into.GetValueOrDefault(pool.endpoints[i]) || quarantined;
                 }
             }
         }

@@ -269,9 +269,21 @@ public sealed class CamusConnection : DbConnection
             // Routing off: the pre-routing behavior, byte for byte — BEGIN on rotation, right now.
             string endpoint = builder.GetEndpoint();
 
-            StartTransactionResult result = await builder.GetTransport()
-                .StartTransactionAsync(endpoint, database, effective, builder.CommandTimeout, cancellationToken)
-                .ConfigureAwait(false);
+            CamusOperation? operation = CamusOperation.IsEnabled ? CamusOperation.Start(builder, "BEGIN") : null;
+            operation?.SetEndpoint(endpoint);
+
+            StartTransactionResult result;
+            try
+            {
+                result = await builder.GetTransport()
+                    .StartTransactionAsync(endpoint, database, effective, builder.CommandTimeout, cancellationToken)
+                    .ConfigureAwait(false);
+                operation?.Complete();
+            }
+            catch (Exception ex) when (CamusOperation.Fail(operation, ex))
+            {
+                throw;
+            }
 
             return new CamusTransaction(result.TxnIdPT, result.TxnIdCounter, endpoint, this, builder, effective)
             {
@@ -370,6 +382,8 @@ public sealed class CamusConnection : DbConnection
             }
             catch (CamusException ex) when (attempt < maxAttempts && IsTransientCreateDatabaseError(ex))
             {
+                CamusMetrics.RecordRetry(CamusMetrics.RetryKind.CreateDatabase, ex.Code, databaseName, "CREATE");
+
                 double baseMs = Math.Min(50d * (1 << (attempt - 1)), 800d);
                 double jitter = baseMs * 0.25 * (2d * Random.Shared.NextDouble() - 1d);
 
@@ -430,6 +444,8 @@ public sealed class CamusConnection : DbConnection
             }
             catch (CamusException ex) when (attempt < maxAttempts && IsTransientCreateDatabaseError(ex))
             {
+                CamusMetrics.RecordRetry(CamusMetrics.RetryKind.CreateDatabase, ex.Code, branchName, "CREATE");
+
                 double baseMs = Math.Min(50d * (1 << (attempt - 1)), 800d);
                 double jitter = baseMs * 0.25 * (2d * Random.Shared.NextDouble() - 1d);
 

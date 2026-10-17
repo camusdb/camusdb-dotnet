@@ -230,6 +230,23 @@ internal sealed class CamusPreparedStatementPolicy
     /// </summary>
     public void Disable() => disabled = true;
 
+    /// <summary>Adds, per database, the statements the shared policies keep prepared now. For the
+    /// <c>camusdb.client.prepared_statement.count</c> gauge.</summary>
+    internal static void CollectPreparedCounts(Dictionary<string, int> into)
+    {
+        foreach (CamusPreparedStatementPolicy policy in SharedPolicies.Values)
+        {
+            lock (policy.mutex)
+            {
+                foreach (Entry entry in policy.recency)
+                {
+                    if (entry.State == EntryState.Prepared)
+                        into[entry.Database] = into.GetValueOrDefault(entry.Database) + 1;
+                }
+            }
+        }
+    }
+
     /// <summary>Forgets a statement entirely, so a later execution counts from scratch.</summary>
     public void Forget(string database, string sql)
     {

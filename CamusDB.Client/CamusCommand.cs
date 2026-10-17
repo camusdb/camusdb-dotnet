@@ -790,36 +790,54 @@ public class CamusCommand : DbCommand, ICloneable
         if (!writeReturning && IsDmlStatement(CommandText))
             return await ExecuteDmlAsReaderAsync(cancellationToken).ConfigureAwait(false);
 
-        // A learned route still steers the send — reuse costs nothing here — but the streaming
-        // endpoint's trailer carries no routing metadata, so nothing is negotiated or learned.
-        // A write with RETURNING reuses the route learned for the write, which is where the rows live.
-        (string endpoint, _, _) = await RouteEndpointAsync(
-            writeReturning ? CamusRouteOpKind.NonQuery : CamusRouteOpKind.Query, cancellationToken).ConfigureAwait(false);
-
-        TransportSqlRequest request = new()
+        // The rows arrive while the caller reads, so the reader ends this operation: at the last row, at
+        // a read failure, or when the caller closes it.
+        CamusOperation? operation = StartOperation();
+        try
         {
-            Endpoint = endpoint,
-            Database = builder.Config["Database"],
-            Sql = GetRequestTarget(),
-            Parameters = GetCommandParameters(builder.GetTransport().Protocol),
-            TxnIdPT = transaction?.TxnIdPT,
-            TxnIdCounter = transaction?.TxnIdCounter,
-            StreamSlot = transaction?.StreamSlot,
-            // A read runs in a read-only snapshot with no locking mode, but an autocommit write on the
-            // query endpoint begins a writable transaction that honors the same options as a non-query.
-            AutocommitOptions = writeReturning && transaction is null ? ResolveAutocommitOptions() : null,
-            TimeoutSeconds = CommandTimeout,
-            Prepared = await ShouldPrepareAsync(endpoint, cancellationToken).ConfigureAwait(false),
-        };
+            // A learned route still steers the send — reuse costs nothing here — but the streaming
+            // endpoint's trailer carries no routing metadata, so nothing is negotiated or learned.
+            // A write with RETURNING reuses the route learned for the write, which is where the rows live.
+            (string endpoint, _, _) = await RouteEndpointAsync(
+                writeReturning ? CamusRouteOpKind.NonQuery : CamusRouteOpKind.Query, cancellationToken).ConfigureAwait(false);
+            operation?.SetEndpoint(endpoint);
 
-        CamusRowSource source = await builder.GetTransport().ExecuteQueryStreamAsync(request, cancellationToken).ConfigureAwait(false);
+            TransportSqlRequest request = new()
+            {
+                Endpoint = endpoint,
+                Database = builder.Config["Database"],
+                Sql = GetRequestTarget(),
+                Parameters = GetCommandParameters(builder.GetTransport().Protocol),
+                TxnIdPT = transaction?.TxnIdPT,
+                TxnIdCounter = transaction?.TxnIdCounter,
+                StreamSlot = transaction?.StreamSlot,
+                // A read runs in a read-only snapshot with no locking mode, but an autocommit write on the
+                // query endpoint begins a writable transaction that honors the same options as a non-query.
+                AutocommitOptions = writeReturning && transaction is null ? ResolveAutocommitOptions() : null,
+                TimeoutSeconds = CommandTimeout,
+                Prepared = await ShouldPrepareAsync(endpoint, cancellationToken).ConfigureAwait(false),
+            };
 
-        // The streaming endpoint carries no cache metadata (its trailer has no cache fields).
-        LastCacheMetadata = null;
-        LastRoutingAdvice = null;
+            CamusRowSource source = await builder.GetTransport().ExecuteQueryStreamAsync(request, cancellationToken).ConfigureAwait(false);
 
-        return new CamusDataReader(source);
+            // The streaming endpoint carries no cache metadata (its trailer has no cache fields).
+            LastCacheMetadata = null;
+            LastRoutingAdvice = null;
+
+            return new CamusDataReader(source, operation: operation);
+        }
+        catch (Exception ex) when (CamusOperation.Fail(operation, ex))
+        {
+            throw;
+        }
     }
+
+    /// <summary>Starts the telemetry operation for this command's SQL statement, or returns
+    /// <see langword="null"/> when nothing listens.</summary>
+    private CamusOperation? StartOperation()
+        => CamusOperation.IsEnabled
+            ? CamusOperation.Start(builder, CamusOperation.OperationName(CommandText), queryText: CommandText)
+            : null;
 
     /// <inheritdoc />
     protected override DbDataReader ExecuteDbDataReader(CommandBehavior behavior) =>
@@ -831,30 +849,41 @@ public class CamusCommand : DbCommand, ICloneable
         if (IsDmlStatement(CommandText))
             return await ExecuteDmlAsReaderAsync(cancellationToken).ConfigureAwait(false);
 
-        (string endpoint, CamusStatementRouter? router, long observedRevision) =
-            await RouteEndpointAsync(CamusRouteOpKind.Query, cancellationToken).ConfigureAwait(false);
-
-        TransportSqlRequest request = new()
+        // The reader is buffered: all rows are here when the call returns, so the operation ends here.
+        CamusOperation? operation = StartOperation();
+        try
         {
-            Endpoint = endpoint,
-            Database = builder.Config["Database"],
-            Sql = GetRequestTarget(),
-            Parameters = GetCommandParameters(builder.GetTransport().Protocol),
-            TxnIdPT = transaction?.TxnIdPT,
-            TxnIdCounter = transaction?.TxnIdCounter,
-            StreamSlot = transaction?.StreamSlot,
-            TimeoutSeconds = CommandTimeout,
-            Prepared = await ShouldPrepareAsync(endpoint, cancellationToken).ConfigureAwait(false),
-            RoutingAcceptVersion = router is not null ? CamusRoutingAdvice.AcceptVersion : 0,
-        };
+            (string endpoint, CamusStatementRouter? router, long observedRevision) =
+                await RouteEndpointAsync(CamusRouteOpKind.Query, cancellationToken).ConfigureAwait(false);
+            operation?.SetEndpoint(endpoint);
 
-        QueryTransportResult result = await builder.GetTransport().ExecuteQueryAsync(request, cancellationToken).ConfigureAwait(false);
+            TransportSqlRequest request = new()
+            {
+                Endpoint = endpoint,
+                Database = builder.Config["Database"],
+                Sql = GetRequestTarget(),
+                Parameters = GetCommandParameters(builder.GetTransport().Protocol),
+                TxnIdPT = transaction?.TxnIdPT,
+                TxnIdCounter = transaction?.TxnIdCounter,
+                StreamSlot = transaction?.StreamSlot,
+                TimeoutSeconds = CommandTimeout,
+                Prepared = await ShouldPrepareAsync(endpoint, cancellationToken).ConfigureAwait(false),
+                RoutingAcceptVersion = router is not null ? CamusRoutingAdvice.AcceptVersion : 0,
+            };
 
-        LastCacheMetadata = result.CacheMetadata;
-        LastRoutingAdvice = result.Routing;
-        router?.Learn(request.Database, request.Sql, CamusRouteOpKind.Query, result.Routing, observedRevision);
+            QueryTransportResult result = await builder.GetTransport().ExecuteQueryAsync(request, cancellationToken).ConfigureAwait(false);
 
-        return new CamusDataReader(result.ResultSet, LastCacheMetadata);
+            LastCacheMetadata = result.CacheMetadata;
+            LastRoutingAdvice = result.Routing;
+            router?.Learn(request.Database, request.Sql, CamusRouteOpKind.Query, result.Routing, observedRevision);
+
+            operation?.Complete();
+            return new CamusDataReader(result.ResultSet, LastCacheMetadata);
+        }
+        catch (Exception ex) when (CamusOperation.Fail(operation, ex))
+        {
+            throw;
+        }
     }
 
     /// <summary>
@@ -926,31 +955,41 @@ public class CamusCommand : DbCommand, ICloneable
     /// </summary>
     private async Task<NonQueryTransportResult> ExecuteNonQueryCoreAsync(bool discardReturningRows, CancellationToken cancellationToken)
     {
-        (string endpoint, CamusStatementRouter? router, long observedRevision) =
-            await RouteEndpointAsync(CamusRouteOpKind.NonQuery, cancellationToken).ConfigureAwait(false);
-
-        TransportSqlRequest request = new()
+        CamusOperation? operation = StartOperation();
+        try
         {
-            Endpoint = endpoint,
-            Database = builder.Config["Database"],
-            Sql = GetRequestTarget(),
-            Parameters = GetCommandParameters(builder.GetTransport().Protocol),
-            TxnIdPT = transaction?.TxnIdPT,
-            TxnIdCounter = transaction?.TxnIdCounter,
-            StreamSlot = transaction?.StreamSlot,
-            AutocommitOptions = transaction is null ? ResolveAutocommitOptions() : null,
-            TimeoutSeconds = CommandTimeout,
-            Prepared = await ShouldPrepareAsync(endpoint, cancellationToken).ConfigureAwait(false),
-            RoutingAcceptVersion = router is not null ? CamusRoutingAdvice.AcceptVersion : 0,
-            DiscardReturningRows = discardReturningRows,
-        };
+            (string endpoint, CamusStatementRouter? router, long observedRevision) =
+                await RouteEndpointAsync(CamusRouteOpKind.NonQuery, cancellationToken).ConfigureAwait(false);
+            operation?.SetEndpoint(endpoint);
 
-        NonQueryTransportResult result = await builder.GetTransport().ExecuteNonQueryAsync(request, cancellationToken).ConfigureAwait(false);
+            TransportSqlRequest request = new()
+            {
+                Endpoint = endpoint,
+                Database = builder.Config["Database"],
+                Sql = GetRequestTarget(),
+                Parameters = GetCommandParameters(builder.GetTransport().Protocol),
+                TxnIdPT = transaction?.TxnIdPT,
+                TxnIdCounter = transaction?.TxnIdCounter,
+                StreamSlot = transaction?.StreamSlot,
+                AutocommitOptions = transaction is null ? ResolveAutocommitOptions() : null,
+                TimeoutSeconds = CommandTimeout,
+                Prepared = await ShouldPrepareAsync(endpoint, cancellationToken).ConfigureAwait(false),
+                RoutingAcceptVersion = router is not null ? CamusRoutingAdvice.AcceptVersion : 0,
+                DiscardReturningRows = discardReturningRows,
+            };
 
-        LastRoutingAdvice = result.Routing;
-        router?.Learn(request.Database, request.Sql, CamusRouteOpKind.NonQuery, result.Routing, observedRevision);
+            NonQueryTransportResult result = await builder.GetTransport().ExecuteNonQueryAsync(request, cancellationToken).ConfigureAwait(false);
 
-        return result;
+            LastRoutingAdvice = result.Routing;
+            router?.Learn(request.Database, request.Sql, CamusRouteOpKind.NonQuery, result.Routing, observedRevision);
+
+            operation?.Complete();
+            return result;
+        }
+        catch (Exception ex) when (CamusOperation.Fail(operation, ex))
+        {
+            throw;
+        }
     }
 
     /// <summary>
@@ -1009,21 +1048,33 @@ public class CamusCommand : DbCommand, ICloneable
                 "It commits a replicated schema entry that a ROLLBACK cannot undo. " +
                 "Commit or roll back this transaction first, then run TRUNCATE.");
 
-        string ddlEndpoint = await GetEndpointAsync(cancellationToken).ConfigureAwait(false);
-
-        TransportSqlRequest request = new()
+        CamusOperation? operation = StartOperation();
+        try
         {
-            Endpoint = ddlEndpoint,
-            Database = builder.Config["Database"],
-            Sql = GetRequestTarget(),
-            TxnIdPT = transaction?.TxnIdPT,
-            TxnIdCounter = transaction?.TxnIdCounter,
-            StreamSlot = transaction?.StreamSlot,
-            AutocommitOptions = transaction is null ? ResolveAutocommitOptions() : null,
-            TimeoutSeconds = CommandTimeout,
-        };
+            string ddlEndpoint = await GetEndpointAsync(cancellationToken).ConfigureAwait(false);
+            operation?.SetEndpoint(ddlEndpoint);
 
-        return await builder.GetTransport().ExecuteDdlAsync(request, cancellationToken).ConfigureAwait(false);
+            TransportSqlRequest request = new()
+            {
+                Endpoint = ddlEndpoint,
+                Database = builder.Config["Database"],
+                Sql = GetRequestTarget(),
+                TxnIdPT = transaction?.TxnIdPT,
+                TxnIdCounter = transaction?.TxnIdCounter,
+                StreamSlot = transaction?.StreamSlot,
+                AutocommitOptions = transaction is null ? ResolveAutocommitOptions() : null,
+                TimeoutSeconds = CommandTimeout,
+            };
+
+            bool success = await builder.GetTransport().ExecuteDdlAsync(request, cancellationToken).ConfigureAwait(false);
+
+            operation?.Complete();
+            return success;
+        }
+        catch (Exception ex) when (CamusOperation.Fail(operation, ex))
+        {
+            throw;
+        }
     }
 
     public override object? ExecuteScalar()
@@ -1111,12 +1162,21 @@ public class CamusCommand : DbCommand, ICloneable
 
         Release(endpoint, evicted);
 
-        return decision switch
+        bool prepared = decision switch
         {
             PrepareDecision.Yes => true,
             PrepareDecision.Register => await RegisterAsync(policy, endpoint, database, CommandText, cancellationToken).ConfigureAwait(false),
             _ => false,
         };
+
+        CamusMetrics.RecordLookup(database, decision switch
+        {
+            PrepareDecision.Yes => CamusMetrics.LookupResult.Hit,
+            PrepareDecision.Register when prepared => CamusMetrics.LookupResult.Registered,
+            _ => CamusMetrics.LookupResult.Miss,
+        });
+
+        return prepared;
     }
 
     /// <summary>
@@ -1139,6 +1199,7 @@ public class CamusCommand : DbCommand, ICloneable
                 .ConfigureAwait(false);
 
             policy.MarkPrepared(database, sql);
+            CamusMetrics.RecordRegistration(database, CamusMetrics.RegistrationResult.Success);
             return true;
         }
         catch (OperationCanceledException)
@@ -1155,8 +1216,14 @@ public class CamusCommand : DbCommand, ICloneable
             // round trip, and for this statement it is not.
             policy.MarkRefused(database, sql);
 
-            if (ex is CamusException camus && IsUnsupported(camus))
+            bool unsupported = ex is CamusException camus && IsUnsupported(camus);
+            if (unsupported)
                 policy.Disable();
+
+            CamusMetrics.RecordRegistration(
+                database,
+                unsupported ? CamusMetrics.RegistrationResult.Unsupported : CamusMetrics.RegistrationResult.Refused,
+                (ex as CamusException)?.Code ?? ex.GetType().FullName);
 
             return false;
         }
@@ -1185,6 +1252,8 @@ public class CamusCommand : DbCommand, ICloneable
     {
         if (evicted is not { } statement)
             return;
+
+        CamusMetrics.RecordEviction(statement.Database);
 
         ICamusTransport transport = builder.GetTransport();
 

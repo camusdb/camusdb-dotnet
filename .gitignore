@@ -10,6 +10,8 @@ CamusDB.EntityFrameworkCore/obj
 CamusDB.EntityFrameworkCore/.idea/
 CamusDB.Dapper/obj
 CamusDB.Dapper/bin
+CamusDB.OpenTelemetry/obj
+CamusDB.OpenTelemetry/bin
 nupkg/
 nupkgs/
 artifacts
