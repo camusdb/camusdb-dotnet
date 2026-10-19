@@ -1,3 +1,4 @@
+using CamusDB.Client;
 using System.Linq.Expressions;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Metadata;
@@ -61,6 +62,38 @@ public class CamusQuerySqlGenerator : QuerySqlGenerator
             "CamusDB cannot translate this query: it needs ROW_NUMBER() OVER (...), and CamusDB has no window functions. " +
             "EF Core writes it for Take/Skip/First on a per-row sequence (a filtered Include, a SelectMany, a per-group First). " +
             "Load that sequence in a separate query and apply Take/Skip on the client.");
+
+    // A function mapped with HasDbFunction, for example a C# extension function that the server loads.
+    // EF delimits the name of a non-built-in function and prefixes its schema, but the server reads a
+    // function name only as a plain identifier and has no schemas, so the name is written bare.
+    protected override Expression VisitSqlFunction(SqlFunctionExpression sqlFunctionExpression)
+    {
+        if (sqlFunctionExpression.IsBuiltIn)
+            return base.VisitSqlFunction(sqlFunctionExpression);
+
+        string name = sqlFunctionExpression.Name;
+        if (!CamusSqlSyntax.IsPlainIdentifier(name))
+            throw new InvalidOperationException(
+                $"CamusDB cannot call the function '{name}': a function name must be a plain identifier " +
+                "(a letter or '_', then letters, digits or '_'), because the server does not read a delimited function name.");
+
+        Sql.Append(name);
+
+        if (!sqlFunctionExpression.IsNiladic)
+        {
+            Sql.Append("(");
+            IReadOnlyList<SqlExpression> arguments = sqlFunctionExpression.Arguments ?? [];
+            for (int i = 0; i < arguments.Count; i++)
+            {
+                if (i > 0)
+                    Sql.Append(", ");
+                Visit(arguments[i]);
+            }
+            Sql.Append(")");
+        }
+
+        return sqlFunctionExpression;
+    }
 
     private static InvalidOperationException ApplyNotSupported()
         => new(

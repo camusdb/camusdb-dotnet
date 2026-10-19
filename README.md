@@ -772,6 +772,52 @@ await using CamusCommand delete = connection.CreateCamusCommand(
 
 See `docs/returning.md` in the server repository for the full rules.
 
+#### C# extensions: procedures, triggers and functions
+
+The server can run C# code from an extension assembly as stored procedures, row triggers and scalar functions. The operator deploys the assembly and lists it in the server configuration. The driver needs no setup.
+
+Run a procedure with `CALL`. A procedure returns no result set. `ExecuteNonQueryAsync` returns the number of rows that the procedure's SQL changed:
+
+```csharp
+await using CamusCommand call = connection.CreateCamusCommand("CALL transfer(@from, @to, @amount)");
+call.Parameters.Add("@from", ColumnType.String, "alice");
+call.Parameters.Add("@to", ColumnType.String, "bob");
+call.Parameters.Add("@amount", ColumnType.Integer64, 30L);
+
+int changedRows = await call.ExecuteNonQueryAsync();
+```
+
+With `CommandType.StoredProcedure`, `CommandText` is the procedure name only. The driver sends `CALL name(@p1, @p2, ...)` with the parameters in collection order, because a procedure takes its arguments by position:
+
+```csharp
+await using CamusCommand call = connection.CreateCamusCommand("transfer");
+call.CommandType = CommandType.StoredProcedure;
+call.Parameters.Add("from", ColumnType.String, "alice");
+call.Parameters.Add("to", ColumnType.String, "bob");
+call.Parameters.Add("amount", ColumnType.Integer64, 30L);
+
+await call.ExecuteNonQueryAsync();
+```
+
+- The procedure name must be a plain identifier: a letter or `_`, then letters, digits or `_`. Any other text throws `InvalidOperationException` before the driver sends the call.
+- Only input parameters are supported. A procedure has no output parameters and no return value.
+- `ExecuteReaderAsync`, `ExecuteScalarAsync` and `ExecuteStreamReaderAsync` also send `CALL` to the non-query endpoint. The reader has no rows, and `RecordsAffected` is the changed-row count.
+- `CALL` is not prepared. It runs inside the current transaction, if there is one, and an error rolls back everything that the procedure wrote.
+- `CALL` needs a superuser in this server version.
+- `CommandType.TableDirect` throws `NotSupportedException`.
+
+`CREATE TRIGGER` and `DROP TRIGGER` go to the DDL endpoint, as other schema statements do:
+
+```csharp
+await using CamusCommand create = connection.CreateCamusCommand(
+    "CREATE TRIGGER audit ON orders AFTER INSERT, UPDATE, DELETE EXTERNAL NAME 'MyCompany.Ext.AuditTrigger'");
+await create.ExecuteNonQueryAsync();
+```
+
+An extension function is called in SQL like a built-in function, for example `SELECT slugify(title) FROM posts`. `SHOW EXTENSIONS` lists the assemblies that a node loaded; it needs a superuser.
+
+The server reports extension errors with `CADB08xx` codes in `CamusException.Code`. For example, `CADB0822` means that a procedure threw, and `CADB0818` means that a trigger threw. `CADB0817` means that this node does not load the trigger's extension, or loads another build of it. The driver does not retry `CADB0817`, because the cause is the deployment, not a conflict. The server can run a statement again after a serializable conflict, so a trigger or a procedure can run more than once. See `docs/csharp-extensions.md` in the server repository for the full rules.
+
 #### Select Rows
 
 ```csharp
@@ -1963,6 +2009,29 @@ await ctx.SaveChangesAsync();                    // throws DbUpdateConcurrencyEx
 > which surfaces at **commit time** (`CommitTransactionAsync`). Use a concurrency token for
 > application-level stale-update detection.
 
+### Extension functions
+
+Map a C# extension function that the server loads with `HasDbFunction`, and call it from LINQ:
+
+```csharp
+public class AppDbContext : DbContext
+{
+    public static string Slugify(string value) => throw new NotSupportedException();
+
+    protected override void OnModelCreating(ModelBuilder modelBuilder)
+    {
+        modelBuilder.HasDbFunction(typeof(AppDbContext).GetMethod(nameof(Slugify))!).HasName("slugify");
+    }
+}
+
+List<Post> posts = await ctx.Posts.Where(p => AppDbContext.Slugify(p.Title) == "hello-world").ToListAsync();
+// WHERE slugify(`p`.`title`) = 'hello-world'
+```
+
+The provider writes the function name without backticks and without a schema, because the server reads a function name only as a plain identifier and has no schemas. A name that is not a plain identifier (a letter or `_`, then letters, digits or `_`) throws `InvalidOperationException` when the query is translated.
+
+Run a procedure with `ExecuteSqlAsync`, for example `await ctx.Database.ExecuteSqlAsync($"CALL transfer({from}, {to}, {amount})")`. Create a trigger in a migration with `migrationBuilder.Sql("CREATE TRIGGER ...")`. The provider has no model API for triggers.
+
 ### Provider Limitations
 
 - No computed columns.
@@ -2056,6 +2125,7 @@ A handler for `T[]` also changes how Dapper binds a `T[]` parameter. The paramet
 
 - Dapper reads through `ExecuteReaderAsync`, which buffers the whole result. For a very large result, use `CamusCommand.ExecuteStreamReaderAsync` and parse rows with `reader.GetRowParser<T>()`.
 - Dapper type handlers are process-wide. Call the `CamusDapper` registration methods once, at startup.
+- `commandType: CommandType.StoredProcedure` sends `CALL name(@a, @b, ...)`. The arguments go in the order of the parameter object's properties, because a procedure takes its arguments by position.
 
 ---
 

@@ -268,6 +268,8 @@ public class TestProviderSurface
     [InlineData("ALTER TABLE robots DROP COLUMN name")]
     [InlineData("CREATE INDEX idx ON robots (name)")]
     [InlineData("CREATE UNIQUE INDEX idx ON robots (name)")]
+    [InlineData("CREATE TRIGGER audit ON robots AFTER INSERT, UPDATE EXTERNAL NAME 'MyCompany.Ext.AuditTrigger'")]
+    [InlineData("DROP TRIGGER audit ON robots")]
     [InlineData("  create table robots (id OID PRIMARY KEY NOT NULL)")]  // leading whitespace + lowercase
     public async Task TestExecuteNonQueryRoutesDdlToExecuteSqlDdl(string sql)
     {

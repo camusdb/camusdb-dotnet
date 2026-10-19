@@ -79,7 +79,7 @@ internal sealed class CamusOperation
     private static readonly string[] KnownOperations =
     [
         "SELECT", "INSERT", "UPDATE", "DELETE", "CREATE", "ALTER", "DROP", "TRUNCATE",
-        "EXPLAIN", "SHOW", "REFRESH", "COMMENT", "GRANT", "REVOKE", "SET",
+        "EXPLAIN", "SHOW", "REFRESH", "COMMENT", "GRANT", "REVOKE", "SET", "CALL",
     ];
 
     /// <summary>The parsed host and port of each endpoint. Endpoints come from the connection string and

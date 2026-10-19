@@ -12,6 +12,7 @@ using System.Data.Common;
 using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
 using System.Runtime.InteropServices;
+using System.Text;
 using CamusDB.Client.Transport;
 using CamusDB.Core.Util.ObjectIds;
 
@@ -78,11 +79,15 @@ public class CamusCommand : DbCommand, ICloneable
     public override int CommandTimeout { get; set; } = 10;
 
     /// <summary>
-    /// Always <see cref="System.Data.CommandType.Text"/> in practice — CamusDB has no stored procedures
-    /// or direct table access — but it defaults to it explicitly rather than to <c>default(CommandType)</c>,
-    /// which is not a valid value at all. Callers that never touch this property (EF Core among them)
-    /// would otherwise present a command whose type is zero, and anything reading it to decide what a
-    /// command is would have to special-case that.
+    /// <see cref="System.Data.CommandType.Text"/> by default, set explicitly rather than left at
+    /// <c>default(CommandType)</c>, which is not a valid value at all. Callers that never touch this
+    /// property (EF Core among them) would otherwise present a command whose type is zero, and anything
+    /// reading it to decide what a command is would have to special-case that.
+    ///
+    /// <para><see cref="System.Data.CommandType.StoredProcedure"/> makes <see cref="CommandText"/> the name
+    /// of a procedure that a C# extension on the server defines. The command runs
+    /// <c>CALL name(@p1, @p2, ...)</c> with the parameters in collection order, because a procedure takes
+    /// its arguments by position. <see cref="System.Data.CommandType.TableDirect"/> is not supported.</para>
     /// </summary>
     public override CommandType CommandType { get; set; } = CommandType.Text;
 
@@ -140,7 +145,49 @@ public class CamusCommand : DbCommand, ICloneable
         return clone;
     }
 
-    protected string GetRequestTarget() => CommandText;
+    protected string GetRequestTarget() => CommandType switch
+    {
+        CommandType.StoredProcedure => BuildCallStatement(),
+        CommandType.TableDirect => throw new NotSupportedException(
+            "CamusDB has no direct table access. Use CommandType.Text with a SELECT statement."),
+        _ => CommandText,
+    };
+
+    /// <summary>The SQL statement this command runs: <see cref="CommandText"/> for a text command, the
+    /// composed <c>CALL</c> for a stored procedure.</summary>
+    internal string StatementText => GetRequestTarget();
+
+    /// <summary>
+    /// Composes <c>CALL name(@p1, @p2, ...)</c> for <see cref="CommandType.StoredProcedure"/>. The
+    /// server reads the procedure name only as a plain identifier, so any other name is refused here
+    /// instead of reaching the server as a syntax error.
+    /// </summary>
+    private string BuildCallStatement()
+    {
+        string name = CommandText.Trim();
+        if (!CamusSqlSyntax.IsPlainIdentifier(name))
+            throw new InvalidOperationException(
+                $"'{name}' is not a procedure name. With CommandType.StoredProcedure, CommandText must be the name " +
+                "of the procedure only: a letter or '_', then letters, digits or '_'.");
+
+        CamusParameterCollection parameters = Parameters;
+        if (parameters.Count == 0)
+            return string.Concat("CALL ", name, "()");
+
+        StringBuilder sql = new("CALL ");
+        sql.Append(name).Append('(');
+        for (int i = 0; i < parameters.Count; i++)
+        {
+            CamusParameter parameter = parameters.ParameterAt(i);
+            if (string.IsNullOrEmpty(parameter.ParameterName))
+                throw new CamusException("CADB0400", "Parameter name cannot be null or empty");
+
+            if (i > 0)
+                sql.Append(", ");
+            sql.Append(parameter.PlaceholderName);
+        }
+        return sql.Append(')').ToString();
+    }
 
     /// <summary>
     /// The endpoint for an operation that carries no routing metadata: the transaction's pin when the
@@ -231,13 +278,24 @@ public class CamusCommand : DbCommand, ICloneable
         "CREATE SEQUENCE",
         "DROP SEQUENCE",
         "ALTER SEQUENCE",
+        // Row triggers that run C# extension code. TRIGGER is not a reserved word, but no other
+        // statement starts with these two words.
+        "CREATE TRIGGER",
+        "DROP TRIGGER",
     ];
 
+    /// <summary>
+    /// The statements that run on the non-query endpoint even when they are read through a reader.
+    /// <c>CALL</c> runs a procedure that a C# extension defines: the server runs it only on the non-query
+    /// path and answers it with an affected-row count and no result set, as it does a DML statement
+    /// without RETURNING.
+    /// </summary>
     private static readonly string[] DmlPrefixes =
     [
         "INSERT",
         "UPDATE",
         "DELETE",
+        "CALL",
     ];
 
     private static bool IsDdlStatement(string sql) => StartsWithAny(sql, DdlPrefixes);
@@ -786,8 +844,8 @@ public class CamusCommand : DbCommand, ICloneable
     /// <inheritdoc cref="ExecuteStreamReaderAsync()"/>
     public async Task<CamusDataReader> ExecuteStreamReaderAsync(CancellationToken cancellationToken)
     {
-        bool writeReturning = IsWriteReturning(CommandText);
-        if (!writeReturning && IsDmlStatement(CommandText))
+        bool writeReturning = IsWriteReturning(StatementText);
+        if (!writeReturning && IsDmlStatement(StatementText))
             return await ExecuteDmlAsReaderAsync(cancellationToken).ConfigureAwait(false);
 
         // The rows arrive while the caller reads, so the reader ends this operation: at the last row, at
@@ -836,7 +894,7 @@ public class CamusCommand : DbCommand, ICloneable
     /// <see langword="null"/> when nothing listens.</summary>
     private CamusOperation? StartOperation()
         => CamusOperation.IsEnabled
-            ? CamusOperation.Start(builder, CamusOperation.OperationName(CommandText), queryText: CommandText)
+            ? CamusOperation.Start(builder, CamusOperation.OperationName(StatementText), queryText: StatementText)
             : null;
 
     /// <inheritdoc />
@@ -846,7 +904,7 @@ public class CamusCommand : DbCommand, ICloneable
     /// <inheritdoc />
     protected override async Task<DbDataReader> ExecuteDbDataReaderAsync(CommandBehavior behavior, CancellationToken cancellationToken)
     {
-        if (IsDmlStatement(CommandText))
+        if (IsDmlStatement(StatementText))
             return await ExecuteDmlAsReaderAsync(cancellationToken).ConfigureAwait(false);
 
         // The reader is buffered: all rows are here when the call returns, so the operation ends here.
@@ -895,14 +953,12 @@ public class CamusCommand : DbCommand, ICloneable
     /// </summary>
     internal async ValueTask<TransportPipelineStatement> BuildPipelineStatementAsync(bool asReader, string endpoint, CancellationToken cancellationToken)
     {
-        if (CommandType != CommandType.Text)
-            throw new NotSupportedException("Only a text command can be pipelined.");
-        if (IsDdlStatement(CommandText))
+        if (IsDdlStatement(StatementText))
             throw new InvalidOperationException("A DDL statement cannot be pipelined: it does not run inside the transaction.");
-        if (RunsInOwnTransaction(CommandText))
+        if (RunsInOwnTransaction(StatementText))
             throw new InvalidOperationException("This statement runs in its own transaction and cannot be pipelined.");
 
-        bool dml = IsDmlStatement(CommandText);
+        bool dml = IsDmlStatement(StatementText);
         PipelineStatementKind kind = asReader && !dml ? PipelineStatementKind.Query : PipelineStatementKind.NonQuery;
 
         return new TransportPipelineStatement
@@ -922,7 +978,7 @@ public class CamusCommand : DbCommand, ICloneable
     /// read for its RETURNING rows runs on the non-query path either way.
     /// </summary>
     internal CamusRouteOpKind PipelineRouteKind(bool asReader)
-        => asReader && !IsDmlStatement(CommandText) ? CamusRouteOpKind.Query : CamusRouteOpKind.NonQuery;
+        => asReader && !IsDmlStatement(StatementText) ? CamusRouteOpKind.Query : CamusRouteOpKind.NonQuery;
 
     /// <summary>
     /// Runs a DML statement on the non-query endpoint and wraps the result in a reader. For a statement
@@ -1010,7 +1066,7 @@ public class CamusCommand : DbCommand, ICloneable
     /// </remarks>
     public override async Task<int> ExecuteNonQueryAsync(CancellationToken cancellationToken)
     {
-        if (IsDdlStatement(CommandText))
+        if (IsDdlStatement(StatementText))
         {
             await ExecuteDDLAsync(cancellationToken).ConfigureAwait(false);
             return 0;
@@ -1041,7 +1097,7 @@ public class CamusCommand : DbCommand, ICloneable
     /// <inheritdoc />
     public async Task<bool> ExecuteDDLAsync(CancellationToken cancellationToken)
     {
-        if (transaction is not null && RunsInOwnTransaction(CommandText))
+        if (transaction is not null && RunsInOwnTransaction(StatementText))
             throw new CamusException(
                 "CADB0538",
                 "TRUNCATE runs in its own internal transaction and is refused inside an explicit transaction. " +

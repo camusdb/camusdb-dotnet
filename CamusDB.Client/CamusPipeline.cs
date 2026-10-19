@@ -246,7 +246,7 @@ public sealed class CamusPipeline
         if (builder.Router is { } router && batch.Length > 0)
         {
             CamusRouteOpKind kind = batch[0].Command.PipelineRouteKind(batch[0].AsReader);
-            if (router.SelectEndpoint(builder.Config["Database"], batch[0].Command.CommandText, kind, out _) is { } learned)
+            if (router.SelectEndpoint(builder.Config["Database"], batch[0].Command.StatementText, kind, out _) is { } learned)
                 return learned;
         }
 

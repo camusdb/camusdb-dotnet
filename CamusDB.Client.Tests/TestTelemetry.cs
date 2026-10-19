@@ -328,6 +328,7 @@ public sealed class TestTelemetry : IDisposable
     [InlineData("((SELECT 1))", "SELECT")]
     [InlineData("insert into t values (1)", "INSERT")]
     [InlineData("TRUNCATE t", "TRUNCATE")]
+    [InlineData("CALL transfer(@a, @b)", "CALL")]
     [InlineData("WITH x AS (SELECT 1) SELECT * FROM x", null)]
     [InlineData("frobnicate", null)]
     [InlineData("", null)]

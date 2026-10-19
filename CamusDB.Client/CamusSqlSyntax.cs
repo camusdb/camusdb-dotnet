@@ -97,6 +97,25 @@ internal static class CamusSqlSyntax
     }
 
     /// <summary>
+    /// Whether <paramref name="name"/> is a plain identifier: a letter or <c>_</c>, then letters, digits
+    /// or <c>_</c>. The server reads a function name and the procedure name of <c>CALL</c> only in this
+    /// form, not delimited, so such a name is emitted as written and any other name has no spelling.
+    /// </summary>
+    internal static bool IsPlainIdentifier(string name)
+    {
+        if (string.IsNullOrEmpty(name) || !(char.IsAsciiLetter(name[0]) || name[0] == '_'))
+            return false;
+
+        foreach (char c in name)
+        {
+            if (!char.IsAsciiLetterOrDigit(c) && c != '_')
+                return false;
+        }
+
+        return true;
+    }
+
+    /// <summary>
     /// Whether <paramref name="sql"/> contains the keyword <c>RETURNING</c> as a token: not inside a
     /// string literal, a delimited identifier or a comment, and not as part of a longer name or a
     /// <c>@placeholder</c>.
