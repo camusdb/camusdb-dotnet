@@ -377,6 +377,39 @@ Things worth knowing before you use it:
 - **`MONITOR`, not superuser.** With authentication enabled, the account needs the superuser attribute or the `MONITOR` privilege: `GRANT MONITOR ON *.* TO monitoring;`. Other accounts get `CADB0517`.
 - **Cheap enough to poll.** The server answers from caches and a background sampler, so one call every minute from several monitors costs nothing measurable. See the server's `node-stats` guide for every field.
 
+### Provider factory and data source
+
+`CamusProviderFactory` is the `DbProviderFactory` of the driver. Use it with code that works with the abstract ADO.NET types, for example Testcontainers database fixtures or health-check libraries.
+
+```csharp
+using System.Data.Common;
+using CamusDB.Client;
+
+DbProviderFactories.RegisterFactory(CamusProviderFactory.InvariantName, CamusProviderFactory.Instance);
+
+DbProviderFactory factory = DbProviderFactories.GetFactory("CamusDB.Client");
+```
+
+`CamusDataSource` is the `DbDataSource` of the driver. It creates connections and commands for one connection string:
+
+```csharp
+await using CamusDataSource dataSource = new("Endpoint=http://localhost:5095;Database=test");
+
+await using CamusConnection connection = dataSource.CreateConnection();
+await connection.OpenAsync();
+
+await using DbCommand command = dataSource.CreateCommand("SELECT name FROM robots");
+await using DbDataReader reader = await command.ExecuteReaderAsync();
+```
+
+Things worth knowing before you use them:
+
+- **A connection string can be set once.** `factory.CreateConnection()` returns a connection without a connection string. Set `ConnectionString` one time, before you use the connection. After that, the connection refuses a different value, as a connection built from a `CamusConnectionStringBuilder` does.
+- **A command runs on its connection.** A command uses the endpoint, the database and the credentials of the connection in its `Connection` property. Thus a command from `factory.CreateCommand()` runs on the connection that you give it.
+- **Each data source connection has its own database.** `ChangeDatabase` on one connection does not change the other connections. The connections still share one login token and one transport.
+- **The data source checks the connection string at once.** A malformed string, or credentials for a remote `http://` endpoint, cause an exception in the constructor.
+- **No connection string builder.** `factory.CreateConnectionStringBuilder()` returns `null`, because `CamusConnectionStringBuilder` is not a `DbConnectionStringBuilder`.
+
 ### OpenTelemetry
 
 The driver emits traces and metrics through the `ActivitySource` and `Meter` types of .NET. It needs no OpenTelemetry package. To collect the data, register the two names with the OpenTelemetry SDK:

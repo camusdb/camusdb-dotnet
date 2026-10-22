@@ -34,7 +34,16 @@ namespace CamusDB.Client;
 /// </summary>
 public class CamusCommand : DbCommand, ICloneable
 {
-    protected readonly CamusConnectionStringBuilder builder;
+    private readonly CamusConnectionStringBuilder ownBuilder;
+
+    /// <summary>
+    /// The builder the command resolves its endpoint, database and transport from: its connection's
+    /// builder whenever it has a connection, otherwise the builder it was created with. Read on every
+    /// use rather than captured, so a command created on its own (as
+    /// <see cref="CamusProviderFactory.CreateCommand"/> does) runs against whatever connection it is
+    /// later given, and follows that connection when its connection string is assigned late.
+    /// </summary>
+    protected CamusConnectionStringBuilder builder => connection?.Builder ?? ownBuilder;
 
     protected CamusTransaction? transaction;
 
@@ -46,7 +55,7 @@ public class CamusCommand : DbCommand, ICloneable
 
     public CamusCommand(string source, CamusConnectionStringBuilder builder, CamusConnection? connection = null)
     {
-        this.builder = builder;
+        ownBuilder = builder;
         this.connection = connection;
         CommandText = source;
         updatedRowSource = UpdateRowSource.None;

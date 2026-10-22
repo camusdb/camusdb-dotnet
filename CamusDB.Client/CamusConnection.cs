@@ -30,7 +30,7 @@ namespace CamusDB.Client;
 /// </summary>
 public sealed class CamusConnection : DbConnection
 {
-    private readonly CamusConnectionStringBuilder builder;
+    private CamusConnectionStringBuilder builder;
 
     private ConnectionState state = ConnectionState.Closed;
 
@@ -43,6 +43,12 @@ public sealed class CamusConnection : DbConnection
     /// authenticating with the original credentials while reporting the new ones. Build a new
     /// <see cref="CamusConnection"/> instead. Assigning the same value is accepted, which is what
     /// Entity Framework does when it configures a connection it created.</para>
+    ///
+    /// <para>The one exception is a connection created without a connection string (the parameterless
+    /// constructor, which <see cref="CamusProviderFactory.CreateConnection"/> uses): while its
+    /// connection string is still empty and it is closed, it accepts one assignment, which is how
+    /// generic ADO.NET code configures a connection it got from a factory. The assignment replaces
+    /// the empty builder, so the connection is then exactly as if it was built from that string.</para>
     /// </summary>
     /// <exception cref="NotSupportedException">The value differs from the one this connection was built with.</exception>
     [AllowNull]
@@ -51,6 +57,15 @@ public sealed class CamusConnection : DbConnection
         get => connectionString;
         set
         {
+            if (connectionString.Length == 0 && state == ConnectionState.Closed && !string.IsNullOrEmpty(value))
+            {
+                // Parsed before anything is assigned, so a rejected string leaves the connection unset.
+                CamusConnectionStringBuilder configured = new(value);
+                builder = configured;
+                connectionString = configured.ToString();
+                return;
+            }
+
             if (!string.Equals(value ?? "", connectionString, StringComparison.Ordinal))
                 throw new NotSupportedException(
                     "A CamusConnection's connection string is fixed when the connection is created. " +
@@ -58,7 +73,10 @@ public sealed class CamusConnection : DbConnection
         }
     }
 
-    private readonly string connectionString;
+    private string connectionString;
+
+    /// <summary>The builder this connection resolves its credentials, endpoints and transport from.</summary>
+    internal CamusConnectionStringBuilder Builder => builder;
 
     public override string Database => builder.Config.TryGetValue("Database", out string? database) ? database : "";
 
@@ -76,6 +94,17 @@ public sealed class CamusConnection : DbConnection
     /// <c>UseOptimisticLocking()</c>; a plain client caller can set it directly.
     /// </summary>
     public CamusTransactionOptions? DefaultTransactionOptions { get; set; }
+
+    /// <summary>
+    /// Creates a connection without a connection string. Assign <see cref="ConnectionString"/> once
+    /// before the connection is used. Prefer <see cref="CamusConnection(CamusConnectionStringBuilder)"/>
+    /// when you have the connection string at hand; this form exists for code that creates connections
+    /// through <see cref="CamusProviderFactory"/>.
+    /// </summary>
+    public CamusConnection()
+        : this(new CamusConnectionStringBuilder(""))
+    {
+    }
 
     public CamusConnection(CamusConnectionStringBuilder builder)
     {
