@@ -826,19 +826,23 @@ public class CamusCommand : DbCommand, ICloneable
         (CamusDataReader)await ExecuteDbDataReaderAsync(behavior, cancellationToken).ConfigureAwait(false);
 
     /// <summary>
-    /// Like <see cref="ExecuteReaderAsync()"/>, but pulls rows from the server incrementally over the
-    /// streaming (<c>/execute-sql-query-stream</c>) endpoint instead of buffering the whole result set —
-    /// so a large <c>SELECT</c> never fully materializes client-side. Rows arrive as the returned reader is
+    /// Like <see cref="ExecuteReaderAsync()"/>, but pulls rows from the server incrementally — over the
+    /// streaming (<c>/execute-sql-query-stream</c>) endpoint on REST, and over the server-streaming
+    /// <c>ExecuteQuery</c> RPC on gRPC — instead of buffering the whole result set, so a large
+    /// <c>SELECT</c> never fully materializes client-side. Rows arrive as the returned reader is
     /// advanced (ideally with <see cref="CamusDataReader.ReadAsync(System.Threading.CancellationToken)"/>);
-    /// dispose the reader to release the underlying HTTP response.
+    /// dispose the reader to release the underlying HTTP response or gRPC call.
+    ///
+    /// <para>On gRPC, <see cref="DbCommand.CommandTimeout"/> bounds each wait for the next row, not the
+    /// whole read, and the statement always runs inline: a prepared handle belongs to the batched
+    /// streams, which this call does not use.</para>
     ///
     /// <para>The streaming path forfeits the buffered path's transparent serializable retry: because rows
     /// can reach the client before the autocommit transaction commits, a late conflict is reported while
     /// reading (as a <see cref="CamusException"/>) rather than retried. Use the buffered
     /// <see cref="ExecuteReaderAsync()"/> — or drive an explicit transaction and retry yourself — when you
     /// need that. Streaming applies to queries and to an <c>INSERT</c>, <c>UPDATE</c> or <c>DELETE</c>
-    /// with a RETURNING list; any other DML statement falls back to the buffered affected-row reader. On the gRPC transport this currently buffers
-    /// server-side and replays.</para>
+    /// with a RETURNING list; any other DML statement falls back to the buffered affected-row reader.</para>
     ///
     /// <para>A statement with a RETURNING list goes to the query endpoint, which streams its rows. The server
     /// sends no row before the commit, so a conflict never surfaces mid-read for it. Use this method for

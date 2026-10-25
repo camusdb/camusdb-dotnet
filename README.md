@@ -884,7 +884,7 @@ await using CamusCommand select = connection.CreateSelectCommand(
 
 select.Parameters.Add("@year", ColumnType.Integer64, 1900);
 
-// Rows arrive incrementally; dispose the reader to release the underlying HTTP response.
+// Rows arrive incrementally; dispose the reader to release the underlying HTTP response or gRPC call.
 await using CamusDataReader reader = await select.ExecuteStreamReaderAsync();
 
 while (await reader.ReadAsync())
@@ -905,9 +905,13 @@ Trade-offs to know:
   the buffered `ExecuteReaderAsync`, or drive an explicit transaction and retry yourself.
 - **No cache metadata.** The streaming trailer carries no `{cache=…}` resolution, so
   `CamusDataReader.CacheMetadata` is null on this path.
-- **gRPC.** On the `Protocol=grpc` transport, `ExecuteStreamReaderAsync` currently buffers server-side
-  and replays through the same reader (the streaming endpoint is REST-only); the call still works, it
-  is just not row-incremental.
+- **gRPC.** On the `Protocol=grpc` transport, `ExecuteStreamReaderAsync` uses the server-streaming
+  `ExecuteQuery` RPC, on a call of its own outside the batched streams. Rows arrive one message at a
+  time, and the server waits when you stop reading. Two things differ from the buffered path:
+  - `CommandTimeout` limits each wait for the next row, not the whole read. A slow reader does not
+    time out, but a server that stops sending rows does.
+  - The statement always runs inline, also after `Prepare`, because a prepared handle belongs to the
+    batched streams.
 - **DML.** Calling it on an `INSERT`/`UPDATE`/`DELETE` falls back to the buffered affected-row reader.
 
 #### Query Result Cache

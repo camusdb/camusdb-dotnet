@@ -7,6 +7,7 @@
  */
 
 using System.Collections.Concurrent;
+using System.Globalization;
 using System.Net.Http;
 using CamusDB.Client.Auth;
 using CamusDB.Client.Transport.Batching;
@@ -270,15 +271,68 @@ internal sealed class GrpcTransport(CamusEndpointPool endpoints, CamusTokenProvi
         }
     }
 
-    // gRPC's data plane is multiplexed over shared BatchExecute streams that decode a whole result before
-    // returning (see GrpcBatcher). Wiring row-incremental delivery through that batcher is a separate
-    // effort, so streaming on gRPC buffers via the normal query path and replays through a buffered source
-    // — the ExecuteStreamReaderAsync API stays uniform across transports even though only REST is truly
-    // incremental. (The /execute-sql-query-stream endpoint this feature targets is REST-only.)
+    /// <summary>
+    /// Streams a query over the server-streaming <c>ExecuteQuery</c> RPC on a call of its own, not
+    /// through the batcher: a <c>BatchExecute</c> stream completes an operation only once every row has
+    /// arrived, so a streamed read through it held the whole result in memory. See
+    /// <see cref="GrpcStreamRowSource"/>.
+    ///
+    /// <para>Always sent inline. A prepared handle is scoped to the <c>BatchExecute</c> stream that
+    /// registered it, and the unary RPCs refuse one. The parse it saves is small next to a result large
+    /// enough to stream.</para>
+    ///
+    /// <para>Inside a transaction the call carries the handle, as <see cref="InsertAsync"/> does. The
+    /// statement order is kept by the caller, who reads a result before the next statement runs.</para>
+    /// </summary>
     public async Task<CamusRowSource> ExecuteQueryStreamAsync(TransportSqlRequest request, CancellationToken cancellationToken)
     {
-        QueryTransportResult result = await ExecuteQueryAsync(request, cancellationToken).ConfigureAwait(false);
-        return CamusRowSource.Buffered(result.ResultSet);
+        SqlRequest wire = BuildSqlRequest(request);
+        global::Grpc.Core.Metadata? headers = await HeadersAsync(cancellationToken).ConfigureAwait(false);
+
+        // Not a deadline on the call: that would bound the whole result. The source arms this per read.
+        CancellationTokenSource? idle = request.TimeoutSeconds > 0 ? new() : null;
+
+        AsyncServerStreamingCall<QueryStreamMessage> call;
+        try
+        {
+            call = GetClient(request.Endpoint).ExecuteQuery(
+                wire, new CallOptions(headers: headers, cancellationToken: idle?.Token ?? default));
+        }
+        catch
+        {
+            idle?.Dispose();
+            throw;
+        }
+
+        return await GrpcStreamRowSource.CreateAsync(
+            call,
+            idle,
+            request.TimeoutSeconds,
+            ex => Translate(request.Endpoint, ex),
+            ObserveTrailerToken,
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>Merges the causal token an autocommit <c>ExecuteQuery</c> leaves in its trailers. A
+    /// statement in an explicit transaction leaves none, and an absent token changes nothing.</summary>
+    private void ObserveTrailerToken(global::Grpc.Core.Metadata trailers)
+    {
+        string? n = null, l = null, c = null;
+
+        foreach (global::Grpc.Core.Metadata.Entry entry in trailers)
+        {
+            if (string.Equals(entry.Key, "camus-causal-token-n", StringComparison.OrdinalIgnoreCase))
+                n = entry.Value;
+            else if (string.Equals(entry.Key, "camus-causal-token-l", StringComparison.OrdinalIgnoreCase))
+                l = entry.Value;
+            else if (string.Equals(entry.Key, "camus-causal-token-c", StringComparison.OrdinalIgnoreCase))
+                c = entry.Value;
+        }
+
+        if (int.TryParse(n, NumberStyles.Integer, CultureInfo.InvariantCulture, out int tokenN) &&
+            long.TryParse(l, NumberStyles.Integer, CultureInfo.InvariantCulture, out long tokenL) &&
+            long.TryParse(c, NumberStyles.Integer, CultureInfo.InvariantCulture, out long tokenC))
+            ObserveToken(tokenN, tokenL, tokenC);
     }
 
     public async Task<NonQueryTransportResult> ExecuteNonQueryAsync(TransportSqlRequest request, CancellationToken cancellationToken)

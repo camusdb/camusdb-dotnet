@@ -42,9 +42,8 @@ internal interface ICamusTransport
     /// <summary>
     /// Runs a <c>SELECT</c> and returns a <see cref="CamusRowSource"/> whose rows are pulled incrementally
     /// as the caller advances, so a large result never materializes client-side. REST streams the
-    /// <c>/execute-sql-query-stream</c> NDJSON body row-by-row; gRPC has no cache-metadata channel and, in
-    /// this transport, falls back to a buffered result exposed through the same source (correct, not
-    /// memory-incremental). Because rows can reach the client before an autocommit transaction commits,
+    /// <c>/execute-sql-query-stream</c> NDJSON body row-by-row; gRPC streams the server-streaming
+    /// <c>ExecuteQuery</c> RPC message by message. Because rows can reach the client before an autocommit transaction commits,
     /// the streaming path forfeits the buffered path's transparent serializable retry — a late conflict is
     /// surfaced as a <see cref="CamusException"/> while reading.
     /// </summary>
