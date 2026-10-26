@@ -58,7 +58,7 @@ Supported connection string keys:
 | `CoalescingThreshold` | No | gRPC only: ops a drain must produce before the pump stops waiting for more (default: `10`; `1` disables coalescing). |
 | `CoalescingDelay` | No | gRPC only: milliseconds the pump waits after a multi-op drain to accumulate a larger burst (default: `0`, off; a single-op drain never waits). |
 | `RequestFrames` | No | gRPC only: write operations that wait together as one stream message, to a server that announced support (default: `true`). Also gates [pipelined transactions](#pipelined-transactions). See [Transport](#transport-rest--grpc). |
-| `TraceQueryText` | No | Add the SQL text to the driver's spans as `db.query.text` (default: `false`). See [OpenTelemetry](#opentelemetry). |
+| `TraceQueryText` | No | Add the SQL text to the driver's spans as `db.query.text`: `false` (the default) adds none, `true` adds the text as sent, and `Sanitized` adds the text with each literal value replaced by `?`. See [OpenTelemetry](#opentelemetry). |
 | `BackupEndpoint` | No | HTTP endpoint for the backup admin API. Defaults to `Endpoint`; required with `Protocol=grpc`. See [Backups](#backups). |
 | `BackupTimeout` | No | Backup admin request timeout in seconds (default: `300`). See [Backups](#backups). |
 | `AllowInsecureCredentials` | No | `true` waives the client-side refusal to send credentials to a remote plaintext endpoint. See [TLS](#tls). |
@@ -437,16 +437,17 @@ builder.Services.AddOpenTelemetry()
 - `BEGIN`, `COMMIT`, and `ROLLBACK`. One `COMMIT` span covers all the retries of an unresolved commit (`CADB0509`), with one `camusdb.retry` event for each retry.
 - A pipeline exchange, as one `BATCH` span with `db.operation.batch.size`.
 
-The span name is `{operation} {target}`, for example `SELECT shop`. The target is the table for a typed insert, and the database for all other operations. The span has these attributes from the [OpenTelemetry database conventions](https://opentelemetry.io/docs/specs/semconv/database/):
+The span name is the `db.query.summary`: the operation and the tables that the SQL text names, for example `SELECT orders customers`. A statement that names no table, and `BEGIN`, `COMMIT`, `ROLLBACK` and `BATCH`, keep the name `{operation} {database}`, for example `SELECT shop`. The span has these attributes from the [OpenTelemetry database conventions](https://opentelemetry.io/docs/specs/semconv/database/):
 
 | Attribute | Value |
 | --- | --- |
 | `db.system.name` | `camusdb` |
 | `db.namespace` | The `Database=` of the connection. |
 | `db.operation.name` | The first keyword of the SQL text, if it is a known verb (`SELECT`, `INSERT`, `UPDATE`, `DELETE`, `CREATE`, `ALTER`, `DROP`, `TRUNCATE`, and others), or `BEGIN`, `COMMIT`, `ROLLBACK`, `BATCH`. |
-| `db.collection.name` | The table of a typed insert. |
+| `db.collection.name` | The table, when the statement names exactly one. A typed insert always names its table. |
+| `db.query.summary` | The operation and the tables, each once and in the order of the SQL text, at most 255 characters. Only when the statement names a table. |
 | `server.address`, `server.port` | The endpoint that received the operation, after routing. |
-| `db.query.text` | The SQL text. Only with `TraceQueryText=true`. |
+| `db.query.text` | The SQL text. With `TraceQueryText=true`, as sent. With `TraceQueryText=Sanitized`, with each string, number and bytes literal replaced by `?`, each comment removed, and each list of two or more `?` written as `?, ...`. |
 | `error.type`, `db.response.status_code` | The `CADBxxxx` code of a failed operation, or the exception type when there is no code. |
 | `camusdb.transport` | `rest` or `grpc`. |
 
@@ -471,7 +472,8 @@ If `count` stays at `MaxAutoPrepare` and `evictions` keeps growing, `MaxAutoPrep
 Things worth knowing before you use it:
 
 - **No listener, no cost.** When nothing listens to the source and the histogram, the driver allocates nothing for telemetry.
-- **The SQL text is opt-in.** SQL text with literal values can contain sensitive data, so set `TraceQueryText=true` to record it. The driver never records parameter values.
+- **The SQL text is opt-in.** SQL text with literal values can contain sensitive data, so set `TraceQueryText=Sanitized` to record it without them, or `TraceQueryText=true` to record it as sent. The driver never records parameter values: `@p0` stays `@p0`.
+- **Tables come from a scan, not a parse.** The driver takes a table from the name after `FROM`, `JOIN`, `INTO`, `UPDATE` or `TABLE`. A comma join names only its first table, and a common table expression is named as a table. The scan runs only for a sampled span.
 - **A streaming read ends at the last row.** For `ExecuteStreamReaderAsync`, the span ends when `ReadAsync` returns `false`, when a read fails, or when the reader is closed. A buffered reader receives all rows before the call returns, so its span ends when the call returns.
 - **No connection-pool metrics.** `OpenAsync` opens no network connection, so the `db.client.connection.*` metrics of the conventions do not apply. The transport holds the HTTP or gRPC connections.
 - **EF Core instrumentation adds a second span.** If you also enable `OpenTelemetry.Instrumentation.EntityFrameworkCore`, each query gets an EF Core span and a driver span.

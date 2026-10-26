@@ -137,12 +137,21 @@ internal sealed class CamusOperation
                 activity.SetTag("db.namespace", database);
             if (operationName is not null)
                 activity.SetTag("db.operation.name", operationName);
-            if (collection is not null)
-                activity.SetTag("db.collection.name", collection);
+            SetTarget(activity, operationName, collection, queryText);
             if (batchSize > 0)
                 activity.SetTag("db.operation.batch.size", batchSize);
-            if (queryText is not null && builder.TraceQueryText)
-                activity.SetTag("db.query.text", queryText);
+            if (queryText is not null)
+            {
+                switch (builder.TraceQueryTextMode)
+                {
+                    case CamusQueryTextMode.Raw:
+                        activity.SetTag("db.query.text", queryText);
+                        break;
+                    case CamusQueryTextMode.Sanitized:
+                        activity.SetTag("db.query.text", CamusQueryText.Sanitize(queryText));
+                        break;
+                }
+            }
             activity.SetTag("camusdb.transport", builder.Protocol == CamusProtocol.Grpc ? "grpc" : "rest");
         }
 
@@ -152,8 +161,31 @@ internal sealed class CamusOperation
         return new CamusOperation(activity, timed ? Stopwatch.GetTimestamp() : 0, database, operationName);
     }
 
+    /// <summary>
+    /// Sets the table attributes of a sampled span from the tables its SQL text names:
+    /// <c>db.collection.name</c> when it names one, and <c>db.query.summary</c>, which also becomes the
+    /// span name, when it names any. A typed insert passes its table as <paramref name="collection"/>.
+    /// The text is read only for a sampled span, so an unsampled one costs nothing.
+    /// </summary>
+    private static void SetTarget(Activity activity, string? operationName, string? collection, string? queryText)
+    {
+        List<string> tables = collection is not null
+            ? [collection]
+            : queryText is not null ? CamusQueryText.Tables(queryText) : [];
+
+        if (tables.Count == 1)
+            activity.SetTag("db.collection.name", tables[0]);
+
+        if (CamusQueryText.Summary(operationName, tables) is { } summary)
+        {
+            activity.SetTag("db.query.summary", summary);
+            activity.DisplayName = summary;
+        }
+    }
+
     /// <summary>The span name the conventions give: <c>{operation} {target}</c>, where the target is the
-    /// table when known and the database otherwise.</summary>
+    /// table when known and the database otherwise. <see cref="SetTarget"/> replaces it with the
+    /// summary when the SQL text names a table.</summary>
     private static string SpanName(string? operationName, string? collection, string? database)
     {
         string? target = collection ?? database;

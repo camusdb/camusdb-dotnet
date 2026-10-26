@@ -95,8 +95,10 @@ public sealed class TestTelemetry : IDisposable
         {
         }
 
-        Activity span = Single($"SELECT {database}");
+        Activity span = Single("SELECT robots");
         Assert.Equal(ActivityKind.Client, span.Kind);
+        Assert.Equal("robots", span.GetTagItem("db.collection.name"));
+        Assert.Equal("SELECT robots", span.GetTagItem("db.query.summary"));
         Assert.Equal(ActivityStatusCode.Unset, span.Status);
         Assert.Equal("camusdb", span.GetTagItem("db.system.name"));
         Assert.Equal(database, span.GetTagItem("db.namespace"));
@@ -120,7 +122,7 @@ public sealed class TestTelemetry : IDisposable
         {
         }
 
-        Assert.Equal("SELECT * FROM robots", Single($"SELECT {database}").GetTagItem("db.query.text"));
+        Assert.Equal("SELECT * FROM robots", Single("SELECT robots").GetTagItem("db.query.text"));
     }
 
     [Fact]
@@ -133,7 +135,7 @@ public sealed class TestTelemetry : IDisposable
         CamusException thrown = await Assert.ThrowsAsync<CamusException>(() => command.ExecuteNonQueryAsync());
         Assert.Equal("CADB0503", thrown.Code);
 
-        Activity span = Single($"UPDATE {database}");
+        Activity span = Single("UPDATE robots");
         Assert.Equal(ActivityStatusCode.Error, span.Status);
         Assert.Equal("CADB0503", span.GetTagItem("error.type"));
         Assert.Equal("CADB0503", span.GetTagItem("db.response.status_code"));
@@ -178,7 +180,7 @@ public sealed class TestTelemetry : IDisposable
         Assert.Empty(stopped);
 
         Assert.False(await reader.ReadAsync());
-        Single($"SELECT {database}");
+        Single("SELECT robots");
 
         // A later close does not end the operation a second time.
         await reader.DisposeAsync();
@@ -197,7 +199,7 @@ public sealed class TestTelemetry : IDisposable
 
         await reader.DisposeAsync();
 
-        Assert.Equal(ActivityStatusCode.Unset, Single($"SELECT {database}").Status);
+        Assert.Equal(ActivityStatusCode.Unset, Single("SELECT robots").Status);
     }
 
     [Fact]
@@ -211,7 +213,7 @@ public sealed class TestTelemetry : IDisposable
 
         await Assert.ThrowsAsync<CamusException>(async () => await reader.ReadAsync());
 
-        Activity span = Single($"SELECT {database}");
+        Activity span = Single("SELECT robots");
         Assert.Equal(ActivityStatusCode.Error, span.Status);
         Assert.Equal("CADB0503", span.GetTagItem("error.type"));
     }
@@ -259,7 +261,7 @@ public sealed class TestTelemetry : IDisposable
         await transaction.CommitAsync();
 
         Assert.Equal(
-            [$"BEGIN {database}", $"INSERT {database}", $"COMMIT {database}"],
+            [$"BEGIN {database}", "INSERT robots", $"COMMIT {database}"],
             stopped.Select(a => a.DisplayName));
         Assert.Equal(3, measurements.Count);
     }
@@ -283,7 +285,7 @@ public sealed class TestTelemetry : IDisposable
         using CamusCommand command = connection.CreateCamusCommand("CREATE TABLE robots (id OID PRIMARY KEY NOT NULL)");
         await command.ExecuteNonQueryAsync();
 
-        Single($"CREATE {database}");
+        Single("CREATE robots");
     }
 
     [Fact]
@@ -300,6 +302,61 @@ public sealed class TestTelemetry : IDisposable
 
         // The command text of a typed insert is a table name, not SQL.
         Assert.Null(span.GetTagItem("db.query.text"));
+    }
+
+    [Fact]
+    public async Task TraceQueryTextSanitized_RecordsTheSqlTextWithoutItsLiteralValues()
+    {
+        (CamusConnection connection, _) = Connect("TraceQueryText=Sanitized");
+
+        using CamusCommand command = connection.CreateCamusCommand(
+            "SELECT `o`.`id` FROM `orders` AS `o` JOIN customers c ON c.id = `o`.`customer_id` "
+            + "WHERE `o`.`email` = 'player@example.com' AND `o`.`total` > 10.5 AND `o`.`region` = @region");
+        command.Parameters.Add("@region", ColumnType.String, "PH");
+        await using (await command.ExecuteReaderAsync())
+        {
+        }
+
+        Activity span = Single("SELECT orders customers");
+        Assert.Equal(
+            "SELECT `o`.`id` FROM `orders` AS `o` JOIN customers c ON c.id = `o`.`customer_id` "
+            + "WHERE `o`.`email` = ? AND `o`.`total` > ? AND `o`.`region` = @region",
+            span.GetTagItem("db.query.text"));
+
+        // Two tables: a summary, but no single collection.
+        Assert.Equal("SELECT orders customers", span.GetTagItem("db.query.summary"));
+        Assert.Null(span.GetTagItem("db.collection.name"));
+    }
+
+    [Fact]
+    public async Task AStatementThatNamesNoTable_KeepsTheDatabaseAsItsTarget()
+    {
+        (CamusConnection connection, _) = Connect("TraceQueryText=Sanitized");
+
+        using CamusCommand command = connection.CreateCamusCommand("SELECT 1");
+        await using (await command.ExecuteReaderAsync())
+        {
+        }
+
+        Activity span = Single($"SELECT {database}");
+        Assert.Null(span.GetTagItem("db.query.summary"));
+        Assert.Null(span.GetTagItem("db.collection.name"));
+        Assert.Equal("SELECT ?", span.GetTagItem("db.query.text"));
+    }
+
+    [Theory]
+    [InlineData("TraceQueryText=false", CamusQueryTextMode.Off)]
+    [InlineData("TraceQueryText=true", CamusQueryTextMode.Raw)]
+    [InlineData("TraceQueryText=Sanitized", CamusQueryTextMode.Sanitized)]
+    [InlineData("TraceQueryText=sanitized", CamusQueryTextMode.Sanitized)]
+    [InlineData("TraceQueryText=yes", CamusQueryTextMode.Off)]
+    [InlineData("", CamusQueryTextMode.Off)]
+    public void TraceQueryText_ReadsItsMode(string option, CamusQueryTextMode expected)
+    {
+        CamusConnectionStringBuilder builder = new($"Endpoint={Endpoint};Database={database};{option}");
+
+        Assert.Equal(expected, builder.TraceQueryTextMode);
+        Assert.Equal(expected != CamusQueryTextMode.Off, builder.TraceQueryText);
     }
 
     [Fact]
