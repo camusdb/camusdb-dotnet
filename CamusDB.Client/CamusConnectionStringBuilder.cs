@@ -395,11 +395,33 @@ public class CamusConnectionStringBuilder
     public CamusProtocol Protocol => ParseEnum<CamusProtocol>("Protocol") ?? CamusProtocol.Rest;
 
     /// <summary>
-    /// Whether the driver's spans carry the SQL text as <c>db.query.text</c>, from <c>TraceQueryText=</c>
-    /// (<c>true</c>/<c>false</c>, default <c>false</c>). SQL text with literal values can contain
-    /// sensitive data, so it is opt-in. Parameter values are never recorded. See <see cref="CamusTelemetry"/>.
+    /// Whether the driver's spans carry the SQL text as <c>db.query.text</c>, in either form of
+    /// <see cref="TraceQueryTextMode"/>.
     /// </summary>
-    public bool TraceQueryText => ParseBool("TraceQueryText", false);
+    public bool TraceQueryText => TraceQueryTextMode != CamusQueryTextMode.Off;
+
+    /// <summary>
+    /// What the driver's spans record of the SQL text, from <c>TraceQueryText=</c>: <c>false</c> (the
+    /// default) records none, <c>true</c> the text as sent, and <c>Sanitized</c> the text with each
+    /// literal value replaced by <c>?</c>. SQL text with literal values can contain sensitive data, so
+    /// it is opt-in. Parameter values are never recorded. An unrecognized value records none. See
+    /// <see cref="CamusTelemetry"/>.
+    /// </summary>
+    public CamusQueryTextMode TraceQueryTextMode
+    {
+        get
+        {
+            if (!Config.TryGetValue("TraceQueryText", out string? raw))
+                return CamusQueryTextMode.Off;
+
+            if (bool.TryParse(raw, out bool enabled))
+                return enabled ? CamusQueryTextMode.Raw : CamusQueryTextMode.Off;
+
+            return raw.Trim().Equals(nameof(CamusQueryTextMode.Sanitized), StringComparison.OrdinalIgnoreCase)
+                ? CamusQueryTextMode.Sanitized
+                : CamusQueryTextMode.Off;
+        }
+    }
 
     /// <summary>
     /// The highest HTTP version the driver asks for on the server's HTTP API, from <c>HttpVersion=</c>:
