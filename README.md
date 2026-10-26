@@ -979,6 +979,8 @@ await transaction.CommitAsync();
 
 Use `await transaction.RollbackAsync()` to roll back instead.
 
+A transaction that is disposed before a commit or a rollback is rolled back, so an `await using` scope never leaves a transaction (and its locks) open on the server. A deferred transaction that ran no statement sends nothing when it is disposed.
+
 #### Pipelined transactions
 
 A transaction that awaits each statement pays one round trip per statement: six for a bank transfer

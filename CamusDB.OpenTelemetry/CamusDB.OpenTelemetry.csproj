@@ -5,7 +5,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <PackageId>CamusDB.OpenTelemetry</PackageId>
-    <Version>0.16.2</Version>
+    <Version>0.16.3</Version>
     <Description>OpenTelemetry registration for CamusDB.Client: AddCamusDBInstrumentation() for traces and metrics.</Description>
     <Authors>CamusDB</Authors>
     <Company>CamusDB</Company>

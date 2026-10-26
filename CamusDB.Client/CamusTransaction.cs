@@ -56,6 +56,13 @@ public class CamusTransaction : DbTransaction
     /// ask the server about a transaction it no longer knows.</summary>
     private volatile bool committed;
 
+    /// <summary>True once a commit or a rollback of this transaction completed, so that a dispose does
+    /// not roll it back again.</summary>
+    private volatile bool finished;
+
+    /// <summary>1 once <see cref="Dispose(bool)"/> or <see cref="DisposeAsync"/> ran.</summary>
+    private int disposed;
+
     /// <summary>
     /// The endpoint every statement and the finalize go to, or null while a deferred transaction is
     /// not started yet. A command must resolve it through <see cref="EnsureStartedAsync"/>, which
@@ -213,7 +220,11 @@ public class CamusTransaction : DbTransaction
     internal void SeatStart(in StartTransactionResult result, string target) => Seat(result, target);
 
     /// <summary>Records that a pipeline's conditional commit committed this transaction.</summary>
-    internal void MarkCommitted() => committed = true;
+    internal void MarkCommitted()
+    {
+        committed = true;
+        finished = true;
+    }
 
     /// <summary>
     /// The ADO.NET view of this transaction's isolation level. CamusDB's default is Serializable, so an
@@ -275,7 +286,10 @@ public class CamusTransaction : DbTransaction
         // statement that triggered it; a rollback — which a disposing scope issues without looking —
         // has nothing to undo and completes quietly, while a commit still reports the failed start.
         if (!commit && !started && startTask is { IsFaulted: true } or { IsCanceled: true })
+        {
+            finished = true;
             return;
+        }
 
         // A pipeline already committed this transaction. A rollback has nothing to undo; a second
         // commit is a caller mistake, and the server would only answer that the transaction is unknown.
@@ -303,6 +317,7 @@ public class CamusTransaction : DbTransaction
                     await builder.GetTransport()
                         .FinalizeTransactionAsync(commit, target, builder.Config["Database"], txnIdPT, txnIdCounter, StreamSlot, builder.CommandTimeout, cancellationToken)
                         .ConfigureAwait(false);
+                    finished = true;
                     operation?.Complete();
                     return;
                 }
@@ -324,4 +339,55 @@ public class CamusTransaction : DbTransaction
     // retry contract for an unresolved commit/rollback outcome.
     private static TimeSpan ComputeFinalizeDelay(int attempt)
         => TimeSpan.FromMilliseconds(50d * (1 << Math.Min(attempt, 6)));
+
+    /// <summary>
+    /// Rolls back the transaction when it was neither committed nor rolled back, as the ADO.NET
+    /// contract expects of a transaction that a <c>using</c> scope disposes. EF Core relies on it: it
+    /// disposes a transaction that did not commit instead of rolling it back. Without the rollback the
+    /// transaction stays open on the server, which keeps its locks alive for the session, so every
+    /// later writer of the same rows gets a conflict.
+    /// </summary>
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing && TryMarkDisposed())
+            RollbackOnDisposeAsync().GetAwaiter().GetResult();
+
+        base.Dispose(disposing);
+    }
+
+    /// <inheritdoc cref="Dispose(bool)"/>
+    public override async ValueTask DisposeAsync()
+    {
+        if (TryMarkDisposed())
+            await RollbackOnDisposeAsync().ConfigureAwait(false);
+
+        // The base implementation calls Dispose(true), which finds the transaction disposed already.
+        await base.DisposeAsync().ConfigureAwait(false);
+    }
+
+    private bool TryMarkDisposed() => Interlocked.Exchange(ref disposed, 1) == 0;
+
+    private async Task RollbackOnDisposeAsync()
+    {
+        if (finished)
+            return;
+
+        // A deferred transaction that ran no statement sent nothing, so there is nothing to undo.
+        // A rollback would send a BEGIN only to finalize it.
+        lock (startSync)
+        {
+            if (!started && startTask is null)
+                return;
+        }
+
+        try
+        {
+            await FinalizeAsync(commit: false, CancellationToken.None).ConfigureAwait(false);
+        }
+        catch (Exception)
+        {
+            // Dispose must not throw. The usual cause is a transaction that the server already
+            // aborted, for example after a conflict or a failed commit, which has nothing to undo.
+        }
+    }
 }
