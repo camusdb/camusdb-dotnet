@@ -12,7 +12,7 @@ namespace CamusDB.Client;
 
 /// <summary>
 /// The driver's own metrics, beside the <c>db.client.operation.duration</c> histogram of
-/// <see cref="CamusTelemetry"/>: retries, endpoint quarantine and the prepared-statement cache. All of
+/// <see cref="CamusTelemetry"/>: logins, retries, endpoint quarantine and the prepared-statement cache. All of
 /// them are on the <see cref="CamusTelemetry.MeterName"/> meter. Each record method checks that a listener
 /// enabled its instrument before it builds tags, so an unobserved process pays one check per event.
 /// </summary>
@@ -59,6 +59,24 @@ internal static class CamusMetrics
         /// <summary>The server has no prepared-statement support. The driver stops automatic preparation.</summary>
         public const string Unsupported = "unsupported";
     }
+
+    /// <summary>The <c>camusdb.login.mode</c> values: how a login was started.</summary>
+    internal static class LoginMode
+    {
+        /// <summary>A statement found no token it could send and waited for the login.</summary>
+        public const string Blocking = "blocking";
+
+        /// <summary>A token reached its renewal point. Statements kept it, and the login ran beside them.</summary>
+        public const string Background = "background";
+
+        /// <summary>The application called the login itself.</summary>
+        public const string Explicit = "explicit";
+    }
+
+    internal static readonly Counter<long> Logins = CamusTelemetry.Meter.CreateCounter<long>(
+        "camusdb.client.auth.logins",
+        unit: "{login}",
+        description: "Logins the driver sent to obtain a bearer token, by whether a statement waited for them.");
 
     internal static readonly Counter<long> Retries = CamusTelemetry.Meter.CreateCounter<long>(
         "camusdb.client.operation.retries",
@@ -124,6 +142,27 @@ internal static class CamusMetrics
             tags.Add("db.operation.name", operationName);
 
         Retries.Add(1, tags);
+    }
+
+    /// <summary>Counts one login. A blocking login also adds an event to the driver span that is current, if
+    /// there is one, because that span carries the time of the login.</summary>
+    internal static void RecordLogin(string mode, string? errorType)
+    {
+        if (mode == LoginMode.Blocking && Activity.Current is { } current && ReferenceEquals(current.Source, CamusTelemetry.Source))
+            current.AddEvent(new ActivityEvent("camusdb.login", tags: new ActivityTagsCollection
+            {
+                { "camusdb.login.mode", mode },
+                { "error.type", errorType },
+            }));
+
+        if (!Logins.Enabled)
+            return;
+
+        TagList tags = new() { { "camusdb.login.mode", mode } };
+        if (errorType is not null)
+            tags.Add("error.type", errorType);
+
+        Logins.Add(1, tags);
     }
 
     internal static void RecordQuarantine(string endpoint)

@@ -180,6 +180,25 @@ public sealed class TestTelemetryMetrics : IDisposable
     }
 
     [Fact]
+    public async Task BlockingLogin_IsRecordedOnTheStatementSpanThatWaitedForIt()
+    {
+        (_, CamusConnectionStringBuilder builder, _) = Connect();
+
+        // No token yet: the statement waits for the login, and its span carries the time. The token is asked
+        // for inside the operation, as the REST and gRPC transports ask for it before they send the statement.
+        CamusTokenProvider provider = new(
+            CamusCredentials.FromPassword("admin", "secret"), () => new FakeLoginClient(), () => Endpoint, () => 10, null, null);
+
+        CamusOperation operation = CamusOperation.Start(builder, "UPDATE")!;
+        Assert.Equal("token-1", await provider.GetTokenAsync(default));
+        operation.Complete();
+
+        Activity span = Assert.Single(stopped);
+        ActivityEvent login = Assert.Single(span.Events, e => e.Name == "camusdb.login");
+        Assert.Equal("blocking", login.Tags.First(t => t.Key == "camusdb.login.mode").Value);
+    }
+
+    [Fact]
     public void Quarantine_IsCounted_AndTheGaugeShowsWhichEndpointIsSetAside()
     {
         string other = $"http://other.{Host}:5095";

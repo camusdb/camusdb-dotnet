@@ -22,10 +22,13 @@ namespace CamusDB.Client.Auth;
 /// <para><b>Single flight.</b> Concurrent callers that find no usable token queue on one gate; the
 /// winner logs in and the rest observe its result instead of issuing their own login.</para>
 ///
-/// <para><b>Renewal.</b> The <c>/login</c> reply reports how long the token is good for, and the provider
-/// renews at 80% of that. Against a server predating the field it falls back to its own conservative
-/// lifetime (<c>TokenLifetime=</c>, default 10 minutes against the server's 15-minute default
-/// <c>AccessTokenTtl</c>). That proactive renewal is the primary path;
+/// <para><b>Renewal.</b> The <c>/login</c> reply reports how long the token is good for. At 80% of that
+/// the provider starts one login in the background and keeps handing out the current token, so no
+/// statement waits for a login it does not need yet; a statement waits only when there is no token, or
+/// when the token reached 95% of its lifetime before a renewal succeeded. Against a server predating the
+/// field it falls back to its own conservative lifetime (<c>TokenLifetime=</c>, default 10 minutes
+/// against the server's 15-minute default <c>AccessTokenTtl</c>): it renews at 80% of that and never sends
+/// a token past it. That proactive renewal is the primary path;
 /// <see cref="Invalidate"/> — driven by a <c>CADB0516</c> from an actual request — is the backstop for
 /// the cases a clock cannot predict: a password rotation, a <c>DROP USER</c>, a <c>/logout</c> elsewhere,
 /// or a server whose TTL is configured shorter than the fallback.</para>
@@ -108,13 +111,31 @@ internal sealed class CamusTokenProvider
     // Serializes logins so N concurrent statements on a cold/stale token produce one /login, not N.
     private readonly SemaphoreSlim gate = new(1, 1);
 
-    /// <summary>Credentials + cached token + renewal deadline as one immutable snapshot, so the
+    /// <summary>Credentials + cached token + its two deadlines as one immutable snapshot, so the
     /// per-request read (<see cref="TryGetCached"/> runs on every statement) is a lock-free volatile
-    /// load. Writers replace the whole object under <see cref="stateLock"/>.</summary>
-    private sealed record AuthState(CamusCredentials Credentials, string? Token, DateTimeOffset RenewAfter);
+    /// load. Writers replace the whole object under <see cref="stateLock"/>. From <see cref="RenewAfter"/>
+    /// the token is still sent, and a background login replaces it; from <see cref="ExpiresAt"/> it is not
+    /// sent any more, and a statement waits for the login.</summary>
+    private sealed record AuthState(CamusCredentials Credentials, string? Token, DateTimeOffset RenewAfter, DateTimeOffset ExpiresAt);
 
     private readonly object stateLock = new();
     private AuthState state = null!;   // assigned by SetCredentials in the constructor
+
+    /// <summary>The share of the server-reported lifetime the driver sends a token for. The lifetime starts
+    /// when the server issues the token, and the driver starts its count before it sends the login, so the
+    /// count is early. The remaining 5% is for the request that carries the token to reach the server.</summary>
+    private const double UsableShareOfReportedLifetime = 0.95;
+
+    /// <summary>How long the provider waits before it starts another background renewal after one failed.
+    /// The token is still valid, so the wait costs nothing. Without the wait, every statement after a failed
+    /// renewal would start a new login, against a server that is down or rate-limits this account.</summary>
+    internal static readonly TimeSpan BackgroundRenewalRetryDelay = TimeSpan.FromSeconds(5);
+
+    // 1 while a background renewal is queued or running, so at most one is in flight per provider.
+    private int renewing;
+
+    // UTC ticks before which no background renewal starts, after a failed one.
+    private long renewalRetryAfterTicks;
 
     public CamusTokenProvider(
         CamusCredentials credentials,
@@ -149,8 +170,13 @@ internal sealed class CamusTokenProvider
     /// </summary>
     public string? CurrentToken => Volatile.Read(ref state).Token;
 
+    /// <summary>True while a background renewal is queued or running, including its failure handling.</summary>
+    internal bool RenewalInFlight => Volatile.Read(ref renewing) == 1;
+
     /// <summary>
-    /// Returns a usable bearer token, logging in if there is none or the cached one has aged out.
+    /// Returns a usable bearer token. A token past its renewal point but not yet expired is returned at
+    /// once, and one background login replaces it, so a statement does not wait for a token it does not
+    /// need yet. The caller waits for a login only when there is no token, or the token expired.
     /// Returns null when no credentials are configured.
     /// </summary>
     public async ValueTask<string?> GetTokenAsync(CancellationToken cancellationToken)
@@ -175,11 +201,74 @@ internal sealed class CamusTokenProvider
                     "The supplied access token was rejected and the connection has no credentials to obtain a new one");
             }
 
-            return await LoginLockedAsync(current.User!, current.Password!, cancellationToken).ConfigureAwait(false);
+            try
+            {
+                string token = await LoginLockedAsync(current.User!, current.Password!, cancellationToken).ConfigureAwait(false);
+                CamusMetrics.RecordLogin(CamusMetrics.LoginMode.Blocking, errorType: null);
+                return token;
+            }
+            catch (Exception ex)
+            {
+                CamusMetrics.RecordLogin(CamusMetrics.LoginMode.Blocking, (ex as CamusException)?.Code ?? ex.GetType().FullName);
+                throw;
+            }
         }
         finally
         {
             gate.Release();
+        }
+    }
+
+    /// <summary>
+    /// Starts one login in the background to replace <paramref name="stale"/>, a token past its renewal
+    /// point that callers still use. At most one renewal is in flight per provider, and after a failed one
+    /// the next starts only after <see cref="BackgroundRenewalRetryDelay"/>.
+    /// </summary>
+    private void StartBackgroundRenewal(AuthState stale)
+    {
+        if (clock.GetUtcNow().UtcTicks < Interlocked.Read(ref renewalRetryAfterTicks))
+            return;
+
+        if (Interlocked.CompareExchange(ref renewing, 1, 0) != 0)
+            return;
+
+        // The renewal belongs to no statement. Without this, it would carry the trace of the statement that
+        // started it, and its HTTP span would show as part of a request that did not wait for it.
+        using (ExecutionContext.SuppressFlow())
+            _ = Task.Run(() => RenewInBackgroundAsync(stale));
+    }
+
+    private async Task RenewInBackgroundAsync(AuthState stale)
+    {
+        try
+        {
+            await gate.WaitAsync().ConfigureAwait(false);
+            try
+            {
+                // Anything that replaced the state while this renewal waited for the gate (a blocking login, an
+                // explicit login or logout, an invalidation) already decided what the next token is.
+                if (!ReferenceEquals(Volatile.Read(ref state), stale))
+                    return;
+
+                await LoginLockedAsync(stale.Credentials.User!, stale.Credentials.Password!, CancellationToken.None).ConfigureAwait(false);
+                CamusMetrics.RecordLogin(CamusMetrics.LoginMode.Background, errorType: null);
+            }
+            finally
+            {
+                gate.Release();
+            }
+        }
+        catch (Exception ex)
+        {
+            // The old token is still valid, so nothing has failed yet: statements keep sending it, and a later
+            // statement tries again after the delay. If the token expires first, the next statement logs in
+            // itself and surfaces the error.
+            Interlocked.Exchange(ref renewalRetryAfterTicks, (clock.GetUtcNow() + BackgroundRenewalRetryDelay).UtcTicks);
+            CamusMetrics.RecordLogin(CamusMetrics.LoginMode.Background, (ex as CamusException)?.Code ?? ex.GetType().FullName);
+        }
+        finally
+        {
+            Volatile.Write(ref renewing, 0);
         }
     }
 
@@ -214,7 +303,17 @@ internal sealed class CamusTokenProvider
             lock (stateLock)
                 Volatile.Write(ref state, state with { Credentials = CamusCredentials.FromPassword(user, password), Token = null });
 
-            return await LoginLockedAsync(user, password, cancellationToken).ConfigureAwait(false);
+            try
+            {
+                string token = await LoginLockedAsync(user, password, cancellationToken).ConfigureAwait(false);
+                CamusMetrics.RecordLogin(CamusMetrics.LoginMode.Explicit, errorType: null);
+                return token;
+            }
+            catch (Exception ex)
+            {
+                CamusMetrics.RecordLogin(CamusMetrics.LoginMode.Explicit, (ex as CamusException)?.Code ?? ex.GetType().FullName);
+                throw;
+            }
         }
         finally
         {
@@ -253,31 +352,43 @@ internal sealed class CamusTokenProvider
     // Caller holds the gate.
     private async Task<string> LoginLockedAsync(string user, string password, CancellationToken cancellationToken)
     {
+        // Both deadlines count from before the request, so the time the login takes is charged to the token.
+        DateTimeOffset requestedAt = clock.GetUtcNow();
+
         CamusLoginResult minted = await resolveLoginClient()
             .LoginAsync(resolveEndpoint(), user, password, resolveTimeoutSeconds(), cancellationToken)
             .ConfigureAwait(false);
 
+        (TimeSpan renewAfter, TimeSpan expiresAfter) = Deadlines(minted.ExpiresIn);
+
         lock (stateLock)
-            Volatile.Write(ref state, state with { Token = minted.Token, RenewAfter = clock.GetUtcNow() + RenewalDelay(minted.ExpiresIn) });
+            Volatile.Write(ref state, state with { Token = minted.Token, RenewAfter = requestedAt + renewAfter, ExpiresAt = requestedAt + expiresAfter });
 
         return minted.Token;
     }
 
     /// <summary>
-    /// When to mint the next token. The server's reported lifetime is authoritative — its TTL is
-    /// configurable and may be shorter than any value the driver defaults to — so renew at 80% of it,
-    /// leaving headroom for the request that carries the token to complete. Absent a reported value (an
-    /// older server) fall back to the configured <c>TokenLifetime</c>, which is already conservative
-    /// against the 15-minute default TTL.
+    /// When to start the next login, and when to stop sending the token. The server's reported lifetime is
+    /// authoritative (its TTL is configurable and may be shorter than any value the driver defaults to):
+    /// renew at 80% of it, and send the token until 95% of it. Absent a reported value (an older server),
+    /// the configured <c>TokenLifetime</c> is the lifetime the driver assumes: renew at 80% of it, and do
+    /// not send the token past it.
     /// </summary>
-    private TimeSpan RenewalDelay(TimeSpan? reported)
+    private (TimeSpan RenewAfter, TimeSpan ExpiresAfter) Deadlines(TimeSpan? reported)
     {
-        if (reported is not { } lifetimeFromServer)
-            return lifetime;
+        TimeSpan expiresAfter = reported is { } lifetimeFromServer
+            ? lifetimeFromServer * UsableShareOfReportedLifetime
+            : lifetime;
 
-        TimeSpan renewal = lifetimeFromServer * 0.8;
+        TimeSpan renewAfter = (reported ?? lifetime) * 0.8;
 
-        return renewal > TimeSpan.Zero ? renewal : TimeSpan.FromSeconds(1);
+        if (expiresAfter <= TimeSpan.Zero)
+            expiresAfter = TimeSpan.FromSeconds(1);
+
+        if (renewAfter <= TimeSpan.Zero || renewAfter > expiresAfter)
+            renewAfter = expiresAfter;
+
+        return (renewAfter, expiresAfter);
     }
 
     private void SetCredentials(CamusCredentials value)
@@ -285,23 +396,32 @@ internal sealed class CamusTokenProvider
         lock (stateLock)
         {
             // A directly supplied token is the cached token, and never ages out on our side.
-            Volatile.Write(ref state, new AuthState(value, value.AccessToken, DateTimeOffset.MaxValue));
+            Volatile.Write(ref state, new AuthState(value, value.AccessToken, DateTimeOffset.MaxValue, DateTimeOffset.MaxValue));
         }
     }
 
-    /// <summary>Reports the cached token when it is still within its lifetime; <paramref name="enabled"/>
-    /// tells a false return apart from "there is nothing to authenticate with". Lock-free: one volatile
-    /// snapshot, taken on every statement.</summary>
+    /// <summary>Reports the cached token when it can still be sent; <paramref name="enabled"/> tells a false
+    /// return apart from "there is nothing to authenticate with". A token past its renewal point is still
+    /// reported, and starts the background renewal. Lock-free on the common path: one volatile snapshot,
+    /// taken on every statement.</summary>
     private bool TryGetCached(out string? cached, out bool enabled)
     {
         AuthState snapshot = Volatile.Read(ref state);
 
         enabled = snapshot.Credentials.IsSet;
 
-        if (enabled && snapshot.Token is not null && clock.GetUtcNow() < snapshot.RenewAfter)
+        if (enabled && snapshot.Token is not null)
         {
-            cached = snapshot.Token;
-            return true;
+            DateTimeOffset now = clock.GetUtcNow();
+
+            if (now < snapshot.ExpiresAt)
+            {
+                if (now >= snapshot.RenewAfter && snapshot.Credentials.CanRenew)
+                    StartBackgroundRenewal(snapshot);
+
+                cached = snapshot.Token;
+                return true;
+            }
         }
 
         cached = null;

@@ -243,6 +243,99 @@ public class TestAuthentication
     }
 
     [Fact]
+    public async Task PastTheRenewalPointTheCurrentTokenIsReturnedAtOnceAndOneBackgroundLoginReplacesIt()
+    {
+        FakeLoginClient login = new() { ExpiresIn = TimeSpan.FromMinutes(15) };
+        TestClock clock = new(DateTimeOffset.UnixEpoch);
+        CamusTokenProvider provider = Provider(login, CamusCredentials.FromPassword("admin", "secret"), TimeSpan.FromMinutes(10), clock);
+
+        Assert.Equal("token-1", await provider.GetTokenAsync(default));
+
+        // Hold the renewal, so a caller that waited for it could not finish.
+        login.Gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        clock.Advance(TimeSpan.FromMinutes(13));        // past 80% of 15 min, before 95% of it
+
+        ValueTask<string?>[] callers = Enumerable
+            .Range(0, 16)
+            .Select(_ => provider.GetTokenAsync(default))
+            .ToArray();
+
+        Assert.All(callers, caller =>
+        {
+            Assert.True(caller.IsCompletedSuccessfully);
+            Assert.Equal("token-1", caller.Result);
+        });
+
+        await WaitUntil(() => login.Started == 2);
+        login.Gate.SetResult();
+
+        await WaitUntil(() => provider.CurrentToken == "token-2");
+        Assert.Equal("token-2", await provider.GetTokenAsync(default));
+        Assert.Equal(2, login.Started);
+    }
+
+    [Fact]
+    public async Task ARenewedTokenStartsItsOwnRenewalClock()
+    {
+        FakeLoginClient login = new() { ExpiresIn = TimeSpan.FromMinutes(15) };
+        TestClock clock = new(DateTimeOffset.UnixEpoch);
+        CamusTokenProvider provider = Provider(login, CamusCredentials.FromPassword("admin", "secret"), TimeSpan.FromMinutes(10), clock);
+
+        Assert.Equal("token-1", await provider.GetTokenAsync(default));
+
+        clock.Advance(TimeSpan.FromMinutes(13));
+        Assert.Equal("token-1", await provider.GetTokenAsync(default));
+        await WaitUntil(() => provider.CurrentToken == "token-2");
+
+        // The renewal started at 13 min, so the next one is due at 13 + 12 min, not before.
+        clock.Advance(TimeSpan.FromMinutes(11));
+        Assert.Equal("token-2", await provider.GetTokenAsync(default));
+        await Task.Delay(50);
+        Assert.Equal(2, login.Started);
+    }
+
+    [Fact]
+    public async Task ATokenPastItsUsableLifetimeIsNotSentAndTheCallerWaitsForTheLogin()
+    {
+        FakeLoginClient login = new() { ExpiresIn = TimeSpan.FromMinutes(15) };
+        TestClock clock = new(DateTimeOffset.UnixEpoch);
+        CamusTokenProvider provider = Provider(login, CamusCredentials.FromPassword("admin", "secret"), TimeSpan.FromMinutes(10), clock);
+
+        Assert.Equal("token-1", await provider.GetTokenAsync(default));
+
+        clock.Advance(TimeSpan.FromMinutes(14.5));      // past 95% of 15 min: the server may reject it in flight
+        Assert.Equal("token-2", await provider.GetTokenAsync(default));
+        Assert.Equal(2, login.Started);
+    }
+
+    [Fact]
+    public async Task AFailedBackgroundRenewalKeepsTheTokenAndIsTriedAgainOnlyAfterTheRetryDelay()
+    {
+        FakeLoginClient login = new() { ExpiresIn = TimeSpan.FromMinutes(15) };
+        TestClock clock = new(DateTimeOffset.UnixEpoch);
+        CamusTokenProvider provider = Provider(login, CamusCredentials.FromPassword("admin", "secret"), TimeSpan.FromMinutes(10), clock);
+
+        Assert.Equal("token-1", await provider.GetTokenAsync(default));
+
+        login.FailuresLeft = 1;
+        clock.Advance(TimeSpan.FromMinutes(13));
+        Assert.Equal("token-1", await provider.GetTokenAsync(default));
+        await WaitUntil(() => login.Started == 2);
+        await WaitUntil(() => !provider.RenewalInFlight);
+
+        // Inside the retry delay: the token is still sent, and no login starts.
+        Assert.Equal("token-1", await provider.GetTokenAsync(default));
+        await Task.Delay(50);
+        Assert.Equal(2, login.Started);
+
+        clock.Advance(CamusTokenProvider.BackgroundRenewalRetryDelay);
+        Assert.Equal("token-1", await provider.GetTokenAsync(default));
+        await WaitUntil(() => provider.CurrentToken == "token-2");
+        Assert.Equal("token-2", await provider.GetTokenAsync(default));
+        Assert.Equal(3, login.Started);
+    }
+
+    [Fact]
     public async Task InvalidateForcesAFreshLogin()
     {
         FakeLoginClient login = new();
@@ -430,6 +523,20 @@ public class TestAuthentication
         ICamusLoginClient login, CamusCredentials credentials, TimeSpan? lifetime = null, TimeProvider? clock = null)
         => new(credentials, () => login, () => "http://localhost:5095", () => 10, lifetime, clock);
 
+    /// <summary>Waits for a background renewal to change the state, up to five seconds.</summary>
+    private static async Task WaitUntil(Func<bool> condition)
+    {
+        DateTime deadline = DateTime.UtcNow.AddSeconds(5);
+
+        while (!condition())
+        {
+            if (DateTime.UtcNow > deadline)
+                throw new TimeoutException("The background renewal did not reach the expected state");
+
+            await Task.Delay(5);
+        }
+    }
+
     private static TransportSqlRequest Request() => new()
     {
         Endpoint = "http://localhost:5095",
@@ -448,16 +555,29 @@ public class TestAuthentication
 
         public string? RevokedToken { get; private set; }
 
+        private int started;
+
+        /// <summary>Logins sent, whether they succeeded or not; counted before <see cref="Gate"/> holds them.</summary>
+        public int Started => Volatile.Read(ref started);
+
         /// <summary>When set, logins block on it — used to pile callers up on the single-flight gate.</summary>
-        public TaskCompletionSource? Gate { get; init; }
+        public TaskCompletionSource? Gate { get; set; }
+
+        /// <summary>How many of the next logins fail, as a server that is down would make them.</summary>
+        public int FailuresLeft;
 
         /// <summary>Expiry the fake server reports, or null to model a server predating the field.</summary>
         public TimeSpan? ExpiresIn { get; init; }
 
         public async Task<CamusLoginResult> LoginAsync(string endpoint, string user, string password, int timeoutSeconds, CancellationToken cancellationToken)
         {
-            if (Gate is not null)
-                await Gate.Task.ConfigureAwait(false);
+            Interlocked.Increment(ref started);
+
+            if (Gate is { } gate)
+                await gate.Task.ConfigureAwait(false);
+
+            if (Interlocked.Decrement(ref FailuresLeft) >= 0)
+                throw new HttpRequestException("login endpoint unavailable");
 
             LastCredentials = (user, password);
             return new CamusLoginResult("token-" + Interlocked.Increment(ref logins), ExpiresIn);
