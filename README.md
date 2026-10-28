@@ -1515,6 +1515,25 @@ var names = await ctx.People.Select(p => p.First + " " + p.Last).ToListAsync();
 Before 0.16.8 the provider wrote `+`, and the server refused it with `CADB0400`. The `||` operator needs a
 server from 2026-10-12 or later.
 
+Since 0.16.9 an interpolated string translates too. In a LINQ expression, C# writes `$"{a} {b}"` as
+`string.Format("{0} {1}", a, b)`, and the provider turns it into the same `||` concatenation:
+
+```csharp
+var ada = await ctx.People.Where(p => $"{p.First} {p.Last}" == "Ada Lovelace").ToListAsync();
+// WHERE ((`p`.`first` || ' ') || COALESCE(`p`.`last`, '')) = 'Ada Lovelace'
+```
+
+The provider translates only a format that gives the same text in SQL as in C#:
+
+- plain placeholders (`{0}`), literal text, and the escaped braces `{{` and `}}`;
+- arguments that are strings or integers. A `null` argument gives `""`.
+
+A format string or an alignment (`{0:N2}`, `{0,5}`), or an argument of another type (a `double`, a
+`decimal`, a date, a `Guid`, a `bool`), is not translated, because its C# text depends on the culture or
+on .NET formatting. In the final `Select`, EF Core then makes the text on the client. In a `Where`, an
+`OrderBy` or a join, the query fails with `InvalidOperationException` ("could not be translated"). Use
+`+` with an explicit conversion, or filter on the columns themselves.
+
 ##### String ordering (`string.Compare` / `CompareTo`)
 
 The comparison idiom that keyset (cursor) pagination is written with translates to a plain relational

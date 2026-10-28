@@ -91,6 +91,40 @@ public class TestEntityFrameworkConcatenationLive
         Assert.Equal(["Alan", "Ada"], await people.OrderBy(p => p.Last + p.First).Select(p => p.First).ToListAsync());
     }
 
+    [Theory]
+    [InlineData("rest")]
+    [InlineData("grpc")]
+    public async Task InterpolationMatchesCSharp(string protocol)
+    {
+        if (!Enabled)
+            return;
+
+        string tag = await SeedAsync(protocol);
+        await using PeopleContext ctx = NewContext(protocol);
+        IQueryable<Person> people = ctx.People.Where(p => p.Tag == tag);
+
+        // Before 0.16.9 an interpolated string (string.Format) in a Where did not translate.
+        string full = "Ada Lovelace";
+        Assert.Equal(["Ada"], await people.Where(p => $"{p.First} {p.Last}" == full).Select(p => p.First).ToListAsync());
+
+        // A NULL argument is "", as in C#.
+        Assert.Equal(["Alan"], await people.Where(p => $"{p.First} {p.Last}" == "Alan ").Select(p => p.First).ToListAsync());
+
+        // Integers, a negative one too, and literal braces. The SQL result must equal the C# result.
+        List<Person> stored = await people.OrderBy(p => p.First).ToListAsync();
+        List<string> expected = stored.Select(p => $"{{{p.First}}}#{p.Age}/{-p.Age}:{p.Last}").ToList();
+
+        List<string> translated = await people.OrderBy(p => p.First)
+            .Select(p => $"{{{p.First}}}#{p.Age}/{-p.Age}:{p.Last}")
+            .ToListAsync();
+
+        Assert.Equal(["{Ada}#36/-36:Lovelace", "{Alan}#41/-41:"], expected);
+        Assert.Equal(expected, translated);
+
+        // Ordered by an interpolation: "Alan" + "" sorts before "Ada" + "Lovelace" when the last name comes first.
+        Assert.Equal(["Alan", "Ada"], await people.OrderBy(p => $"{p.Last}{p.First}").Select(p => p.First).ToListAsync());
+    }
+
     private sealed class PeopleContext(DbContextOptions options) : DbContext(options)
     {
         public DbSet<Person> People => Set<Person>();
