@@ -298,10 +298,16 @@ public class CamusCommand : DbCommand, ICloneable
     /// <c>CALL</c> runs a procedure that a C# extension defines: the server runs it only on the non-query
     /// path and answers it with an affected-row count and no result set, as it does a DML statement
     /// without RETURNING.
+    ///
+    /// <para><c>UPSERT INTO</c> is an <c>INSERT … ON CONFLICT (primary key) DO UPDATE</c>, so it is a write
+    /// like <c>INSERT</c>. Sent as a query, the server refuses it without RETURNING (<c>CADB0407</c>), and
+    /// with RETURNING it would run without the connection's autocommit options and report no row count.
+    /// <c>UPSERT</c> is not a reserved word, but no other statement starts with it.</para>
     /// </summary>
     private static readonly string[] DmlPrefixes =
     [
         "INSERT",
+        "UPSERT",
         "UPDATE",
         "DELETE",
         "CALL",
@@ -311,8 +317,8 @@ public class CamusCommand : DbCommand, ICloneable
 
     private static bool IsDmlStatement(string sql) => StartsWithAny(sql, DmlPrefixes);
 
-    /// <summary>An <c>INSERT</c>, <c>UPDATE</c> or <c>DELETE</c> with a RETURNING list, which a query
-    /// endpoint answers with rows.</summary>
+    /// <summary>An <c>INSERT</c>, <c>UPSERT</c>, <c>UPDATE</c> or <c>DELETE</c> with a RETURNING list, which
+    /// a query endpoint answers with rows.</summary>
     private static bool IsWriteReturning(string sql)
         => IsDmlStatement(sql) && CamusSqlSyntax.HasReturningKeyword(sql);
 
@@ -841,7 +847,7 @@ public class CamusCommand : DbCommand, ICloneable
     /// can reach the client before the autocommit transaction commits, a late conflict is reported while
     /// reading (as a <see cref="CamusException"/>) rather than retried. Use the buffered
     /// <see cref="ExecuteReaderAsync()"/> — or drive an explicit transaction and retry yourself — when you
-    /// need that. Streaming applies to queries and to an <c>INSERT</c>, <c>UPDATE</c> or <c>DELETE</c>
+    /// need that. Streaming applies to queries and to an <c>INSERT</c>, <c>UPSERT</c>, <c>UPDATE</c> or <c>DELETE</c>
     /// with a RETURNING list; any other DML statement falls back to the buffered affected-row reader.</para>
     ///
     /// <para>A statement with a RETURNING list goes to the query endpoint, which streams its rows. The server
@@ -1073,7 +1079,7 @@ public class CamusCommand : DbCommand, ICloneable
 
     /// <inheritdoc />
     /// <remarks>
-    /// For an <c>INSERT</c>, <c>UPDATE</c> or <c>DELETE</c> with a RETURNING list, this returns the
+    /// For an <c>INSERT</c>, <c>UPSERT</c>, <c>UPDATE</c> or <c>DELETE</c> with a RETURNING list, this returns the
     /// written-row count and the server does not send the rows. The server still checks the RETURNING list and the SELECT privilege that it needs. To
     /// read the rows, use <see cref="ExecuteReaderAsync()"/> or <see cref="ExecuteScalarAsync"/>.
     /// </remarks>
@@ -1344,11 +1350,16 @@ public class CamusCommand : DbCommand, ICloneable
     /// The statements the server accepts a registration for: the repeatable data statements, whose whole
     /// point is running many times with different values. Schema and administration statements are
     /// one-shot and are excluded on the server too, so this list mirrors that rather than guessing.
+    ///
+    /// <para>A statement that starts with a parenthesis is a query: a set operation whose first operand
+    /// has its own ORDER BY or LIMIT, as in <c>(SELECT …) UNION SELECT …</c>.</para>
     /// </summary>
     private static readonly string[] PreparablePrefixes =
     [
         "SELECT",
+        "(",
         "INSERT",
+        "UPSERT",
         "UPDATE",
         "DELETE",
         "SHOW",

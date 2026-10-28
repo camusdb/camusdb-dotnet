@@ -937,12 +937,8 @@ internal sealed class GrpcTransport(CamusEndpointPool endpoints, CamusTokenProvi
 
     public Task CreateBranchDatabaseAsync(
         string endpoint, string branchName, string sourceDatabaseName, bool ifNotExists, int timeoutSeconds, CancellationToken cancellationToken)
-    {
-        string prefix = ifNotExists ? "CREATE DATABASE IF NOT EXISTS " : "CREATE DATABASE ";
-        string sql = $"{prefix}{QuoteIdentifier(branchName)} BRANCH FROM {QuoteIdentifier(sourceDatabaseName)}";
-
-        return ExecuteAdminDdlAsync(endpoint, database: "", sql, timeoutSeconds, cancellationToken);
-    }
+        => ExecuteAdminDdlAsync(
+            endpoint, database: "", CamusBranchSql.CreateBranch(branchName, sourceDatabaseName, ifNotExists), timeoutSeconds, cancellationToken);
 
     public Task DropDatabaseAsync(string endpoint, string database, int timeoutSeconds, CancellationToken cancellationToken)
         => ExecuteAdminDdlAsync(endpoint, database: "", $"DROP DATABASE {QuoteIdentifier(database)}", timeoutSeconds, cancellationToken);
@@ -951,18 +947,18 @@ internal sealed class GrpcTransport(CamusEndpointPool endpoints, CamusTokenProvi
         string endpoint, string database, int timeoutSeconds, CancellationToken cancellationToken)
     {
         CamusResultSet rows = await QueryAdminAsync(
-            endpoint, database, $"SHOW BRANCHES FROM {QuoteIdentifier(database)}", timeoutSeconds, cancellationToken).ConfigureAwait(false);
+            endpoint, database, CamusBranchSql.ShowBranches(database), timeoutSeconds, cancellationToken).ConfigureAwait(false);
 
-        return MapBranchRows(rows);
+        return CamusBranchSql.MapRows(rows);
     }
 
     public async Task<IReadOnlyList<CamusBranchRow>> ShowAncestorsAsync(
         string endpoint, string database, int timeoutSeconds, CancellationToken cancellationToken)
     {
         CamusResultSet rows = await QueryAdminAsync(
-            endpoint, database, $"SHOW ANCESTORS FROM {QuoteIdentifier(database)}", timeoutSeconds, cancellationToken).ConfigureAwait(false);
+            endpoint, database, CamusBranchSql.ShowAncestors(database), timeoutSeconds, cancellationToken).ConfigureAwait(false);
 
-        return MapBranchRows(rows);
+        return CamusBranchSql.MapRows(rows);
     }
 
     private Task ExecuteAdminDdlAsync(string endpoint, string database, string sql, int timeoutSeconds, CancellationToken cancellationToken)
@@ -974,41 +970,6 @@ internal sealed class GrpcTransport(CamusEndpointPool endpoints, CamusTokenProvi
         => (await ExecuteQueryAsync(
             new TransportSqlRequest { Endpoint = endpoint, Database = database, Sql = sql, TimeoutSeconds = timeoutSeconds },
             cancellationToken).ConfigureAwait(false)).ResultSet;
-
-    // SHOW BRANCHES emits columns [database, id, depth, parent, fork_timestamp]; SHOW ANCESTORS emits
-    // [database, id, depth, fork_timestamp] (no parent). Map by column name so either shape reconstructs.
-    private static IReadOnlyList<CamusBranchRow> MapBranchRows(CamusResultSet rows)
-    {
-        int columnCount = rows.ColumnCount;
-        int databaseCol = -1, idCol = -1, depthCol = -1, parentCol = -1, forkCol = -1;
-
-        for (int c = 0; c < columnCount; c++)
-        {
-            switch (rows.ColumnNames[c])
-            {
-                case "database": databaseCol = c; break;
-                case "id": idCol = c; break;
-                case "depth": depthCol = c; break;
-                case "parent": parentCol = c; break;
-                case "fork_timestamp": forkCol = c; break;
-            }
-        }
-
-        List<CamusBranchRow> result = new(rows.RowCount);
-        for (int r = 0; r < rows.RowCount; r++)
-        {
-            result.Add(new CamusBranchRow
-            {
-                Database = databaseCol >= 0 ? rows.GetCell(r, databaseCol).StrValue : null,
-                Id = idCol >= 0 ? rows.GetCell(r, idCol).StrValue : null,
-                Depth = depthCol >= 0 ? (int)rows.GetCell(r, depthCol).LongValue : 0,
-                Parent = parentCol >= 0 ? rows.GetCell(r, parentCol).StrValue : null,
-                ForkTimestamp = forkCol >= 0 ? rows.GetCell(r, forkCol).StrValue : null,
-            });
-        }
-
-        return result;
-    }
 
     // ─── Credential exchange (CamusAuth) ────────────────────────────────────────
 

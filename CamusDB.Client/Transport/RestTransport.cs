@@ -421,33 +421,21 @@ internal sealed class RestTransport(CamusEndpointPool endpoints, CamusTokenProvi
         }
     }
 
+    // Branching is SQL on the server: there is no REST route for it. These three methods send the same
+    // statements as the gRPC transport, through the ordinary DDL and query routes.
     public async Task CreateBranchDatabaseAsync(
         string endpoint, string branchName, string sourceDatabaseName, bool ifNotExists, int timeoutSeconds, CancellationToken cancellationToken)
     {
-        try
+        TransportSqlRequest request = new()
         {
-            CamusCreateBranchDatabaseRequest request = new()
-            {
-                BranchName = branchName,
-                SourceDatabaseName = sourceDatabaseName,
-                IfNotExists = ifNotExists
-            };
+            Endpoint = endpoint,
+            Database = "",
+            Sql = CamusBranchSql.CreateBranch(branchName, sourceDatabaseName, ifNotExists),
+            TimeoutSeconds = timeoutSeconds
+        };
 
-            byte[] responseBytes = await (await AuthorizeAsync(endpoint, "application/json", cancellationToken).ConfigureAwait(false))
-                .WithTimeout(timeoutSeconds)
-                .AppendPathSegments("create-branch-db")
-                .PostAsync(CamusJsonContent.Create(request, CamusJsonSerializerContext.Default.CamusCreateBranchDatabaseRequest), cancellationToken: cancellationToken)
-                .ReceiveBytes();
-
-            CamusCreateBranchDatabaseResponse? response = JsonSerializer.Deserialize(responseBytes, CamusJsonSerializerContext.Default.CamusCreateBranchDatabaseResponse);
-
-            if (response?.Status != "ok")
-                throw new CamusException(response?.Code ?? "CADB0000", response?.Message ?? "Create branch database failed");
-        }
-        catch (FlurlHttpException ex)
-        {
-            throw await TranslateAsync(ex, endpoint).ConfigureAwait(false);
-        }
+        if (!await ExecuteDdlAsync(request, cancellationToken).ConfigureAwait(false))
+            throw new CamusException("CADB0000", "Create branch database failed");
     }
 
     public async Task DropDatabaseAsync(string endpoint, string database, int timeoutSeconds, CancellationToken cancellationToken)
@@ -476,62 +464,22 @@ internal sealed class RestTransport(CamusEndpointPool endpoints, CamusTokenProvi
         }
     }
 
-    public async Task<IReadOnlyList<CamusBranchRow>> ShowBranchesAsync(
+    public Task<IReadOnlyList<CamusBranchRow>> ShowBranchesAsync(
         string endpoint, string database, int timeoutSeconds, CancellationToken cancellationToken)
-    {
-        try
-        {
-            CamusShowBranchesRequest request = new()
-            {
-                DatabaseName = database
-            };
+        => QueryBranchRowsAsync(endpoint, database, CamusBranchSql.ShowBranches(database), timeoutSeconds, cancellationToken);
 
-            byte[] responseBytes = await (await AuthorizeAsync(endpoint, "application/json", cancellationToken).ConfigureAwait(false))
-                .WithTimeout(timeoutSeconds)
-                .AppendPathSegments("show-branches")
-                .PostAsync(CamusJsonContent.Create(request, CamusJsonSerializerContext.Default.CamusShowBranchesRequest), cancellationToken: cancellationToken)
-                .ReceiveBytes();
-
-            CamusShowBranchesResponse? response = JsonSerializer.Deserialize(responseBytes, CamusJsonSerializerContext.Default.CamusShowBranchesResponse);
-
-            if (response?.Status != "ok")
-                throw new CamusException(response?.Code ?? "CADB0000", response?.Message ?? "Show branches failed");
-
-            return (IReadOnlyList<CamusBranchRow>?)response.Branches ?? [];
-        }
-        catch (FlurlHttpException ex)
-        {
-            throw await TranslateAsync(ex, endpoint).ConfigureAwait(false);
-        }
-    }
-
-    public async Task<IReadOnlyList<CamusBranchRow>> ShowAncestorsAsync(
+    public Task<IReadOnlyList<CamusBranchRow>> ShowAncestorsAsync(
         string endpoint, string database, int timeoutSeconds, CancellationToken cancellationToken)
+        => QueryBranchRowsAsync(endpoint, database, CamusBranchSql.ShowAncestors(database), timeoutSeconds, cancellationToken);
+
+    private async Task<IReadOnlyList<CamusBranchRow>> QueryBranchRowsAsync(
+        string endpoint, string database, string sql, int timeoutSeconds, CancellationToken cancellationToken)
     {
-        try
-        {
-            CamusShowAncestorsRequest request = new()
-            {
-                DatabaseName = database
-            };
+        QueryTransportResult result = await ExecuteQueryAsync(
+            new TransportSqlRequest { Endpoint = endpoint, Database = database, Sql = sql, TimeoutSeconds = timeoutSeconds },
+            cancellationToken).ConfigureAwait(false);
 
-            byte[] responseBytes = await (await AuthorizeAsync(endpoint, "application/json", cancellationToken).ConfigureAwait(false))
-                .WithTimeout(timeoutSeconds)
-                .AppendPathSegments("show-ancestors")
-                .PostAsync(CamusJsonContent.Create(request, CamusJsonSerializerContext.Default.CamusShowAncestorsRequest), cancellationToken: cancellationToken)
-                .ReceiveBytes();
-
-            CamusShowAncestorsResponse? response = JsonSerializer.Deserialize(responseBytes, CamusJsonSerializerContext.Default.CamusShowAncestorsResponse);
-
-            if (response?.Status != "ok")
-                throw new CamusException(response?.Code ?? "CADB0000", response?.Message ?? "Show ancestors failed");
-
-            return (IReadOnlyList<CamusBranchRow>?)response.Ancestors ?? [];
-        }
-        catch (FlurlHttpException ex)
-        {
-            throw await TranslateAsync(ex, endpoint).ConfigureAwait(false);
-        }
+        return CamusBranchSql.MapRows(result.ResultSet);
     }
 
     // ─── Prepared statements ────────────────────────────────────────────────────

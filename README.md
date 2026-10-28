@@ -222,7 +222,8 @@ If you are coming from Cloud Spanner: `ChannelPoolSize` is the analogue of `NumC
 
 Both transports raise the same `CamusException` (carrying the server's `CADBxxxx` code), so error handling and the transaction retry contract are unchanged when you switch. A couple of differences are inherent to the gRPC API surface:
 
-- Database-admin operations (`CreateDatabaseAsync`, `DropDatabaseAsync`, `CreateBranchDatabaseAsync`, `ShowBranchesAsync`, `ShowAncestorsAsync`) are issued as SQL over gRPC (the gRPC service has no dedicated admin RPCs); they behave the same from the caller's side.
+- `CreateDatabaseAsync` and `DropDatabaseAsync` use the `/create-db` and `/drop-db` routes over REST, and SQL over gRPC (the gRPC service has no dedicated admin RPCs); they behave the same from the caller's side.
+- `CreateBranchDatabaseAsync`, `ShowBranchesAsync` and `ShowAncestorsAsync` are SQL on both protocols (`CREATE DATABASE … BRANCH FROM …`, `SHOW BRANCHES FROM …`, `SHOW ANCESTORS FROM …`), because the server has branching as SQL only. Before 0.16.7 the REST transport called routes that the server never had, and every call failed with `CADB0000` and an HTTP 404. Creating a branch needs a superuser when authentication is on (`CADB0517` otherwise); the two SHOW methods list only the databases that the user can see.
 
 #### HTTP/2 and HTTP/3 over REST
 
@@ -306,7 +307,7 @@ CamusConnectionStringBuilder off = new(
 Things worth knowing:
 
 - **A prepared execution is indistinguishable from an inline one.** Same rows, same affected counts, same transaction, isolation, locking and cache-hint behavior. Parameters are still bound by name in this API — the driver maps them onto the server's ordinals before writing — and names must match the placeholder exactly, `@` included, just as they must inline.
-- **Only `SELECT`, `INSERT`, `UPDATE`, `DELETE` and `SHOW` are preparable.** Schema and database administration statements are one-shot; `Prepare()` on one is a no-op and the statement runs normally.
+- **Only `SELECT`, `INSERT`, `UPSERT`, `UPDATE`, `DELETE` and `SHOW` are preparable,** and a query that starts with a parenthesis, such as `(SELECT …) UNION SELECT …`. Schema and database administration statements are one-shot; `Prepare()` on one is a no-op and the statement runs normally.
 - **Preparing never causes a failure.** If the server declines to register a statement — an older node with no prepared-statement support, or a full server-side cap — it runs inline exactly as before, and a node that has no support at all is only asked once.
 - **Handles are node-local and expire.** The driver treats "unknown statement" as routine, re-registers, and replays the execution once; a load-balanced deployment settles at one registration per node per statement. Under gRPC a handle belongs to the `BatchExecute` stream that minted it, so a rebuilt stream is re-registered transparently.
 - **`MaxAutoPrepare` bounds both sides.** The least recently used statement is dropped and its server-side handle closed, so a workload that generates unbounded distinct SQL — string-concatenated queries, or EF's `IN (…)` expansion, whose text changes with the list length — degrades to inline execution instead of exhausting the server's per-principal cap.
@@ -443,7 +444,7 @@ The span name is the `db.query.summary`: the operation and the tables that the S
 | --- | --- |
 | `db.system.name` | `camusdb` |
 | `db.namespace` | The `Database=` of the connection. |
-| `db.operation.name` | The first keyword of the SQL text, if it is a known verb (`SELECT`, `INSERT`, `UPDATE`, `DELETE`, `CREATE`, `ALTER`, `DROP`, `TRUNCATE`, and others), or `BEGIN`, `COMMIT`, `ROLLBACK`, `BATCH`. |
+| `db.operation.name` | The first keyword of the SQL text, if it is a known verb (`SELECT`, `INSERT`, `UPSERT`, `UPDATE`, `DELETE`, `CREATE`, `ALTER`, `DROP`, `TRUNCATE`, and others), or `BEGIN`, `COMMIT`, `ROLLBACK`, `BATCH`. |
 | `db.collection.name` | The table, when the statement names exactly one. A typed insert always names its table. |
 | `db.query.summary` | The operation and the tables, each once and in the order of the SQL text, at most 255 characters. Only when the statement names a table. |
 | `server.address`, `server.port` | The endpoint that received the operation, after routing. |
@@ -807,6 +808,34 @@ await using CamusCommand delete = connection.CreateCamusCommand(
 `ExecuteReaderAsync` and `ExecuteScalarAsync` receive all rows in one reply. On gRPC, the server refuses a reply that is larger than 4 MiB with `CADB0550`, before the commit, so the statement stores nothing. For a large result, such as an `INSERT … SELECT … RETURNING` or an `UPDATE` of many rows, use `ExecuteStreamReaderAsync`. It sends the statement to the query endpoint, which streams the rows. On that path, `RecordsAffected` is `-1`, so count the rows as you read them.
 
 See `docs/returning.md` in the server repository for the full rules.
+
+#### INSERT … ON CONFLICT and UPSERT
+
+An `INSERT` can say what to do with a row whose unique key is already taken: skip the row (`DO NOTHING`), or update the stored row (`DO UPDATE`). `UPSERT INTO` is a short form that updates on the primary key. In `SET`, a bare column is the stored row, and `excluded.c` is the proposed row:
+
+```csharp
+await using CamusCommand hit = connection.CreateCamusCommand("""
+    INSERT INTO counters (k, n) VALUES (@k, 1)
+    ON CONFLICT (k) DO UPDATE SET n = counters.n + excluded.n
+    RETURNING n
+    """);
+
+hit.Parameters.Add("@k", ColumnType.String, "hits");
+
+long hits = (long)(await hit.ExecuteScalarAsync())!; // 1 the first time, then 2, 3, …
+
+await using CamusCommand upsert = connection.CreateCamusCommand(
+    "UPSERT INTO counters (k, n) VALUES (@k, @n)");
+```
+
+- Both forms are writes, the same as `INSERT`, on every entry point: `ExecuteNonQueryAsync`, `ExecuteReaderAsync`, `ExecuteScalarAsync`, `ExecuteStreamReaderAsync`, a pipeline and a prepared statement. They use the connection's autocommit options.
+- The row count is the number of inserted rows plus the number of updated rows. A skipped row counts nothing and returns no `RETURNING` row.
+- `DO UPDATE` and `UPSERT` need the `INSERT` and the `UPDATE` privilege.
+- Two transactions that write the same new key: the second one fails with a retryable code (`CADB0502`, or `CADB0504` at the lock-wait deadline). An autocommit statement is retried as usual. A duplicate on a unique index that is not the conflict target still fails with `DuplicateUniqueKeyValue`, which is not retried.
+- `CreateInsertCommand` has no upsert form: the server's typed insert route does not support it. Use SQL.
+- Before 0.16.7, `ExecuteReaderAsync` and `ExecuteScalarAsync` sent an `UPSERT` to the query endpoint. Without `RETURNING` the server refused it with `CADB0407`. `INSERT … ON CONFLICT` was not affected.
+
+See `docs/insert-on-conflict.md` in the server repository for the full rules: the conflict target, triggers, and the error when one statement changes the same row twice.
 
 #### C# extensions: procedures, triggers and functions
 
@@ -1571,8 +1600,30 @@ provider throws `InvalidOperationException` with the cause:
 
 `FULL JOIN` has no LINQ operator, and the server does not support it.
 
-> **Not translatable (server limitations):** set operators (`Union`/`Concat`) — CamusDB has no
-> `UNION`. These raise a translation or SQL error; issue separate queries instead.
+##### Set operations
+
+The LINQ set operators translate to the server's set operations (a server with `UNION`, `INTERSECT` and
+`EXCEPT` support is necessary):
+
+| LINQ | SQL |
+| --- | --- |
+| `Union(...)` | `UNION` |
+| `Concat(...)` | `UNION ALL` |
+| `Intersect(...)` | `INTERSECT` |
+| `Except(...)` | `EXCEPT` |
+
+```csharp
+// Customers in NYC, or with an order over 100, each once.
+var keys = await ctx.Customers.Where(c => c.City == "NYC").Select(c => c.Id)
+    .Union(ctx.Orders.Where(o => o.Total > 100).Select(o => o.CustomerId))
+    .ToListAsync();
+```
+
+An `OrderBy`, `Skip` or `Take` after the operator applies to the combined rows: EF Core puts the set
+operation in a derived table. An operand can have its own `OrderBy` and `Take`. EF Core writes the
+parentheses that keep the order of evaluation when operators are mixed. A set operation can also be the
+subquery of a `Contains`. Two rows are the same row when their values are equal position by position,
+and two NULLs are equal for this purpose.
 
 #### Query Result Cache
 
@@ -2079,7 +2130,6 @@ Run a procedure with `ExecuteSqlAsync`, for example `await ctx.Database.ExecuteS
 - No computed columns.
 - Foreign keys run `NO ACTION` and `RESTRICT` only; `Cascade`, `SetNull` and `SetDefault` apply to tracked dependents only (see [Relationships and Foreign Keys](#relationships-and-foreign-keys)). No foreign-key cycle of two or more tables.
 - No lateral join (`CROSS APPLY`/`OUTER APPLY`) and no window functions (`ROW_NUMBER()`): a `SelectMany` correlated outside an equality key, and `Take`/`Skip` on a per-row sequence (a filtered `Include`, a per-group `First`), throw `InvalidOperationException` (see [Joins](#joins)).
-- No `UNION`/`UNION ALL` — LINQ `Union`/`Concat` do not translate; issue separate queries.
 - `ALTER COLUMN` only supports toggling nullability (`SET`/`DROP NOT NULL`), the storage strategy (`SET STORAGE`) and the comment; changing a column's stored type requires dropping and recreating the column.
 - `CHECK` conditions must be deterministic single-row predicates — no subqueries, aggregates, or volatile functions (`now()`, `gen_uuid_v4/v7()`, …); a violated check surfaces as a `CamusException` with code `CADB0303` (wrapped in `DbUpdateException` under EF Core), and a NULL operand makes the predicate pass (SQL three-valued logic).
 - `array(T)` columns map for `long[]`, `string[]`, `double[]`, and `bool[]`. They are not indexable and have no SQL literal, so an array can only be written/read as a whole value — it cannot appear in a `Where` predicate or as a default/seed value.

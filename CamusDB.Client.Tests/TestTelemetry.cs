@@ -384,6 +384,8 @@ public sealed class TestTelemetry : IDisposable
     [InlineData("  \n\tselect 1", "SELECT")]
     [InlineData("((SELECT 1))", "SELECT")]
     [InlineData("insert into t values (1)", "INSERT")]
+    [InlineData("upsert into t values (1)", "UPSERT")]
+    [InlineData("(SELECT a FROM t LIMIT 1) UNION SELECT b FROM u", "SELECT")]
     [InlineData("TRUNCATE t", "TRUNCATE")]
     [InlineData("CALL transfer(@a, @b)", "CALL")]
     [InlineData("WITH x AS (SELECT 1) SELECT * FROM x", null)]

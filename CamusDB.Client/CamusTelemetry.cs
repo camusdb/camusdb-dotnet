@@ -78,7 +78,7 @@ internal sealed class CamusOperation
     /// that is not in this list gives no operation name, so the metric keeps a small set of values.</summary>
     private static readonly string[] KnownOperations =
     [
-        "SELECT", "INSERT", "UPDATE", "DELETE", "CREATE", "ALTER", "DROP", "TRUNCATE",
+        "SELECT", "INSERT", "UPSERT", "UPDATE", "DELETE", "CREATE", "ALTER", "DROP", "TRUNCATE",
         "EXPLAIN", "SHOW", "REFRESH", "COMMENT", "GRANT", "REVOKE", "SET", "CALL",
     ];
 
