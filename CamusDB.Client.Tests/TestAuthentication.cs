@@ -517,6 +517,101 @@ public class TestAuthentication
         Assert.Equal(0, login.Logins);
     }
 
+    // ─── Busy server ──────────────────────────────────────────────────────────
+
+    private static readonly TimeSpan[] NoWait = [TimeSpan.Zero, TimeSpan.Zero, TimeSpan.Zero];
+
+    [Fact]
+    public async Task ALoginRefusedAsBusyIsSentAgainAndTheCallerGetsTheToken()
+    {
+        FakeLoginClient login = new() { BusyLeft = 2 };
+        CamusTokenProvider provider = Provider(login, CamusCredentials.FromPassword("admin", "secret"));
+        provider.BusyLoginRetryDelays = NoWait;
+
+        Assert.Equal("token-1", await provider.GetTokenAsync(default));
+
+        Assert.Equal(3, login.Started);
+        Assert.Equal(1, login.Logins);
+    }
+
+    [Fact]
+    public async Task ALoginRefusedAsBusyOnEveryAttemptSurfacesTheRefusal()
+    {
+        FakeLoginClient login = new() { BusyLeft = int.MaxValue };
+        CamusTokenProvider provider = Provider(login, CamusCredentials.FromPassword("admin", "secret"));
+        provider.BusyLoginRetryDelays = NoWait;
+
+        CamusException refusal = await Assert.ThrowsAsync<CamusException>(() => provider.GetTokenAsync(default).AsTask());
+
+        Assert.Equal(CamusAuthErrorCodes.TooManyAuthAttempts, refusal.Code);
+        Assert.Equal(NoWait.Length + 1, login.Started);
+        Assert.Equal(0, login.Logins);
+    }
+
+    [Fact]
+    public async Task AWrongPasswordIsNotSentAgain()
+    {
+        FakeLoginClient login = new() { FailuresLeft = int.MaxValue, FailureCode = CamusAuthErrorCodes.AuthenticationFailed };
+        CamusTokenProvider provider = Provider(login, CamusCredentials.FromPassword("admin", "wrong"));
+        provider.BusyLoginRetryDelays = NoWait;
+
+        CamusException refusal = await Assert.ThrowsAsync<CamusException>(() => provider.GetTokenAsync(default).AsTask());
+
+        Assert.Equal(CamusAuthErrorCodes.AuthenticationFailed, refusal.Code);
+        Assert.Equal(1, login.Started);
+    }
+
+    [Fact]
+    public async Task ConcurrentCallersShareOneLoginThroughItsRetries()
+    {
+        FakeLoginClient login = new() { BusyLeft = 2, Gate = new TaskCompletionSource() };
+        CamusTokenProvider provider = Provider(login, CamusCredentials.FromPassword("admin", "secret"));
+        provider.BusyLoginRetryDelays = NoWait;
+
+        Task<string?>[] callers = Enumerable
+            .Range(0, 16)
+            .Select(_ => provider.GetTokenAsync(default).AsTask())
+            .ToArray();
+
+        login.Gate.SetResult();
+        string?[] tokens = await Task.WhenAll(callers);
+
+        Assert.All(tokens, token => Assert.Equal("token-1", token));
+        Assert.Equal(3, login.Started);
+        Assert.Equal(1, login.Logins);
+    }
+
+    [Fact]
+    public async Task TheWaitBeforeAnotherAttemptStopsWhenTheCallerCancels()
+    {
+        FakeLoginClient login = new() { BusyLeft = int.MaxValue };
+        CamusTokenProvider provider = Provider(login, CamusCredentials.FromPassword("admin", "secret"));
+        provider.BusyLoginRetryDelays = [TimeSpan.FromMinutes(1)];
+
+        using CancellationTokenSource cancellation = new(TimeSpan.FromMilliseconds(50));
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => provider.GetTokenAsync(cancellation.Token).AsTask());
+        Assert.Equal(1, login.Started);
+    }
+
+    [Fact]
+    public async Task ABackgroundRenewalRefusedAsBusyIsSentAgain()
+    {
+        FakeLoginClient login = new() { ExpiresIn = TimeSpan.FromMinutes(15) };
+        TestClock clock = new(DateTimeOffset.UnixEpoch);
+        CamusTokenProvider provider = Provider(login, CamusCredentials.FromPassword("admin", "secret"), clock: clock);
+        provider.BusyLoginRetryDelays = NoWait;
+
+        Assert.Equal("token-1", await provider.GetTokenAsync(default));
+
+        login.BusyLeft = 2;
+        clock.Advance(TimeSpan.FromMinutes(13));        // past 80% of 15 min, before 95%
+        Assert.Equal("token-1", await provider.GetTokenAsync(default));
+
+        await WaitUntil(() => provider.CurrentToken == "token-2");
+        Assert.Equal(4, login.Started);
+    }
+
     // ─── Fixtures ─────────────────────────────────────────────────────────────
 
     private static CamusTokenProvider Provider(
@@ -566,6 +661,12 @@ public class TestAuthentication
         /// <summary>How many of the next logins fail, as a server that is down would make them.</summary>
         public int FailuresLeft;
 
+        /// <summary>How many of the next logins the server refuses as busy (<c>CADB0518</c>).</summary>
+        public int BusyLeft;
+
+        /// <summary>The code of the next failures, when <see cref="FailureCode"/> is set; otherwise an HTTP failure.</summary>
+        public string? FailureCode { get; init; }
+
         /// <summary>Expiry the fake server reports, or null to model a server predating the field.</summary>
         public TimeSpan? ExpiresIn { get; init; }
 
@@ -576,8 +677,16 @@ public class TestAuthentication
             if (Gate is { } gate)
                 await gate.Task.ConfigureAwait(false);
 
+            if (Interlocked.Decrement(ref BusyLeft) >= 0)
+                throw new CamusException(CamusAuthErrorCodes.TooManyAuthAttempts, "Authentication is busy; retry shortly");
+
             if (Interlocked.Decrement(ref FailuresLeft) >= 0)
+            {
+                if (FailureCode is { } code)
+                    throw new CamusException(code, "login refused");
+
                 throw new HttpRequestException("login endpoint unavailable");
+            }
 
             LastCredentials = (user, password);
             return new CamusLoginResult("token-" + Interlocked.Increment(ref logins), ExpiresIn);

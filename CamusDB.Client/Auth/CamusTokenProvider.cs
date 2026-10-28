@@ -33,6 +33,10 @@ namespace CamusDB.Client.Auth;
 /// the cases a clock cannot predict: a password rotation, a <c>DROP USER</c>, a <c>/logout</c> elsewhere,
 /// or a server whose TTL is configured shorter than the fallback.</para>
 ///
+/// <para><b>Busy server.</b> A login the server refuses as busy (<c>CADB0518</c>) is sent again after a short,
+/// randomized wait, a few times, before the refusal reaches the caller. See
+/// <see cref="DefaultBusyLoginRetryDelays"/>.</para>
+///
 /// <para>A token supplied directly (<c>AccessToken=</c>) is used verbatim and never renewed — the driver
 /// has no password to mint a replacement with, so a <c>CADB0516</c> on that path is surfaced to the
 /// caller rather than retried.</para>
@@ -130,6 +134,26 @@ internal sealed class CamusTokenProvider
     /// The token is still valid, so the wait costs nothing. Without the wait, every statement after a failed
     /// renewal would start a new login, against a server that is down or rate-limits this account.</summary>
     internal static readonly TimeSpan BackgroundRenewalRetryDelay = TimeSpan.FromSeconds(5);
+
+    /// <summary>
+    /// The waits before each new attempt of a login the server refused as busy (<c>CADB0518</c>). The server
+    /// refuses a login rather than queue it when every key-derivation slot is in use, and a refused login runs
+    /// no statement, so sending it again is always safe. Only the driver can do that: the login runs inside
+    /// the statement that needed the token, and that statement may belong to an explicit transaction that
+    /// cannot be replayed alone. The list is short because the same code also reports the per-account login
+    /// rate limit, which a few seconds do not clear. Each wait is randomized between half and one and a half
+    /// times its value, so many clients refused together do not return together.
+    /// </summary>
+    internal static readonly IReadOnlyList<TimeSpan> DefaultBusyLoginRetryDelays =
+    [
+        TimeSpan.FromMilliseconds(250),
+        TimeSpan.FromMilliseconds(750),
+        TimeSpan.FromMilliseconds(1500)
+    ];
+
+    /// <summary>The waits this provider uses; see <see cref="DefaultBusyLoginRetryDelays"/>. Tests set them
+    /// to zero.</summary>
+    internal IReadOnlyList<TimeSpan> BusyLoginRetryDelays { get; set; } = DefaultBusyLoginRetryDelays;
 
     // 1 while a background renewal is queued or running, so at most one is in flight per provider.
     private int renewing;
@@ -352,12 +376,27 @@ internal sealed class CamusTokenProvider
     // Caller holds the gate.
     private async Task<string> LoginLockedAsync(string user, string password, CancellationToken cancellationToken)
     {
-        // Both deadlines count from before the request, so the time the login takes is charged to the token.
-        DateTimeOffset requestedAt = clock.GetUtcNow();
+        IReadOnlyList<TimeSpan> retryDelays = BusyLoginRetryDelays;
+        DateTimeOffset requestedAt;
+        CamusLoginResult minted;
 
-        CamusLoginResult minted = await resolveLoginClient()
-            .LoginAsync(resolveEndpoint(), user, password, resolveTimeoutSeconds(), cancellationToken)
-            .ConfigureAwait(false);
+        for (int attempt = 0; ; attempt++)
+        {
+            // Both deadlines count from before the request, so the time the login takes is charged to the token.
+            requestedAt = clock.GetUtcNow();
+
+            try
+            {
+                minted = await resolveLoginClient()
+                    .LoginAsync(resolveEndpoint(), user, password, resolveTimeoutSeconds(), cancellationToken)
+                    .ConfigureAwait(false);
+                break;
+            }
+            catch (CamusException ex) when (ex.Code == CamusAuthErrorCodes.TooManyAuthAttempts && attempt < retryDelays.Count)
+            {
+                await Task.Delay(Jitter(retryDelays[attempt]), cancellationToken).ConfigureAwait(false);
+            }
+        }
 
         (TimeSpan renewAfter, TimeSpan expiresAfter) = Deadlines(minted.ExpiresIn);
 
@@ -366,6 +405,9 @@ internal sealed class CamusTokenProvider
 
         return minted.Token;
     }
+
+    private static TimeSpan Jitter(TimeSpan delay) =>
+        delay <= TimeSpan.Zero ? TimeSpan.Zero : delay * (0.5 + Random.Shared.NextDouble());
 
     /// <summary>
     /// When to start the next login, and when to stop sending the token. The server's reported lifetime is
