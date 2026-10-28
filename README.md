@@ -1499,6 +1499,22 @@ the server (rather than forcing client-side evaluation):
 The `starts_with` / `ends_with` / `contains` predicates take the search term as a plain argument, so
 they work with a column or parameter (not just a literal) and need no `LIKE` wildcard escaping.
 
+##### String concatenation
+
+`a + b` and `string.Concat(...)` on strings translate to the `||` operator, as in the PostgreSQL and
+SQLite providers. A number or a date in the expression is cast to `string` first. The result is the same
+as in C#: `"a" + null` is `"a"`, because EF Core wraps each nullable operand in `COALESCE(x, '')` (the
+server's `||` alone gives `NULL` for a `NULL` operand).
+
+```csharp
+// First is required, Last is nullable.
+var names = await ctx.People.Select(p => p.First + " " + p.Last).ToListAsync();
+// SELECT (`p`.`first` || ' ') || COALESCE(`p`.`last`, '') FROM `people` AS `p`
+```
+
+Before 0.16.8 the provider wrote `+`, and the server refused it with `CADB0400`. The `||` operator needs a
+server from 2026-10-12 or later.
+
 ##### String ordering (`string.Compare` / `CompareTo`)
 
 The comparison idiom that keyset (cursor) pagination is written with translates to a plain relational

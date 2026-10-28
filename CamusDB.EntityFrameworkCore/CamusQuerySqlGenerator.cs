@@ -63,6 +63,14 @@ public class CamusQuerySqlGenerator : QuerySqlGenerator
             "EF Core writes it for Take/Skip/First on a per-row sequence (a filtered Include, a SelectMany, a per-group First). " +
             "Load that sequence in a separate query and apply Take/Skip on the client.");
 
+    // CamusDB joins strings with ||, as PostgreSQL and SQLite do, and refuses + for two strings. EF writes
+    // a string concatenation (a + b, string.Concat) as an Add whose type is string. The NULL rule of || (a
+    // NULL operand gives NULL) does not leak: EF already wraps each nullable operand in COALESCE(x, '').
+    protected override string GetOperator(SqlBinaryExpression binaryExpression)
+        => binaryExpression.OperatorType == ExpressionType.Add && binaryExpression.Type == typeof(string)
+            ? " || "
+            : base.GetOperator(binaryExpression);
+
     // A function mapped with HasDbFunction, for example a C# extension function that the server loads.
     // EF delimits the name of a non-built-in function and prefixes its schema, but the server reads a
     // function name only as a plain identifier and has no schemas, so the name is written bare.
