@@ -29,6 +29,7 @@ public class CamusModelValidator : RelationalModelValidator
         ValidateKeyTypes(model);
         ValidateColumnStorage(model);
         ValidateSequences(model);
+        ValidateVectors(model);
     }
 
     private static readonly HashSet<Type> SupportedConcurrencyTokenClrTypes = new()
@@ -124,6 +125,44 @@ public class CamusModelValidator : RelationalModelValidator
                         $"CamusDB supports a storage strategy only on string, bytes and array columns. " +
                         $"Property '{entityType.DisplayName()}.{property.Name}' has store type '{storeType}' " +
                         $"and storage strategy '{storage}'.");
+            }
+        }
+    }
+
+    /// <summary>
+    /// A vector property must store bytes. A vector that is not loaded with its entity must also be
+    /// required, and must not be part of a key or a concurrency token: when such an entity is saved, a
+    /// <see langword="null"/> vector means "not loaded" and is not written, which is safe only when
+    /// <see langword="null"/> has no other meaning.
+    /// </summary>
+    private static void ValidateVectors(IModel model)
+    {
+        foreach (var entityType in model.GetEntityTypes())
+        {
+            foreach (var property in entityType.GetDeclaredProperties())
+            {
+                if (property.GetVectorDimensions() is null)
+                    continue;
+
+                string name = $"'{entityType.DisplayName()}.{property.Name}'";
+
+                Type providerType = property.GetTypeMapping().Converter?.ProviderClrType ?? property.ClrType;
+                if (providerType != typeof(byte[]))
+                    throw new NotSupportedException(
+                        $"Vector property {name} is stored as '{providerType.Name}'. A vector must be stored as bytes.");
+
+                if (property.IsLoadedWithEntity())
+                    continue;
+
+                if (property.IsNullable)
+                    throw new NotSupportedException(
+                        $"Vector property {name} is not loaded with its entity, so it must be required. " +
+                        "Mark it IsRequired(), or pass loadWithEntity: true to IsVector.");
+
+                if (property.IsKey() || property.IsForeignKey() || property.IsConcurrencyToken)
+                    throw new NotSupportedException(
+                        $"Vector property {name} is not loaded with its entity, so it cannot be part of a key " +
+                        "or a concurrency token.");
             }
         }
     }

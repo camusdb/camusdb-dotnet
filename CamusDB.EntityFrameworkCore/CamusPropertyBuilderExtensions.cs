@@ -69,6 +69,108 @@ public static class CamusPropertyBuilderExtensions
         property.SetOrRemoveAnnotation(CamusAnnotationNames.ColumnStorage, storage);
     }
 
+    /// <summary>
+    /// Declares the property as a float32 vector of <paramref name="dimensions"/> elements. The property
+    /// must be a <c>byte[]</c> in the <see cref="CamusVector"/> layout, or a <c>float[]</c>, which this
+    /// call stores through <see cref="CamusVectorValueConverter"/>.
+    /// </summary>
+    /// <param name="propertyBuilder">The property.</param>
+    /// <param name="dimensions">The element count. The column holds <c>dimensions × 4</c> bytes.</param>
+    /// <param name="loadWithEntity">
+    /// When <see langword="false"/>, a query that returns the entity does not read the vector: the
+    /// <c>SELECT</c> has <c>NULL</c> in its place, and the property is <see langword="null"/>. A query
+    /// that names the property still reads it: in a <c>Select</c>, in a <c>Where</c> or in an
+    /// <c>OrderBy</c>. The property must then be required. See the remarks.
+    /// </param>
+    /// <remarks>
+    /// <para>This call configures four things:</para>
+    /// <list type="number">
+    /// <item>The column type <c>BYTES(dimensions × 4)</c>, through <c>HasMaxLength</c>.</item>
+    /// <item>The storage strategy <see cref="CamusColumnStorage.Plain"/>, so a KNN query that reads every
+    /// row does not fetch each embedding from outside its row. A later <see cref="HasStorage(PropertyBuilder, CamusColumnStorage?)"/>
+    /// replaces it.</item>
+    /// <item>A <c>CHECK (vector_dims(column) = dimensions)</c> named <c>CK_{table}_{column}_dims</c>.
+    /// <c>BYTES(n)</c> is a maximum only, so the CHECK is what refuses a short vector. A <c>NULL</c>
+    /// vector passes the CHECK; make the property required to refuse it.</item>
+    /// <item>For a <c>float[]</c> property, the value converter and a comparer that compares elements,
+    /// so a change made in place is saved.</item>
+    /// </list>
+    ///
+    /// <para>A 1 536-dimension embedding is about 6 KB. A list page of 200 entities that does not use the
+    /// vector still reads about 1.2 MB of it. <paramref name="loadWithEntity"/> <see langword="false"/>
+    /// removes that read. To read the vector, project it:
+    /// <c>Select(c => new { c.Id, c.Embedding })</c>.</para>
+    ///
+    /// <para>A vector that is not loaded is <see langword="null"/> on the entity. When such an entity is
+    /// saved, the provider does not write a <see langword="null"/> vector, so <c>SaveChanges</c> keeps the
+    /// stored one. This also applies to <c>DbContext.Update</c> of a detached entity. The rule is safe
+    /// only because the property is required: <see langword="null"/> can then only mean "not loaded".
+    /// The model validator refuses <paramref name="loadWithEntity"/> <see langword="false"/> on an
+    /// optional property.</para>
+    /// </remarks>
+    public static PropertyBuilder IsVector(this PropertyBuilder propertyBuilder, int dimensions, bool loadWithEntity = true)
+    {
+        ArgumentNullException.ThrowIfNull(propertyBuilder);
+
+        propertyBuilder.Metadata.SetVector(dimensions, loadWithEntity);
+        return propertyBuilder;
+    }
+
+    /// <inheritdoc cref="IsVector(PropertyBuilder, int, bool)" />
+    public static PropertyBuilder<TProperty> IsVector<TProperty>(
+        this PropertyBuilder<TProperty> propertyBuilder,
+        int dimensions,
+        bool loadWithEntity = true)
+    {
+        ArgumentNullException.ThrowIfNull(propertyBuilder);
+
+        propertyBuilder.Metadata.SetVector(dimensions, loadWithEntity);
+        return propertyBuilder;
+    }
+
+    /// <summary>
+    /// Returns the element count set by <see cref="IsVector(PropertyBuilder, int, bool)"/>, or
+    /// <see langword="null"/> when the property is not a vector.
+    /// </summary>
+    public static int? GetVectorDimensions(this IReadOnlyProperty property)
+        => (int?)property[CamusAnnotationNames.VectorDimensions];
+
+    /// <summary>
+    /// Returns <see langword="false"/> when a query that returns the entity does not read this property.
+    /// See the <c>loadWithEntity</c> parameter of <see cref="IsVector(PropertyBuilder, int, bool)"/>.
+    /// </summary>
+    public static bool IsLoadedWithEntity(this IReadOnlyProperty property)
+        => property[CamusAnnotationNames.VectorLoadWithEntity] is not false;
+
+    /// <summary>The largest element count whose byte count still fits in an <c>int</c>.</summary>
+    internal const int MaxVectorDimensions = int.MaxValue / sizeof(float);
+
+    private static void SetVector(this IMutableProperty property, int dimensions, bool loadWithEntity)
+    {
+        ArgumentOutOfRangeException.ThrowIfLessThan(dimensions, 1);
+        ArgumentOutOfRangeException.ThrowIfGreaterThan(dimensions, MaxVectorDimensions);
+
+        if (property.ClrType == typeof(float[]))
+        {
+            // EF Core maps a float[] as a primitive collection (ARRAY(FLOAT32)) by convention. A vector is
+            // one scalar value, so the element type goes before the converter is set.
+            property.SetElementType(null);
+            property.SetValueConverter(CamusVectorValueConverter.Instance);
+            property.SetValueComparer(CamusVectorValueComparer.Instance);
+        }
+        else if (property.ClrType != typeof(byte[]))
+        {
+            throw new InvalidOperationException(
+                $"Property '{property.DeclaringType.DisplayName()}.{property.Name}' has type " +
+                $"'{property.ClrType.Name}'. A vector property must be byte[] or float[].");
+        }
+
+        property.SetMaxLength(dimensions * sizeof(float));
+        property.SetStorage(CamusColumnStorage.Plain);
+        property.SetAnnotation(CamusAnnotationNames.VectorDimensions, dimensions);
+        property.SetOrRemoveAnnotation(CamusAnnotationNames.VectorLoadWithEntity, loadWithEntity ? null : false);
+    }
+
     /// <summary>The block size <see cref="UseHiLo(PropertyBuilder, string, int?)"/> gives a sequence it creates.</summary>
     public const int DefaultHiLoBlockSize = 10;
 

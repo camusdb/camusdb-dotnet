@@ -23,6 +23,7 @@ public static class CamusDBServiceCollectionExtensions
         builder.TryAdd<IQuerySqlGeneratorFactory, CamusQuerySqlGeneratorFactory>();
         builder.TryAdd<IRelationalSqlTranslatingExpressionVisitorFactory, CamusSqlTranslatingExpressionVisitorFactory>();
         builder.TryAdd<IQueryableMethodTranslatingExpressionVisitorFactory, CamusQueryableMethodTranslatingExpressionVisitorFactory>();
+        builder.TryAdd<IQueryTranslationPostprocessorFactory, CamusQueryTranslationPostprocessorFactory>();
         builder.TryAdd<IRelationalTransactionFactory, CamusRelationalTransactionFactory>();
         builder.TryAdd<IDatabaseProvider, DatabaseProvider<CamusDBOptionsExtension>>();
         builder.TryAdd<LoggingDefinitions, CamusLoggingDefinitions>();
@@ -45,6 +46,7 @@ public static class CamusDBServiceCollectionExtensions
         serviceCollection.AddSingleton<IInterceptor, CamusDbCommandInterceptor>();
         serviceCollection.AddSingleton<IInterceptor, CamusCacheCommandInterceptor>();
         serviceCollection.AddSingleton<IInterceptor, CamusRowVersionInterceptor>();
+        serviceCollection.AddSingleton<IInterceptor, CamusVectorSaveChangesInterceptor>();
 
         return serviceCollection;
     }

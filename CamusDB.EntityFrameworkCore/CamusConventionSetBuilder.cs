@@ -14,6 +14,7 @@ public class CamusConventionSetBuilder : RelationalConventionSetBuilder
     {
         var conventionSet = base.CreateConventionSet();
         conventionSet.Add(new CamusRowVersionConvention());
+        conventionSet.Add(new CamusVectorConvention());
         return conventionSet;
     }
 }

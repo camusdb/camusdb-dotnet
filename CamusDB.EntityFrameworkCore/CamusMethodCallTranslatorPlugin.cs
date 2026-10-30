@@ -7,18 +7,19 @@
  */
 
 using Microsoft.EntityFrameworkCore.Query;
+using Microsoft.EntityFrameworkCore.Storage;
 
 namespace CamusDB.EntityFrameworkCore;
 
 public sealed class CamusMethodCallTranslatorPlugin : IMethodCallTranslatorPlugin
 {
-    public CamusMethodCallTranslatorPlugin(ISqlExpressionFactory sqlExpressionFactory)
+    public CamusMethodCallTranslatorPlugin(ISqlExpressionFactory sqlExpressionFactory, IRelationalTypeMappingSource typeMappingSource)
     {
         Translators =
         [
             new CamusStringMethodTranslator(sqlExpressionFactory),
             new CamusRegexMethodTranslator(sqlExpressionFactory),
-            new CamusVectorMethodTranslator(sqlExpressionFactory),
+            new CamusVectorMethodTranslator(sqlExpressionFactory, typeMappingSource),
         ];
     }
 

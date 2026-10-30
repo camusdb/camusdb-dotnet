@@ -31,4 +31,17 @@ public static class CamusAnnotationNames
     /// <see cref="CamusPropertyBuilderExtensions.UseHiLo(Microsoft.EntityFrameworkCore.Metadata.Builders.PropertyBuilder, string, int?)"/>.
     /// </summary>
     public const string HiLoSequenceName = Prefix + "HiLoSequenceName";
+
+    /// <summary>
+    /// The element count of a vector property. Set by
+    /// <see cref="CamusPropertyBuilderExtensions.IsVector(Microsoft.EntityFrameworkCore.Metadata.Builders.PropertyBuilder, int, bool)"/>,
+    /// and emitted as a <c>CHECK (vector_dims(column) = n)</c> on the table.
+    /// </summary>
+    public const string VectorDimensions = Prefix + "VectorDimensions";
+
+    /// <summary>
+    /// <see langword="false"/> when a vector property stays out of the <c>SELECT</c> that materializes its
+    /// entity. Absent means <see langword="true"/>: the vector is loaded with the entity.
+    /// </summary>
+    public const string VectorLoadWithEntity = Prefix + "VectorLoadWithEntity";
 }

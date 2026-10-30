@@ -1590,6 +1590,115 @@ CHECK-constraint predicates, the same patterns work in `HasCheckConstraint` (e.g
 `t.HasCheckConstraint("ck_email", "email ~* '^[^@]+@[^@]+$'")`). The set-returning functions
 `regexp_matches` / `regexp_split_to_table` are not supported by the server.
 
+##### Vector search
+
+CamusDB stores an embedding in a `BYTES` column as packed little-endian float32 values (the
+[`CamusVector`](#data-types) layout) and ranks rows with exact distance functions. The embedding lives
+in the same row and the same transaction as the rest of the data, so a deleted row leaves the search
+results at commit, and a tenant filter is an ordinary `WHERE`.
+
+Declare the property with `IsVector(dimensions)`. The property can be a `float[]` or a `byte[]`:
+
+```csharp
+public class DocumentChunk
+{
+    public string Id { get; set; } = "";
+    public long TenantId { get; set; }
+    public string Content { get; set; } = "";
+    public float[] Embedding { get; set; } = [];
+}
+
+modelBuilder.Entity<DocumentChunk>(b =>
+{
+    b.ToTable("chunks");
+    b.HasKey(c => c.Id);
+    b.HasIndex(c => c.TenantId);
+    b.Property(c => c.Embedding).IsRequired().IsVector(1536, loadWithEntity: false);
+});
+```
+
+`IsVector` configures:
+
+| What | Why |
+| --- | --- |
+| `BYTES(dimensions × 4)` | The column type. `BYTES(n)` is a maximum, not a fixed width. |
+| `STORAGE PLAIN` | A KNN query reads every row; under the default `EXTENDED` strategy each embedding above 2 KB moves out of its row and costs one more fetch. A later `HasStorage` replaces it. |
+| `CHECK (vector_dims(col) = dimensions)`, named `CK_{table}_{column}_dims` | `BYTES(n)` alone accepts a short vector. A `NULL` vector passes the CHECK, so use `IsRequired()` to refuse it. |
+| For `float[]`: a value converter and an element-wise comparer | The entity holds floats; the column holds bytes. A change made in place (`chunk.Embedding[0] = 1f`) is saved. |
+
+```sql
+CREATE TABLE IF NOT EXISTS `chunks` (
+`Id` STRING NOT NULL,
+`TenantId` INT64 NOT NULL,
+`Content` STRING NOT NULL,
+`Embedding` BYTES(6144) NOT NULL STORAGE PLAIN,
+PRIMARY KEY (`Id`),
+CONSTRAINT `CK_chunks_Embedding_dims` CHECK (vector_dims(`Embedding`) = 1536)
+);
+```
+
+Rank with `EF.Functions.L2Distance`, `CosineDistance` or `InnerProduct`, and always add `Take(k)`: the
+server then runs a bounded top-k, not a full sort. A `float[]` query vector goes to the server as packed
+bytes through the converter of the column. For a `byte[]` property, pack the query vector with
+`CamusVector.ToBytes`.
+
+```csharp
+float[] question = await embeddingGenerator.GenerateVectorAsync(text);
+
+var hits = await ctx.Chunks
+    .Where(c => c.TenantId == tenantId)
+    .OrderBy(c => EF.Functions.CosineDistance(c.Embedding, question))
+    .Select(c => new { c.Id, c.Content, Distance = EF.Functions.CosineDistance(c.Embedding, question) })
+    .Take(8)
+    .ToListAsync();
+```
+
+```sql
+SELECT `c`.`Id`, `c`.`Content`, cosine_distance(`c`.`Embedding`, @question) AS `Distance`
+FROM `chunks` AS `c`
+WHERE `c`.`TenantId` = @tenantId
+ORDER BY cosine_distance(`c`.`Embedding`, @question)
+LIMIT @p
+```
+
+| Function | SQL | Nearest is | Order with |
+| --- | --- | --- | --- |
+| `EF.Functions.L2Distance(a, b)` | `l2_distance` | smallest | `OrderBy` |
+| `EF.Functions.CosineDistance(a, b)` | `cosine_distance` (0 to 2) | smallest | `OrderBy` |
+| `EF.Functions.InnerProduct(a, b)` | `inner_product` | **largest** | **`OrderByDescending`** |
+| `EF.Functions.VectorDims(v)` | `vector_dims` | — | — |
+
+`InnerProduct` ordered ascending returns the *least* similar rows, with no error.
+
+**Vectors that are not loaded with the entity.** A 1 536-dimension embedding is about 6 KB, so a list
+page of 200 entities reads about 1.2 MB of floats that no code uses. With
+`IsVector(n, loadWithEntity: false)`, a query that returns the entity has `NULL` in place of the vector,
+and the property is `null`:
+
+```csharp
+var page = await ctx.Chunks.OrderBy(c => c.Id).Take(200).ToListAsync();
+// SELECT `c`.`Id`, `c`.`Content`, NULL AS `Embedding`, `c`.`TenantId` FROM `chunks` AS `c` …
+```
+
+- A query that names the vector still reads it: a `Where`, an `OrderBy`, or a projection such as
+  `Select(c => new { c.Id, c.Embedding })`. Use a projection when code needs the vector, for example to
+  re-rank candidates in memory.
+- `SaveChanges` never writes a `null` vector over the stored one. This covers a tracked entity and
+  `ctx.Update(detachedEntity)`. A vector that the entity sets is written.
+- The property must be required. `null` then can only mean "not loaded", and the model validator
+  refuses `loadWithEntity: false` on an optional property.
+- A query that the rewrite does not recognize keeps the vector: a collection `Include`, a split query,
+  a nested collection or `Distinct()`. The result is then correct, but the vector is read.
+
+This is the same default that EF Core 11 gives a SQL Server `vector` property. Here it is opt-in, so a
+model that already reads `entity.Embedding` after a query does not change behavior.
+
+**Limits.** Search is exact: the server computes the distance for every row that the `WHERE` admits, so
+the cost grows linearly with rows × dimensions. A selective `WHERE` (a tenant, a document) is the main
+way to keep it small. CamusDB has no approximate (ANN) vector index yet, and no full-text ranking for
+hybrid keyword-plus-vector search. See `docs/vector-search.md` in the server repository for measured
+costs.
+
 ##### Joins
 
 The provider translates every LINQ join shape to the server's `INNER`, `LEFT`, `RIGHT` and `CROSS JOIN`
@@ -1841,6 +1950,8 @@ CREATE TABLE IF NOT EXISTS `docs` (
 PRIMARY KEY (`Id`)
 );
 ```
+
+For an embedding, `IsVector` sets `STORAGE PLAIN`, the size and a dimension CHECK in one call (see [Vector search](#vector-search)).
 
 A property without `HasStorage` gets no clause, so the DDL of an existing model does not change. A later change of strategy produces `ALTER COLUMN … SET STORAGE`. A strategy removed from the model produces `SET STORAGE EXTENDED`, because CamusDB has no reset form. The model validator refuses `HasStorage` on any other column type, as the server does with `CADB0414`.
 

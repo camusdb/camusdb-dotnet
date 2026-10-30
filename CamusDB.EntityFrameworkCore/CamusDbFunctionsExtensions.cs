@@ -104,6 +104,27 @@ public static class CamusDbFunctionsExtensions
     public static int VectorDims(this DbFunctions _, byte[] vector)
         => throw ClientEval(nameof(VectorDims));
 
+    // ── float[] vectors ──────────────────────────────────────────────────────────────────────────
+    //
+    // The same functions for a float[] property that IsVector stores as bytes. The query vector is a
+    // float[] too; it takes the converter of the column, so it goes to the server as packed bytes.
+
+    /// <inheritdoc cref="L2Distance(DbFunctions, byte[], byte[])" />
+    public static double L2Distance(this DbFunctions _, float[] a, float[] b)
+        => throw ClientEval(nameof(L2Distance));
+
+    /// <inheritdoc cref="CosineDistance(DbFunctions, byte[], byte[])" />
+    public static double CosineDistance(this DbFunctions _, float[] a, float[] b)
+        => throw ClientEval(nameof(CosineDistance));
+
+    /// <inheritdoc cref="InnerProduct(DbFunctions, byte[], byte[])" />
+    public static double InnerProduct(this DbFunctions _, float[] a, float[] b)
+        => throw ClientEval(nameof(InnerProduct));
+
+    /// <inheritdoc cref="VectorDims(DbFunctions, byte[])" />
+    public static int VectorDims(this DbFunctions _, float[] vector)
+        => throw ClientEval(nameof(VectorDims));
+
     /// <summary>
     /// <c>octet_length(v)</c> — the byte count of a <c>bytes</c> value.
     /// </summary>
