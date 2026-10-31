@@ -168,8 +168,10 @@ public class CamusMigrationsSqlGenerator : MigrationsSqlGenerator
 
         foreach (var index in indexes)
         {
+            // A GIN index has the inline form INVERTED INDEX name (col), the form SHOW CREATE TABLE gives.
             builder.AppendLine(",")
-                   .Append(index.IsUnique ? "UNIQUE KEY " : "KEY ").Append(helper.DelimitIdentifier(index.Name))
+                   .Append(IsGinIndex(index) ? "INVERTED INDEX " : index.IsUnique ? "UNIQUE KEY " : "KEY ")
+                   .Append(helper.DelimitIdentifier(index.Name))
                    .Append(" (").Append(DelimitList(index.Columns)).Append(")");
 
             if (index[CamusAnnotationNames.IndexComment] is string indexComment)
@@ -251,12 +253,14 @@ public class CamusMigrationsSqlGenerator : MigrationsSqlGenerator
     {
         var helper = Dependencies.SqlGenerationHelper;
 
+        bool gin = IsGinIndex(operation);
+
         // Both CREATE INDEX and CREATE UNIQUE INDEX are supported by CamusDB
         builder.Append(operation.IsUnique ? "CREATE UNIQUE INDEX IF NOT EXISTS " : "CREATE INDEX IF NOT EXISTS ")
                .Append(helper.DelimitIdentifier(operation.Name))
                .Append(" ON ")
                .Append(helper.DelimitIdentifier(operation.Table))
-               .Append(" (")
+               .Append(gin ? " USING GIN (" : " (")
                .Append(string.Join(", ", operation.Columns.Select(c => helper.DelimitIdentifier(c))))
                .Append(")");
 
@@ -273,6 +277,23 @@ public class CamusMigrationsSqlGenerator : MigrationsSqlGenerator
                 indexComment, $"index '{operation.Table}.{operation.Name}'");
             builder.EndCommand();
         }
+    }
+
+    /// <summary>
+    /// True when the index is a GIN index (<c>HasMethod("gin")</c>). A GIN index cannot be unique: it maps
+    /// the parts of a document to rows, and no part identifies one row. That model is refused here, with
+    /// the index named, before the server refuses the statement.
+    /// </summary>
+    private static bool IsGinIndex(CreateIndexOperation operation)
+    {
+        if (!CamusIndexBuilderExtensions.IsGinMethod(operation[CamusAnnotationNames.IndexMethod]))
+            return false;
+
+        if (operation.IsUnique)
+            throw new InvalidOperationException(
+                $"The index '{operation.Name}' on '{operation.Table}' is a GIN index and is unique. A GIN index cannot be unique.");
+
+        return true;
     }
 
     protected override void Generate(
@@ -698,6 +719,7 @@ public class CamusMigrationsSqlGenerator : MigrationsSqlGenerator
             "FLOAT64"              => "FLOAT64",
             "FLOAT32" or "REAL"    => "FLOAT32",
             "NUMERIC" or "DECIMAL" => "NUMERIC",
+            "JSONB" or "JSON"      => "JSONB",
             "BYTES" or "BLOB"      => BytesDdl(col),
             "DATE"                 => "DATE",
             "DATETIME" or "TIMESTAMP" => "DATETIME",
@@ -745,6 +767,8 @@ public class CamusMigrationsSqlGenerator : MigrationsSqlGenerator
         double d         => d.ToString(CultureInfo.InvariantCulture),
         decimal m        => NumericLiteral(m),
         byte[] bytes     => ToHexLiteral(bytes),
+        System.Text.Json.JsonDocument or System.Text.Json.JsonElement or System.Text.Json.Nodes.JsonNode
+                         => JsonbLiteral(value, "a column default value"),
         DateOnly d       => $"'{d.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture)}'",
         DateTime dt      => $"'{ToIso(dt)}'",
         DateTimeOffset o => $"'{o.UtcDateTime.ToString("yyyy-MM-ddTHH:mm:ss.fffffffZ", CultureInfo.InvariantCulture)}'",
@@ -766,6 +790,8 @@ public class CamusMigrationsSqlGenerator : MigrationsSqlGenerator
         double d       => d.ToString(CultureInfo.InvariantCulture),
         decimal m      => NumericLiteral(m),
         byte[] bytes   => ToHexLiteral(bytes),
+        System.Text.Json.JsonDocument or System.Text.Json.JsonElement or System.Text.Json.Nodes.JsonNode
+                       => JsonbLiteral(value, "a seed data value"),
         DateOnly d     => $"'{d.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture)}'",
         DateTime dt    => $"'{ToIso(dt)}'",
         DateTimeOffset o => $"'{o.UtcDateTime.ToString("yyyy-MM-ddTHH:mm:ss.fffffffZ", CultureInfo.InvariantCulture)}'",
@@ -776,6 +802,10 @@ public class CamusMigrationsSqlGenerator : MigrationsSqlGenerator
 
     // The typed literal keeps every digit: a bare decimal literal is a FLOAT64 in an expression.
     private static string NumericLiteral(decimal value) => $"NUMERIC '{CamusNumeric.ToText(value)}'";
+
+    // A document is the typed literal JSONB '…' of its compact JSON text.
+    private static string JsonbLiteral(object value, string target)
+        => "JSONB " + CamusSqlSyntax.Literal(CamusJsonb.FromParameter(target, value), target);
 
     // SQL bytes literals are 0x-prefixed hex (the JSON path uses base64 instead).
     private static string ToHexLiteral(byte[] bytes) => "0x" + Convert.ToHexString(bytes);

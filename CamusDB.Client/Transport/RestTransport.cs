@@ -134,7 +134,7 @@ internal sealed class RestTransport(CamusEndpointPool endpoints, CamusTokenProvi
             {
                 Stream body = await response.GetStreamAsync().ConfigureAwait(false);
 
-                using JsonDocument doc = await JsonDocument.ParseAsync(body, cancellationToken: cancellationToken).ConfigureAwait(false);
+                using JsonDocument doc = await JsonDocument.ParseAsync(body, CamusJsonb.DocumentOptions, cancellationToken).ConfigureAwait(false);
                 JsonElement root = doc.RootElement;
 
                 if (root.ValueKind != JsonValueKind.Object)

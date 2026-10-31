@@ -180,7 +180,8 @@ public sealed class CamusResultSet
     internal static bool TryDecodeRowInto(
         ReadOnlySpan<byte> line, ColumnType[] types, ColumnValue[] cells, ColumnType[]? elementTypes = null)
     {
-        Utf8JsonReader reader = new(line);
+        // A jsonb cell is native JSON, nested deeper than the reader's default limit allows.
+        Utf8JsonReader reader = new(line, CamusJsonb.ReaderOptions);
 
         // An empty line throws here, as JsonDocument.Parse does.
         reader.Read();
@@ -249,6 +250,9 @@ public sealed class CamusResultSet
 
             case ColumnType.Numeric:
                 return DecodeNumeric(ref reader);
+
+            case ColumnType.Jsonb:
+                return new ColumnValue { Type = ColumnType.Jsonb, StrValue = CamusJsonb.ToText(ref reader) };
 
             case ColumnType.Array:
                 return DecodeArray(ref reader, elementType);
@@ -492,6 +496,12 @@ public sealed class CamusResultSet
 
             case ColumnType.Numeric:
                 return DecodeNumeric(cell);
+
+            // A jsonb cell is the document itself as native JSON: an object, an array or a scalar. It is
+            // kept as its PostgreSQL text form, which is the form a gRPC cell carries. The token null is
+            // SQL NULL above, so a document that is JSON null reads as SQL NULL over REST.
+            case ColumnType.Jsonb:
+                return new ColumnValue { Type = ColumnType.Jsonb, StrValue = CamusJsonb.ToText(cell) };
 
             case ColumnType.Array:
                 return DecodeArray(cell, elementType);

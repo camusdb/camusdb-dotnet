@@ -182,6 +182,8 @@ public sealed class CamusParameter : DbParameter, ICloneable
         ColumnType.Array => DbType.Object,
         ColumnType.Uuid => DbType.Guid,
         ColumnType.Numeric => DbType.Decimal,
+        // A document travels as its JSON text.
+        ColumnType.Jsonb => DbType.String,
         ColumnType.Null => DbType.Object,
         ColumnType.String => DbType.String,
         _ => DbType.String

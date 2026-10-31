@@ -20,6 +20,7 @@ enum ColumnType {
   COLUMN_TYPE_ARRAY     = 10;
   COLUMN_TYPE_UUID      = 11;
   COLUMN_TYPE_NUMERIC   = 12;
+  COLUMN_TYPE_JSONB     = 13;
 }
 
 enum IsolationLevel {
@@ -90,6 +91,7 @@ message Value {
     ArrayValue array_value    = 11;  // nested Values + element type
     bytes      uuid_value     = 12;  // 16 bytes, big-endian high||low
     string     numeric_value  = 13;  // NUMERIC: canonical decimal text, scale <= 9, e.g. "-12.5"
+    string     json_value     = 14;  // JSONB: the PostgreSQL text form, e.g. {"a": [1, 2.50]}
   }
 }
 
@@ -218,8 +220,9 @@ enum BatchStatementKind {
   BATCH_STATEMENT_KIND_NON_QUERY   = 2;   // route to ExecuteNonQuery — single reply
   // Transaction lifecycle folded onto the same stream so a whole unit of work (begin, statements,
   // commit) rides one duplex call and many concurrent transactions keep the stream busy. START reuses
-  // SqlRequest.database + isolation/mode/locking (sql ignored) and its reply carries the server-minted
-  // handle; COMMIT/ROLLBACK reference SqlRequest.txn_handle.
+  // SqlRequest.database + isolation/mode/locking + causal token (sql ignored) and its reply carries the
+  // server-minted handle; COMMIT/ROLLBACK reference SqlRequest.txn_handle. The causal token is the
+  // floor of every Read Committed statement timestamp of the transaction (see StartTxnRequest).
   BATCH_STATEMENT_KIND_START       = 3;   // begin a transaction — reply carries the TxnHandle
   BATCH_STATEMENT_KIND_COMMIT      = 4;   // commit request.txn_handle — reply carries the causal token
   BATCH_STATEMENT_KIND_ROLLBACK    = 5;   // roll back request.txn_handle
@@ -349,10 +352,11 @@ message BatchExecuteResponse {
 message TxnHandle {
   int64  txn_id_pt      = 1;
   uint32 txn_id_counter = 2;
-  // Optional causal token from the previous operation in this session. The three
-  // components mirror HLCTimestamp (N, L, C) exactly — N is the node-id dimension and
-  // is load-bearing (it participates in HLCTimestamp equality and is the CompareTo
-  // tie-breaker), so it must travel with L/C or the token is a lossy copy.
+  // Reserved: the server does not read these fields, and StartTransaction does not set
+  // them. A transaction takes its causal floor once, from StartTxnRequest (or the batch
+  // START), so send the token there. The three components mirror HLCTimestamp (N, L, C)
+  // exactly — N is the node-id dimension and is load-bearing (it participates in
+  // HLCTimestamp equality and is the CompareTo tie-breaker), so it must travel with L/C.
   int32  causal_token_n = 5;
   int64  causal_token_l = 3;
   int64  causal_token_c = 4;
@@ -470,6 +474,13 @@ message StartTxnRequest {
   TransactionMode     transaction_mode = 3;
   LockingMode         locking          = 4;
   TransactionPriority priority         = 5;
+
+  // Optional causal token of the client's last commit. Every Read Committed SELECT of the
+  // transaction reads at a statement timestamp at least this value, so it sees that commit even
+  // on a node whose clock is behind. (N, L, C) mirror HLCTimestamp — see TxnHandle.
+  int64 causal_token_l = 6;
+  int64 causal_token_c = 7;
+  int32 causal_token_n = 8;
 }
 
 message CommitReply {

@@ -32,4 +32,11 @@ public enum ColumnType
     /// double. See <see cref="CamusNumeric"/> for the conversions to and from <see cref="decimal"/>.
     /// </summary>
     Numeric = 12,
+
+    /// <summary>
+    /// A JSON document (SQL <c>JSONB</c>, alias <c>JSON</c>). It travels as its JSON text in
+    /// <see cref="ColumnValue.StrValue"/>. The reader gives the PostgreSQL text form on every transport.
+    /// See <see cref="CamusJsonb"/> for the conversions to and from the <c>System.Text.Json</c> types.
+    /// </summary>
+    Jsonb = 13,
 }

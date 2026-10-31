@@ -21,6 +21,8 @@ namespace CamusDB.Client;
 ///   <item><see cref="ColumnType.String"/> / <see cref="ColumnType.Id"/> — <see cref="StrValue"/>.</item>
 ///   <item><see cref="ColumnType.Numeric"/> — <see cref="StrValue"/> as decimal text. The server sends the
 ///     canonical form (no exponent, no trailing zeros, at most 9 fraction digits).</item>
+///   <item><see cref="ColumnType.Jsonb"/> — <see cref="StrValue"/> as JSON text. A result cell holds the
+///     PostgreSQL text form (see <see cref="CamusJsonb"/>).</item>
 ///   <item><see cref="ColumnType.Date"/> / <see cref="ColumnType.DateTime"/> — <see cref="LongValue"/> as UTC <see cref="System.DateTime.Ticks"/> (Date truncated to midnight).</item>
 ///   <item><see cref="ColumnType.Bytes"/> — <see cref="BytesValue"/> (JSON base64).</item>
 ///   <item><see cref="ColumnType.Array"/> — <see cref="ArrayValues"/> + <see cref="ArrayElementType"/>.</item>

@@ -15,9 +15,9 @@ namespace CamusDB.Client.Transport;
 /// <summary>
 /// The single mapping point between the client's <see cref="ColumnValue"/> and the gRPC
 /// <see cref="Grpc.Value"/> message — the gRPC-side analogue of the JSON codec in
-/// <see cref="CamusResultSet"/>/<see cref="CamusCommand"/>. Covers all thirteen
+/// <see cref="CamusResultSet"/>/<see cref="CamusCommand"/>. Covers all fourteen
 /// <see cref="ColumnType"/> cases per the protocol's compact-raw rules (Id in its own field, Date/DateTime
-/// as raw UTC ticks, UUID as 16 big-endian bytes, NUMERIC as decimal text, Array carrying its element type).
+/// as raw UTC ticks, UUID as 16 big-endian bytes, NUMERIC as decimal text, JSONB as JSON text, Array carrying its element type).
 ///
 /// <para>Unlike the positional REST rows — whose cells are decoded against a possibly mis-inferred
 /// declared type — a gRPC <see cref="Grpc.Value"/> is self-describing, so <see cref="Decode"/> reads the
@@ -65,6 +65,9 @@ internal static class GrpcValueCodec
 
             case ColumnType.Numeric:
                 return new Grpc.Value { NumericValue = column.StrValue ?? "" };
+
+            case ColumnType.Jsonb:
+                return new Grpc.Value { JsonValue = column.StrValue ?? "" };
 
             case ColumnType.Array:
                 return EncodeArray(column);
@@ -116,6 +119,10 @@ internal static class GrpcValueCodec
 
             case Grpc.Value.KindOneofCase.NumericValue:
                 return new ColumnValue { Type = ColumnType.Numeric, StrValue = value.NumericValue };
+
+            // The server sends the PostgreSQL text form, the form the REST decoder also gives.
+            case Grpc.Value.KindOneofCase.JsonValue:
+                return new ColumnValue { Type = ColumnType.Jsonb, StrValue = value.JsonValue };
 
             case Grpc.Value.KindOneofCase.ArrayValue:
                 return DecodeArray(value.ArrayValue);

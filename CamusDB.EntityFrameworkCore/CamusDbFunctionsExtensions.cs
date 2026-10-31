@@ -138,6 +138,54 @@ public static class CamusDbFunctionsExtensions
     public static int OctetLength(this DbFunctions _, string value)
         => throw ClientEval(nameof(OctetLength));
 
+    // ── JSON documents ────────────────────────────────────────────────────────────────────────────
+    //
+    // Each method takes the document as an object: a jsonb column of any CLR type (JsonDocument,
+    // JsonElement, JsonNode or a string mapped "jsonb"), a JSON text string, or a JsonDocument, JsonElement
+    // or JsonNode value. A value or a constant beside a jsonb column binds as jsonb, so the server parses it
+    // as a document. The methods translate to the function forms of the operators, so the SQL has no '?'.
+    //
+    // A GIN index on the column (HasMethod("gin")) serves JsonContains, JsonContained with the column on
+    // the right, JsonExists, JsonExistAny and JsonExistAll at the top level of a Where, when the other
+    // argument has no column. The server checks every candidate row against the full predicate.
+
+    /// <summary>
+    /// <c>jsonb_contains(json, contained)</c>, the <c>@&gt;</c> operator: true when every part of
+    /// <paramref name="contained"/> is in <paramref name="json"/>. An array contains another array when it
+    /// contains each of its elements, in any order.
+    /// </summary>
+    public static bool JsonContains(this DbFunctions _, object json, object contained)
+        => throw ClientEval(nameof(JsonContains));
+
+    /// <summary>
+    /// <c>jsonb_contained(contained, json)</c>, the <c>&lt;@</c> operator: true when every part of
+    /// <paramref name="contained"/> is in <paramref name="json"/>.
+    /// </summary>
+    public static bool JsonContained(this DbFunctions _, object contained, object json)
+        => throw ClientEval(nameof(JsonContained));
+
+    /// <summary>
+    /// <c>jsonb_exists(json, key)</c>, the <c>?</c> operator: true when <paramref name="key"/> is a key at
+    /// the top level of an object, a string element at the top level of an array, or the top-level string.
+    /// </summary>
+    public static bool JsonExists(this DbFunctions _, object json, string key)
+        => throw ClientEval(nameof(JsonExists));
+
+    /// <summary><c>jsonb_exists_any(json, keys)</c>, the <c>?|</c> operator: true when any of the keys exists.</summary>
+    public static bool JsonExistAny(this DbFunctions _, object json, params string[] keys)
+        => throw ClientEval(nameof(JsonExistAny));
+
+    /// <summary><c>jsonb_exists_all(json, keys)</c>, the <c>?&amp;</c> operator: true when every key exists.</summary>
+    public static bool JsonExistAll(this DbFunctions _, object json, params string[] keys)
+        => throw ClientEval(nameof(JsonExistAll));
+
+    /// <summary>
+    /// <c>jsonb_typeof(json)</c>: <c>object</c>, <c>array</c>, <c>string</c>, <c>number</c>, <c>boolean</c>
+    /// or <c>null</c>.
+    /// </summary>
+    public static string JsonTypeof(this DbFunctions _, object json)
+        => throw ClientEval(nameof(JsonTypeof));
+
     private static InvalidOperationException ClientEval(string name) => new(
         $"EF.Functions.{name} is a CamusDB SQL translation and cannot be evaluated in memory; " +
         "it can only be used inside a LINQ query that is translated to SQL.");

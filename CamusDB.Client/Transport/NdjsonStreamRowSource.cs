@@ -197,7 +197,7 @@ internal sealed class NdjsonStreamRowSource : CamusRowSource
 
         // Not an array => trailer, read once per stream as a document. This is the terminal line; a failed
         // status is an in-band error.
-        using JsonDocument doc = JsonDocument.Parse(line.Value);
+        using JsonDocument doc = JsonDocument.Parse(line.Value, CamusJsonb.DocumentOptions);
         JsonElement root = doc.RootElement;
 
         finished = true;

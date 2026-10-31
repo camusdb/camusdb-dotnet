@@ -383,6 +383,7 @@ public class CamusDatabaseCreator : RelationalDatabaseCreator
             "FLOAT64"                 => "FLOAT64",
             "FLOAT32" or "REAL"       => "FLOAT32",
             "NUMERIC" or "DECIMAL"    => "NUMERIC",
+            "JSONB" or "JSON"         => "JSONB",
             "BYTES" or "BLOB"         => BytesDdl(property),
             "DATE"                    => "DATE",
             "DATETIME" or "TIMESTAMP" => "DATETIME",

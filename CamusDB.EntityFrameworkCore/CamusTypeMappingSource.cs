@@ -1,5 +1,7 @@
 using System.Data;
 using System.Data.Common;
+using System.Text.Json;
+using System.Text.Json.Nodes;
 using CamusDB.Client;
 using Microsoft.EntityFrameworkCore.ChangeTracking;
 using Microsoft.EntityFrameworkCore.Storage;
@@ -94,6 +96,19 @@ public sealed class CamusTypeMappingSource : RelationalTypeMappingSource
     // Native CamusDB UUID column: the default for a Guid property, and HasColumnType("uuid").
     private static readonly CamusUuidTypeMapping UuidMapping = new();
 
+    // Native CamusDB JSONB columns: the System.Text.Json document types by default, and a string property
+    // declared HasColumnType("jsonb") or HasColumnType("json").
+    private static readonly CamusJsonbTypeMapping JsonbStringMapping = CamusJsonbTypeMapping.Create(typeof(string));
+
+    private static readonly Dictionary<Type, RelationalTypeMapping> JsonbClrMappings = new()
+    {
+        { typeof(JsonDocument), CamusJsonbTypeMapping.Create(typeof(JsonDocument)) },
+        { typeof(JsonElement), CamusJsonbTypeMapping.Create(typeof(JsonElement)) },
+        { typeof(JsonNode), CamusJsonbTypeMapping.Create(typeof(JsonNode)) },
+        { typeof(JsonObject), CamusJsonbTypeMapping.Create(typeof(JsonObject)) },
+        { typeof(JsonArray), CamusJsonbTypeMapping.Create(typeof(JsonArray)) },
+    };
+
     // Native CamusDB ARRAY(T) columns. Each maps a CLR array type to a scalar element wire type.
     private static ValueComparer<T[]> ArrayComparer<T>() => new(
         (a, b) => (a == null && b == null) || (a != null && b != null && a.SequenceEqual(b)),
@@ -182,6 +197,20 @@ public sealed class CamusTypeMappingSource : RelationalTypeMappingSource
 
         if (storeTypeName is null && clrType is not null && ArrayClrMappings.TryGetValue(clrType, out var arrayByClr))
             return arrayByClr;
+
+        // "jsonb"/"json" store type: a document property keeps its own mapping, and any other property (a
+        // string, or no CLR type at all, as for a scaffolded column) holds the document text.
+        if (storeTypeName is not null &&
+            (storeTypeName.Equals("jsonb", StringComparison.OrdinalIgnoreCase) ||
+             storeTypeName.Equals("json", StringComparison.OrdinalIgnoreCase)))
+        {
+            return clrType is not null && JsonbClrMappings.TryGetValue(clrType, out var jsonbByClr)
+                ? jsonbByClr
+                : JsonbStringMapping;
+        }
+
+        if (storeTypeName is null && clrType is not null && JsonbClrMappings.TryGetValue(clrType, out var jsonbMapping))
+            return jsonbMapping;
 
         // "id"/"oid" store type: pick string or Guid mapping based on the CLR property type.
         // Without this check, a string-typed primary key with HasColumnType("id") would receive

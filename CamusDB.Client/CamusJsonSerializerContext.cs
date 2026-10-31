@@ -2,7 +2,8 @@ using System.Text.Json.Serialization;
 
 namespace CamusDB.Client;
 
-[JsonSourceGenerationOptions]
+// A response can carry jsonb documents as native JSON, nested up to CamusJsonb.MaxNestingDepth levels.
+[JsonSourceGenerationOptions(MaxDepth = CamusJsonb.ResponseMaxDepth)]
 [JsonSerializable(typeof(ColumnValue))]
 [JsonSerializable(typeof(CamusColumnSchema))]
 [JsonSerializable(typeof(CamusErrorResponse))]

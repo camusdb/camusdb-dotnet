@@ -6,6 +6,8 @@
  */
 
 using System.Data;
+using System.Text.Json;
+using System.Text.Json.Nodes;
 using CamusDB.Client;
 using CamusDB.Core.Util.ObjectIds;
 using Dapper;
@@ -74,6 +76,23 @@ public sealed class CamusValue : SqlMapper.ICustomQueryParameter
     /// Use this form for a value that a <see cref="decimal"/> cannot hold. The server validates the text.
     /// </summary>
     public static CamusValue Numeric(string? value) => new(ColumnType.Numeric, value);
+
+    /// <summary>
+    /// A <c>JSONB</c> document from its JSON text, for example <c>"{\"kind\": \"login\"}"</c>. The server
+    /// parses the text and refuses text that is not JSON with <c>CADB0418</c>. A plain <see cref="string"/>
+    /// binds as a <c>STRING</c>, which a <c>jsonb</c> column also parses, but a <c>jsonb</c> value is also a
+    /// document where the SQL needs one, as in <c>jsonb_typeof(@doc)</c>.
+    /// </summary>
+    public static CamusValue Jsonb(string? json) => new(ColumnType.Jsonb, json);
+
+    /// <summary>A <c>JSONB</c> document.</summary>
+    public static CamusValue Jsonb(JsonDocument? document) => new(ColumnType.Jsonb, document);
+
+    /// <summary>A <c>JSONB</c> document.</summary>
+    public static CamusValue Jsonb(JsonElement document) => new(ColumnType.Jsonb, document);
+
+    /// <summary>A <c>JSONB</c> document. A <see langword="null"/> node binds as SQL <c>NULL</c>, not as JSON <c>null</c>.</summary>
+    public static CamusValue Jsonb(JsonNode? document) => new(ColumnType.Jsonb, document);
 
     /// <summary>
     /// A native <c>ARRAY(T)</c>. The element type comes from <typeparamref name="T"/>, so an empty

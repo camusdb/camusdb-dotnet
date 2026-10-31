@@ -7,6 +7,8 @@
 
 using System.Data;
 using System.Globalization;
+using System.Text.Json;
+using System.Text.Json.Nodes;
 using CamusDB.Client;
 using CamusDB.Core.Util.ObjectIds;
 using Dapper;
@@ -101,6 +103,44 @@ public sealed class CamusArrayTypeHandler<T> : SqlMapper.TypeHandler<T[]>
             return (T)(object)Guid.Parse(text);
 
         return (T)Convert.ChangeType(element, target, CultureInfo.InvariantCulture);
+    }
+}
+
+/// <summary>
+/// Binds a <see cref="JsonDocument"/>, <see cref="JsonElement"/> or <see cref="JsonNode"/> as a
+/// <c>JSONB</c> document and reads a <c>JSONB</c> column into one. Dapper looks a handler up by the exact
+/// type, so <see cref="CamusDapper.Register"/> registers one for each of <see cref="JsonDocument"/>,
+/// <see cref="JsonElement"/>, <see cref="JsonNode"/>, <see cref="JsonObject"/> and <see cref="JsonArray"/>.
+/// </summary>
+public sealed class CamusJsonbTypeHandler<T> : SqlMapper.TypeHandler<T>
+{
+    /// <inheritdoc />
+    public override void SetValue(IDbDataParameter parameter, T? value)
+    {
+        CamusTypeHandlers.SetColumnType(parameter, ColumnType.Jsonb);
+        parameter.Value = value is null ? DBNull.Value : value;
+    }
+
+    /// <inheritdoc />
+    public override T Parse(object value) => value switch
+    {
+        T typed => typed,
+        string text => ParseText(text),
+        _ => throw new DataException($"Cannot read a {typeof(T).Name} from {value.GetType().Name}.")
+    };
+
+    // The reader gives a jsonb cell as its JSON text. A document of the wrong kind (an array read as a
+    // JsonObject) and the JSON null read as anything but a JsonNode fail.
+    private static T ParseText(string text)
+    {
+        try
+        {
+            return (T)CamusJsonb.Parse(text, typeof(T))!;
+        }
+        catch (InvalidCastException ex)
+        {
+            throw new DataException(ex.Message, ex);
+        }
     }
 }
 

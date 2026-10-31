@@ -14,6 +14,13 @@ public static class CamusAnnotationNames
     public const string IndexComment = Prefix + "IndexComment";
 
     /// <summary>
+    /// The access method of an index: <c>gin</c> for a GIN (inverted) index over a <c>jsonb</c> column,
+    /// emitted as <c>USING GIN</c>, or <c>btree</c> (the default, the same as no annotation). Set by
+    /// <see cref="CamusIndexBuilderExtensions.HasMethod(Microsoft.EntityFrameworkCore.Metadata.Builders.IndexBuilder, string?)"/>.
+    /// </summary>
+    public const string IndexMethod = Prefix + "IndexMethod";
+
+    /// <summary>
     /// The <see cref="CamusDB.Client.CamusColumnStorage"/> of a <c>string</c>, <c>bytes</c> or array
     /// column, emitted as an inline <c>STORAGE</c> clause and changed with <c>ALTER COLUMN … SET STORAGE</c>.
     /// Absent means the server default, <c>EXTENDED</c>.

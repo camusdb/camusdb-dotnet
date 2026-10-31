@@ -47,6 +47,17 @@ public class CamusRelationalAnnotationProvider : RelationalAnnotationProvider
             if (modelIndex.FindAnnotation(CamusAnnotationNames.IndexComment) is { Value: string comment })
             {
                 yield return new Annotation(CamusAnnotationNames.IndexComment, comment);
+                break;
+            }
+        }
+
+        // The migrations differ compares the access method too, so a change of method drops the index and
+        // creates it again.
+        foreach (var modelIndex in index.MappedIndexes)
+        {
+            if (modelIndex.FindAnnotation(CamusAnnotationNames.IndexMethod) is { Value: string method })
+            {
+                yield return new Annotation(CamusAnnotationNames.IndexMethod, method);
                 yield break;
             }
         }

@@ -571,6 +571,7 @@ CamusDB columns are declared with these SQL types; each maps to a `ColumnType` o
 | `DATETIME` (alias `TIMESTAMP`) | `DateTime` | `DateTime`, `DateTimeOffset` | Instant; normalized to UTC and read back as `DateTimeKind.Utc`. |
 | `BYTES` (alias `BLOB`) | `Bytes` | `byte[]` | base64 over JSON, `0x`-hex in SQL literals. Default max 10 MB. |
 | `ARRAY(T)` | `Array` | any `IEnumerable` of `T` | Homogeneous scalar list; not indexable, no inline SQL literal. |
+| `JSONB` (alias `JSON`) | `Jsonb` | `JsonDocument`, `JsonElement`, `JsonNode`, `string` | One JSON document, with the PostgreSQL operators and a GIN index. See [JSONB](#jsonb). |
 
 ##### NUMERIC
 
@@ -600,6 +601,69 @@ string exact = reader.GetString(1);
 > Before this version a `decimal` parameter was sent as a `FLOAT64`. It now binds as `NUMERIC`, which
 > needs a server that supports the type. Into a `FLOAT64` column the server converts a NUMERIC value to a
 > double, and a comparison of NUMERIC with FLOAT64 compares as doubles.
+
+##### JSONB
+
+`JSONB` (alias `JSON`) holds one JSON document: an object, an array, a string, a number, a boolean or
+JSON `null`. The SQL follows PostgreSQL `jsonb`: the operators `->`, `->>`, `#>`, `#>>`, `@>`, `<@`, `?`,
+`?|`, `?&`, `||`, `-` and `#-`, the `jsonb_*` functions, and GIN indexes. A document travels as JSON text
+on REST and on gRPC.
+
+- A `JsonDocument`, `JsonElement` or `JsonNode` parameter binds as `JSONB` with no `ColumnType` set. Its
+  text goes to the server unchanged.
+- A `string` parameter typed `ColumnType.Jsonb` binds its text, and the server parses it. A plain `string`
+  binds as a `STRING`. A `jsonb` column also parses a `STRING` when it is written, and a text operand
+  compares with a document as a document.
+- Text that is not valid JSON fails with `CADB0418`. A document nested deeper than 512 levels fails with
+  `CADB0419`.
+- `GetString` and `GetValue` give the document text in the PostgreSQL form: a space after each `:` and
+  each `,`, keys in the stored order (shorter keys first), and no other white space. Numbers keep every
+  digit and their scale. `GetFieldType` is `string`.
+- `GetFieldValue<T>` parses the text into a `JsonDocument`, a `JsonElement`, a `JsonNode`, a `JsonObject` or
+  a `JsonArray`. A document of the wrong kind for `JsonObject` or `JsonArray` throws `InvalidCastException`.
+- The server has no `ARRAY(JSONB)`. An array of documents is a document, so bind one JSON array. A list of
+  `JsonDocument` values is refused with `CADB0400`.
+- JSON `null` and SQL `NULL` are different values. Over gRPC a JSON `null` document reads as the text
+  `null`. A REST row writes both as the token `null`, so over REST a top-level JSON `null` document reads
+  as SQL `NULL`.
+- `CamusJsonb.Format(json)` gives the PostgreSQL text form of any JSON text.
+
+```csharp
+await connection.CreateCamusCommand("""
+    CREATE TABLE events (id OID PRIMARY KEY NOT NULL, payload JSONB NOT NULL)
+    """).ExecuteDDLAsync();
+
+// A GIN index serves @>, <@, ?, ?|, ?& and the equality of one key in a WHERE.
+await connection.CreateCamusCommand(
+    "CREATE INDEX events_payload_gin ON events USING GIN (payload)").ExecuteDDLAsync();
+
+await using CamusCommand insert = connection.CreateInsertCommand("events");
+insert.Parameters.Add("id", ColumnType.Id, CamusObjectIdGenerator.Generate());
+insert.Parameters.Add("payload", ColumnType.Null, new JsonObject { ["kind"] = "login", ["user"] = new JsonObject { ["id"] = 7 } });
+await insert.ExecuteNonQueryAsync();
+
+await using CamusCommand select = connection.CreateCamusCommand(
+    "SELECT payload, payload -> 'user' ->> 'id' FROM events WHERE payload @> @filter");
+select.Parameters.Add("filter", ColumnType.Jsonb, """{"kind": "login"}""");
+
+await using CamusDataReader reader = await select.ExecuteReaderAsync();
+while (await reader.ReadAsync())
+{
+    JsonElement payload = reader.GetFieldValue<JsonElement>(0);   // {"kind": "login", "user": {"id": 7}}
+    string userId = reader.GetString(1);                           // "7"
+}
+```
+
+The GIN index gives a set of candidate rows, and the server checks each candidate against the full
+predicate. The index does not serve a conjunct under `OR` or `NOT`, a join, or `@>` with `{}`, `[]` or a
+scalar. `EXPLAIN` shows `gin-scan(...)` when the index is used.
+
+The `?` operators do not conflict with CamusDB parameters, because CamusDB parameters are `@name`. A tool
+that rewrites `?` as its own placeholder can use `jsonb_exists`, `jsonb_exists_any` and
+`jsonb_exists_all` instead.
+
+> A client before this version read every `jsonb` cell over gRPC as `NULL`, with no error. Upgrade the
+> client before you read `jsonb` columns over gRPC.
 
 ```csharp
 await using CamusCommand command = connection.CreateCamusCommand("""
@@ -1399,12 +1463,26 @@ b.ToTable("robots", t => t.HasCheckConstraint("ck_robots_price", "price >= 0"));
 | `DateOnly` | `date` | `DATE` |
 | `DateTime`, `DateTimeOffset` | `datetime` (alias `timestamp`) | `DATETIME` |
 | `long[]`, `string[]`, `double[]`, `bool[]` | `array(int64/string/float64/bool)` | `ARRAY(T)` |
+| `JsonDocument`, `JsonElement`, `JsonNode`, `JsonObject`, `JsonArray` | `jsonb` (alias `json`) | `JSONB` |
+| `string` + `HasColumnType("jsonb")` | `jsonb` (alias `json`) | `JSONB` |
 
 Use `HasColumnType("id")` (or the alias `"oid"`) on a `string` property for primary key columns backed by CamusDB ObjectIds. The provider sends the value as an OID on the wire.
 
 A `Guid` property maps to CamusDB's native `UUID` column — indexable and ordered by big-endian byte order. No `HasColumnType` is required. A `Guid` value always travels as a UUID, because a 16-byte GUID can never be a 12-byte ObjectId, so do not declare a `Guid` property with `HasColumnType("id")`: an `OID` column refuses its values.
 
 A `decimal` property maps to the `NUMERIC` column. `HasPrecision` does not change the column, because the precision and the scale are fixed (38 and 9). A `decimal` constant in a query becomes the typed literal `NUMERIC '9.99'`, so it compares exactly and an index on the column can serve it. A bare `9.99` is a `FLOAT64` on the server.
+
+A `JsonDocument`, `JsonElement`, `JsonNode`, `JsonObject` or `JsonArray` property maps to the `JSONB` column. A `string` property maps to it with `HasColumnType("jsonb")`, and then holds the document text. The parameter binds as `JSONB`, and a constant or a default value becomes the typed literal `JSONB '…'`. The provider reads the document back in the PostgreSQL text form (see [JSONB](#jsonb)), so a value reads back with canonical spacing and key order. A `JsonNode` property is compared by its content, so a change inside the tree is saved. A `JsonDocument` or a `JsonElement` cannot change: replace the whole value. EF Core's `ToJson()` mapping of owned and complex types to a JSON column is not supported.
+
+A GIN index over a `jsonb` column comes from `HasMethod("gin")`. Migrations emit `CREATE INDEX … USING GIN (col)`, or `INVERTED INDEX` inside a `CREATE TABLE`. A GIN index has one column and cannot be unique. `EnsureCreated` creates no index of the model, as for every index.
+
+```csharp
+modelBuilder.Entity<Event>(b =>
+{
+    b.Property(e => e.Payload);                      // JsonDocument → JSONB
+    b.HasIndex(e => e.Payload).HasMethod("gin");     // CREATE INDEX … USING GIN (Payload)
+});
+```
 
 Before 0.13.3 a plain `Guid` property defaulted to the `id`/OID store type. Inserts through that mapping never worked, so such a column holds only NULLs. A migration snapshot made before 0.13.3 records `id` for such a property, and the next migration then tries to change the column type to `uuid`, which CamusDB does not support. Drop the column and add it again in that migration, or keep the old type with `HasColumnType("id")` until then.
 
@@ -1589,6 +1667,28 @@ constant made of flags CamusDB can express (`IgnoreCase`, `Multiline`, `Singleli
 CHECK-constraint predicates, the same patterns work in `HasCheckConstraint` (e.g.
 `t.HasCheckConstraint("ck_email", "email ~* '^[^@]+@[^@]+$'")`). The set-returning functions
 `regexp_matches` / `regexp_split_to_table` are not supported by the server.
+
+##### JSON documents
+
+The `EF.Functions.Json*` helpers map onto the function forms of the `jsonb` operators. A GIN index on the column (`HasMethod("gin")`) serves them at the top level of a `Where`, when the other argument has no column. The document argument can be a `jsonb` column, a JSON text string, or a `JsonDocument`, `JsonElement` or `JsonNode` value. A value or a constant beside a `jsonb` column binds as `jsonb`.
+
+| LINQ | CamusDB |
+| --- | --- |
+| `EF.Functions.JsonContains(json, contained)` | `jsonb_contains` (the `@>` operator) |
+| `EF.Functions.JsonContained(contained, json)` | `jsonb_contained` (the `<@` operator) |
+| `EF.Functions.JsonExists(json, key)` | `jsonb_exists` (the `?` operator) |
+| `EF.Functions.JsonExistAny(json, keys)` | `jsonb_exists_any` (the `?\|` operator) |
+| `EF.Functions.JsonExistAll(json, keys)` | `jsonb_exists_all` (the `?&` operator) |
+| `EF.Functions.JsonTypeof(json)` | `jsonb_typeof` |
+
+```csharp
+var logins = await ctx.Events
+    .Where(e => EF.Functions.JsonContains(e.Payload, """{"kind": "login"}"""))   // jsonb_contains(payload, JSONB '…')
+    .Where(e => EF.Functions.JsonExists(e.Payload, "user"))
+    .ToListAsync();
+```
+
+The provider does not translate member access on a document (`e.Payload.RootElement.GetProperty("kind")`) or the `->` and `->>` operators. Use `FromSql` for those queries.
 
 ##### Vector search
 
@@ -2305,7 +2405,8 @@ using CamusDB.Client;
 using CamusDB.Dapper;
 using Dapper;
 
-// Once at startup: registers the handler for CamusObjectIdValue.
+// Once at startup: registers the handlers for CamusObjectIdValue and for the JsonDocument,
+// JsonElement, JsonNode, JsonObject and JsonArray document types (bound and read as JSONB).
 CamusDapper.Register();
 
 await using CamusConnection connection = new("Endpoint=http://localhost:5095;Database=test");
@@ -2334,6 +2435,7 @@ Dapper types a parameter by its CLR type. The driver maps that type as the [Data
 | `CamusValue.Id("65f1…")` | An `OID` from its hex string. Dapper sends a plain `string` as `STRING`. |
 | `CamusValue.Uuid(guid)` | A `UUID`, also when the value is `null`. |
 | `CamusValue.Numeric("123…")` | A `NUMERIC` from its decimal text, for a value that a `decimal` cannot hold. A plain `decimal` already binds as `NUMERIC`. |
+| `CamusValue.Jsonb("{…}")` | A `JSONB` document from its JSON text. Also takes a `JsonDocument`, `JsonElement` or `JsonNode`. |
 | `CamusValue.Array(values)` | One native `ARRAY(T)`. The element type comes from `T`, so an empty array works too. |
 | `CamusValue.Vector(floats)` | A float32 vector in a `BYTES` column, in the [`CamusVector`](#data-types) layout. |
 | `new CamusValue(ColumnType.X, value)` | Any column type. |

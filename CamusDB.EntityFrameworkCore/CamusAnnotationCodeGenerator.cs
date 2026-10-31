@@ -13,6 +13,10 @@ public class CamusAnnotationCodeGenerator : AnnotationCodeGenerator
         = typeof(CamusIndexBuilderExtensions).GetRuntimeMethod(
               nameof(CamusIndexBuilderExtensions.HasComment), [typeof(IndexBuilder), typeof(string)])!;
 
+    private static readonly MethodInfo IndexHasMethodMethod
+        = typeof(CamusIndexBuilderExtensions).GetRuntimeMethod(
+              nameof(CamusIndexBuilderExtensions.HasMethod), [typeof(IndexBuilder), typeof(string)])!;
+
     private static readonly MethodInfo PropertyHasStorageMethod
         = typeof(CamusPropertyBuilderExtensions).GetRuntimeMethod(
               nameof(CamusPropertyBuilderExtensions.HasStorage), [typeof(PropertyBuilder), typeof(CamusColumnStorage?)])!;
@@ -28,12 +32,17 @@ public class CamusAnnotationCodeGenerator : AnnotationCodeGenerator
     public CamusAnnotationCodeGenerator(AnnotationCodeGeneratorDependencies dependencies)
         : base(dependencies) { }
 
-    // Render the index comment as .HasComment("...") in scaffolded models rather than a raw
-    // .HasAnnotation("Camus:IndexComment", ...) call.
+    // Render the index comment as .HasComment("...") and the access method as .HasMethod("gin") in
+    // scaffolded models rather than a raw .HasAnnotation("Camus:...", ...) call.
     protected override MethodCallCodeFragment? GenerateFluentApi(IIndex index, IAnnotation annotation)
-        => annotation.Name == CamusAnnotationNames.IndexComment && annotation.Value is string comment
-            ? new MethodCallCodeFragment(IndexHasCommentMethod, comment)
-            : base.GenerateFluentApi(index, annotation);
+        => annotation switch
+        {
+            { Name: CamusAnnotationNames.IndexComment, Value: string comment }
+                => new MethodCallCodeFragment(IndexHasCommentMethod, comment),
+            { Name: CamusAnnotationNames.IndexMethod, Value: string method }
+                => new MethodCallCodeFragment(IndexHasMethodMethod, method),
+            _ => base.GenerateFluentApi(index, annotation),
+        };
 
     // Render the column storage strategy as .HasStorage(CamusColumnStorage.Plain) in the model snapshot
     // and in scaffolded models.

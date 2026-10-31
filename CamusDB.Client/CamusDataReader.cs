@@ -178,6 +178,7 @@ public class CamusDataReader : DbDataReader
         ColumnType.Array => typeof(object[]),
         ColumnType.Uuid => typeof(Guid),
         ColumnType.Numeric => typeof(decimal),
+        ColumnType.Jsonb => typeof(string),
         ColumnType.Null => typeof(DBNull),
         ColumnType.String => typeof(string),
         _ => typeof(object)
@@ -199,6 +200,8 @@ public class CamusDataReader : DbDataReader
         ColumnType.Array => ConvertArray(in value),
         ColumnType.Uuid => value.AsGuid(),
         ColumnType.Numeric => CamusNumeric.ToDecimal(value.StrValue),
+        // The document's JSON text. GetFieldValue parses it into a JsonDocument, JsonElement or JsonNode.
+        ColumnType.Jsonb => value.StrValue ?? "",
         ColumnType.Null => DBNull.Value,
         ColumnType.String => value.StrValue ?? "",
         _ => DBNull.Value
@@ -600,6 +603,9 @@ public class CamusDataReader : DbDataReader
         if (target == typeof(decimal))
             return (T)(object)GetDecimal(ordinal);
 
+        if (CamusJsonb.IsDocumentType(target))
+            return (T)ParseDocument(ordinal, target)!;
+
         if (target == typeof(DateOnly))
             return (T)(object)DateOnly.FromDateTime(GetDateTime(ordinal));
 
@@ -656,6 +662,22 @@ public class CamusDataReader : DbDataReader
             return (T)(object)GetGuid(ordinal);
 
         return base.GetFieldValue<T>(ordinal);
+    }
+
+    /// <summary>
+    /// Parses a <c>jsonb</c> cell, or a string cell that holds JSON text, as a <see cref="System.Text.Json.JsonDocument"/>,
+    /// <see cref="System.Text.Json.JsonElement"/> or <see cref="System.Text.Json.Nodes.JsonNode"/>. Numbers keep their
+    /// text, so a decimal read from the result is exact.
+    /// </summary>
+    private object? ParseDocument(int ordinal, Type target)
+    {
+        ref readonly ColumnValue column = ref Cell(ordinal);
+
+        if (column.Type is not (ColumnType.Jsonb or ColumnType.String))
+            throw new InvalidCastException(
+                $"Column '{GetName(ordinal)}' of type {column.Type} cannot be read as {target.Name}; only a JSONB or a string column can.");
+
+        return CamusJsonb.Parse(column.StrValue ?? "", target);
     }
 
     public override IEnumerator GetEnumerator()
@@ -733,6 +755,7 @@ public class CamusDataReader : DbDataReader
             ColumnType.Uuid => value.UuidValue ?? value.AsGuid().ToString("D"),
             // The exact text, also for a value wider than a decimal.
             ColumnType.Numeric => value.StrValue ?? "",
+            ColumnType.Jsonb => value.StrValue ?? "",
             _ => Convert.ToString(GetValue(ordinal), CultureInfo.InvariantCulture) ?? ""
         };
     }

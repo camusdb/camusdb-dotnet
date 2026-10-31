@@ -405,8 +405,10 @@ public class CamusCommand : DbCommand, ICloneable
 
         // A parameter that nobody typed carries its type in its value. Dapper leaves DbType unset for a
         // DateTime, and a caller can set only Value. Sent as NULL, such a value was lost with no error.
-        // DbType.Object maps to Array, so an untyped scalar can also arrive typed Array.
-        if (columnType == ColumnType.Null || (columnType == ColumnType.Array && value is string or not IEnumerable))
+        // DbType.Object maps to Array, so an untyped scalar can also arrive typed Array. A JsonObject and a
+        // JsonArray are enumerable, and they are still one document.
+        if (columnType == ColumnType.Null ||
+            (columnType == ColumnType.Array && (value is string or not IEnumerable || CamusJsonb.IsDocumentValue(value))))
             columnType = InferValueColumnType(name, value);
 
         switch (columnType)
@@ -447,6 +449,14 @@ public class CamusCommand : DbCommand, ICloneable
             // double. A string passes through, so a value wider than a decimal can bind exactly.
             case ColumnType.Numeric:
                 return new() { Type = columnType, StrValue = CamusNumeric.FromParameter(name, value) };
+
+            // JSONB travels as JSON text. A string passes through, and the server parses it.
+            case ColumnType.Jsonb:
+                return new() { Type = columnType, StrValue = CamusJsonb.FromParameter(name, value) };
+
+            // A document bound as a STRING is its compact JSON text. JsonNode.ToString would indent it.
+            case ColumnType.String when CamusJsonb.IsDocumentValue(value):
+                return new() { Type = columnType, StrValue = CamusJsonb.FromParameter(name, value) };
 
             case ColumnType.Bool when value is bool b:
                 return new() { Type = columnType, BoolValue = b };
@@ -772,11 +782,18 @@ public class CamusCommand : DbCommand, ICloneable
 
     /// <summary>
     /// The element type of an array whose elements are <paramref name="type"/>. The server has no
-    /// <c>ARRAY(NUMERIC)</c>, so an array of <see cref="decimal"/> keeps its FLOAT64 elements.
+    /// <c>ARRAY(NUMERIC)</c>, so an array of <see cref="decimal"/> keeps its FLOAT64 elements. The server
+    /// has no <c>ARRAY(JSONB)</c> either, and an array of documents is a document, so an array of
+    /// documents is refused.
     /// </summary>
     internal static ColumnType InferArrayElementType(Type type)
     {
         ColumnType columnType = InferColumnType(type);
+
+        if (columnType == ColumnType.Jsonb)
+            throw new CamusException("CADB0400",
+                $"CamusDB has no ARRAY(JSONB), so an array of {type.Name} cannot bind. Bind one JSON array document instead.");
+
         return columnType == ColumnType.Numeric ? ColumnType.Float64 : columnType;
     }
 
@@ -796,6 +813,7 @@ public class CamusCommand : DbCommand, ICloneable
         _ when type == typeof(Guid) => ColumnType.Uuid,
         _ when type == typeof(CamusObjectIdValue) => ColumnType.Id,
         _ when type == typeof(byte[]) => ColumnType.Bytes,
+        _ when CamusJsonb.IsDocumentType(type) => ColumnType.Jsonb,
         _ => ColumnType.Null
     };
 
