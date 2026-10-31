@@ -73,10 +73,23 @@ public sealed class CamusResultSet
 
             if (columns[i].ElementType is { } elementType)
                 (elementTypes ??= new ColumnType[columnCount])[i] = elementType;
+            else if (columns[i].Type == ColumnType.Jsonb && columns[i].JsonbAsText == true)
+                (elementTypes ??= new ColumnType[columnCount])[i] = JsonbTextForm;
         }
 
         return FromWireCore(names, types, elementTypes, rows);
     }
+
+    /// <summary>
+    /// The value a jsonb column holds in the per-column element-type slot when the server marked it
+    /// <c>jsonbAsText</c>: each cell is then a JSON string that holds the document text, and not the
+    /// document as native JSON. A jsonb column has no elements, so the slot is free for this mark.
+    ///
+    /// <para>The mark comes only from the server. A server older than <c>jsonbAsText</c> ignores the
+    /// request field and sends native JSON with no mark, and a string document such as <c>"abc"</c> is
+    /// valid in both forms, so the client never guesses the form from the token.</para>
+    /// </summary>
+    private const ColumnType JsonbTextForm = ColumnType.String;
 
     /// <summary>
     /// Like <see cref="FromWire(IReadOnlyList{CamusColumnSchema}, JsonElement)"/>, but reads the schema
@@ -119,6 +132,9 @@ public sealed class CamusResultSet
             if (column.TryGetProperty("elementType", out JsonElement elementType) &&
                 elementType.ValueKind == JsonValueKind.Number && elementType.TryGetInt32(out int e))
                 (elementTypes ??= new ColumnType[columnCount])[i] = (ColumnType)e;
+            else if (types[i] == ColumnType.Jsonb &&
+                     column.TryGetProperty("jsonbAsText", out JsonElement asText) && asText.ValueKind == JsonValueKind.True)
+                (elementTypes ??= new ColumnType[columnCount])[i] = JsonbTextForm;
 
             i++;
         }
@@ -252,7 +268,11 @@ public sealed class CamusResultSet
                 return DecodeNumeric(ref reader);
 
             case ColumnType.Jsonb:
-                return new ColumnValue { Type = ColumnType.Jsonb, StrValue = CamusJsonb.ToText(ref reader) };
+                return new ColumnValue
+                {
+                    Type = ColumnType.Jsonb,
+                    StrValue = elementType == JsonbTextForm ? reader.GetString() : CamusJsonb.ToText(ref reader),
+                };
 
             case ColumnType.Array:
                 return DecodeArray(ref reader, elementType);
@@ -497,11 +517,17 @@ public sealed class CamusResultSet
             case ColumnType.Numeric:
                 return DecodeNumeric(cell);
 
-            // A jsonb cell is the document itself as native JSON: an object, an array or a scalar. It is
-            // kept as its PostgreSQL text form, which is the form a gRPC cell carries. The token null is
-            // SQL NULL above, so a document that is JSON null reads as SQL NULL over REST.
+            // A jsonb cell has two forms. In a column the server marked jsonbAsText (JsonbTextForm), it is a
+            // JSON string that holds the PostgreSQL text form, the form a gRPC cell carries, and a document
+            // that is JSON null is the string "null". Otherwise it is the document itself as native JSON,
+            // kept as its text form; the token null is then SQL NULL above, so a document that is JSON
+            // null reads as SQL NULL. That happens only with a server older than jsonbAsText.
             case ColumnType.Jsonb:
-                return new ColumnValue { Type = ColumnType.Jsonb, StrValue = CamusJsonb.ToText(cell) };
+                return new ColumnValue
+                {
+                    Type = ColumnType.Jsonb,
+                    StrValue = elementType == JsonbTextForm ? cell.GetString() : CamusJsonb.ToText(cell),
+                };
 
             case ColumnType.Array:
                 return DecodeArray(cell, elementType);

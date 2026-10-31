@@ -71,5 +71,15 @@ public sealed class CamusExecuteSqlNonQueryRequest
     [JsonPropertyName("discardReturningRows")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
     public bool DiscardReturningRows { get; set; }
+
+    /// <summary>
+    /// True to receive each jsonb cell as a JSON string that holds the document text. In the default
+    /// form a document that is JSON null and SQL NULL are both the token null. The server marks each
+    /// column it writes in the text form, and only a marked column is decoded as text, so a server
+    /// older than the field (which ignores it) still decodes correctly. False is omitted from the JSON.
+    /// </summary>
+    [JsonPropertyName("jsonbAsText")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public bool JsonbAsText { get; set; }
 }
 

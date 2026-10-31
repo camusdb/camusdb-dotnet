@@ -50,6 +50,16 @@ public sealed class CamusExecuteSqlQueryRequest
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
     public int RoutingAcceptVersion { get; set; }
 
+    /// <summary>
+    /// True to receive each jsonb cell as a JSON string that holds the document text. In the default
+    /// form a document that is JSON null and SQL NULL are both the token null. The server marks each
+    /// column it writes in the text form, and only a marked column is decoded as text, so a server
+    /// older than the field (which ignores it) still decodes correctly. False is omitted from the JSON.
+    /// </summary>
+    [JsonPropertyName("jsonbAsText")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public bool JsonbAsText { get; set; }
+
     /// <summary>Isolation level for the autocommit transaction of a write with a RETURNING list sent to
     /// the query endpoint. A read ignores it. Omitted from the JSON when null.</summary>
     [JsonPropertyName("isolationLevel")]

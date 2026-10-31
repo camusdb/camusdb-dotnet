@@ -623,9 +623,10 @@ on REST and on gRPC.
   a `JsonArray`. A document of the wrong kind for `JsonObject` or `JsonArray` throws `InvalidCastException`.
 - The server has no `ARRAY(JSONB)`. An array of documents is a document, so bind one JSON array. A list of
   `JsonDocument` values is refused with `CADB0400`.
-- JSON `null` and SQL `NULL` are different values. Over gRPC a JSON `null` document reads as the text
-  `null`. A REST row writes both as the token `null`, so over REST a top-level JSON `null` document reads
-  as SQL `NULL`.
+- JSON `null` and SQL `NULL` are different values. A JSON `null` document reads as the text `null`, and
+  SQL `NULL` reads as `DBNull`. Over REST the driver asks the server to send each document as text
+  (`jsonbAsText`), because the default REST row writes both values as the token `null`. A server older
+  than that option ignores it, and over REST it gives a top-level JSON `null` document as SQL `NULL`.
 - `CamusJsonb.Format(json)` gives the PostgreSQL text form of any JSON text.
 
 ```csharp

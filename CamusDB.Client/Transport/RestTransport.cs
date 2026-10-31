@@ -636,6 +636,7 @@ internal sealed class RestTransport(CamusEndpointPool endpoints, CamusTokenProvi
         }
 
         wire.RoutingAcceptVersion = request.RoutingAcceptVersion;
+        wire.JsonbAsText = true;
 
         return wire;
     }
@@ -669,6 +670,7 @@ internal sealed class RestTransport(CamusEndpointPool endpoints, CamusTokenProvi
 
         wire.RoutingAcceptVersion = request.RoutingAcceptVersion;
         wire.DiscardReturningRows = request.DiscardReturningRows;
+        wire.JsonbAsText = true;
 
         return wire;
     }

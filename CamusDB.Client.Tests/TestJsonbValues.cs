@@ -220,6 +220,70 @@ public class TestJsonbValues
         Assert.True(reader.IsDBNull(0));
     }
 
+    /// <summary>
+    /// A column the server marked <c>jsonbAsText</c> carries each document as a string that holds its
+    /// text. JSON null is then the string <c>"null"</c>, and only the token null is SQL NULL. Both
+    /// decoders, the buffered one and the streaming one, read the mark from the same schema reader.
+    /// </summary>
+    [Fact]
+    public void MarkedJsonbColumnDecodesTheTextForm_AndKeepsJsonNullApartFromSqlNull()
+    {
+        const string columns = """[{"name": "doc", "type": 13, "jsonbAsText": true}, {"name": "n", "type": 4}]""";
+        string[] rows =
+        [
+            """["{\"a\": [1, 12345678901234567890.50]}", 1]""",
+            """["null", 2]""",
+            """["\"abc\"", 3]""",
+            """[null, 4]""",
+        ];
+        string[] expected = ["""{"a": [1, 12345678901234567890.50]}""", "null", "\"abc\""];
+
+        using JsonDocument schema = JsonDocument.Parse(columns);
+        using JsonDocument body = JsonDocument.Parse("[" + string.Join(",", rows) + "]");
+        using CamusDataReader reader = new(CamusResultSet.FromWire(schema.RootElement.Clone(), body.RootElement.Clone()));
+
+        for (int i = 0; i < expected.Length; i++)
+        {
+            Assert.True(reader.Read());
+            Assert.False(reader.IsDBNull(0));
+            Assert.Equal(expected[i], reader.GetString(0));
+        }
+
+        Assert.True(reader.Read());
+        Assert.True(reader.IsDBNull(0));
+        Assert.Equal(4, reader.GetInt64(1));
+
+        (_, ColumnType[] types, ColumnType[]? elementTypes) = CamusResultSet.ReadSchema(schema.RootElement);
+        ColumnValue[] cells = new ColumnValue[2];
+
+        for (int i = 0; i < expected.Length; i++)
+        {
+            Assert.True(CamusResultSet.TryDecodeRowInto(Encoding.UTF8.GetBytes(rows[i]), types, cells, elementTypes));
+            Assert.Equal(ColumnType.Jsonb, cells[0].Type);
+            Assert.Equal(expected[i], cells[0].StrValue);
+        }
+
+        // The typed schema list (the RETURNING path) reads the same mark.
+        List<CamusColumnSchema> list = [new() { Name = "doc", Type = ColumnType.Jsonb, JsonbAsText = true }];
+        using JsonDocument one = JsonDocument.Parse("""[["null"]]""");
+        using CamusDataReader returning = new(CamusResultSet.FromWire(list, one.RootElement.Clone()));
+        Assert.True(returning.Read());
+        Assert.Equal("null", returning.GetString(0));
+    }
+
+    /// <summary>
+    /// Without the mark a string cell is a string document, as a server older than <c>jsonbAsText</c>
+    /// sends it: the client must not read it as document text.
+    /// </summary>
+    [Fact]
+    public void UnmarkedJsonbColumnKeepsTheNativeForm()
+    {
+        using CamusDataReader reader = ReaderFor("""[["{\"a\": 1}"]]""");
+
+        Assert.True(reader.Read());
+        Assert.Equal("\"{\\\"a\\\": 1}\"", reader.GetString(0));
+    }
+
     [Fact]
     public void JsonbCellParsesIntoTheSystemTextJsonTypes()
     {

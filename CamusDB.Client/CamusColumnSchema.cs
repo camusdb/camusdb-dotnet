@@ -33,4 +33,12 @@ public sealed class CamusColumnSchema
     [JsonPropertyName("elementType")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public ColumnType? ElementType { get; set; }
+
+    /// <summary>
+    /// True on a jsonb column whose cells are JSON strings that hold the document text, because the
+    /// request asked for that form. Null otherwise: the cells are then the documents as native JSON.
+    /// </summary>
+    [JsonPropertyName("jsonbAsText")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public bool? JsonbAsText { get; set; }
 }

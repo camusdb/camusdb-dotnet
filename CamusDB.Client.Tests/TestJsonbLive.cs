@@ -100,8 +100,9 @@ public class TestJsonbLive : BaseTest
         Assert.Equal("""{"plain": "string"}""", rows["string"]);
         Assert.Null(rows["sql-null"]);
 
-        // gRPC tells the JSON null document from SQL NULL; a REST row writes both as the token null.
-        Assert.Equal(protocol == "grpc" ? "null" : null, rows["json-null"]);
+        // Both transports tell the JSON null document from SQL NULL. Over REST the driver asks for the
+        // text form (jsonbAsText), because the default REST row writes both as the token null.
+        Assert.Equal("null", rows["json-null"]);
 
         // A text operand compares with a document as a document.
         Assert.Equal(["node"], await NamesAsync(connection,
@@ -121,20 +122,57 @@ public class TestJsonbLive : BaseTest
 
         await InsertAsync(connection, table, "deep", JsonDocument.Parse(new string('[', 300) + new string(']', 300), new JsonDocumentOptions { MaxDepth = 512 }));
         await InsertAsync(connection, table, "flat", """{"z": "é\n"}""", ColumnType.Jsonb);
+        await InsertAsync(connection, table, "json-null", "null", ColumnType.Jsonb);
+        await InsertAsync(connection, table, "string", "\"abc\"", ColumnType.Jsonb);
+        await InsertAsync(connection, table, "sql-null", null);
 
-        Dictionary<string, string> rows = [];
+        Dictionary<string, string?> rows = [];
 
         await using CamusCommand select = connection.CreateCamusCommand($"SELECT name, doc FROM {table}");
         await using CamusDataReader reader = await select.ExecuteStreamReaderAsync();
 
         while (await reader.ReadAsync())
         {
+            if (reader.IsDBNull(1))
+            {
+                rows[reader.GetString(0)] = null;
+                continue;
+            }
+
             Assert.Equal(ColumnType.Jsonb, reader.GetColumnValue(1).Type);
             rows[reader.GetString(0)] = reader.GetString(1);
         }
 
         Assert.Equal(new string('[', 300) + new string(']', 300), rows["deep"]);
         Assert.Equal("{\"z\": \"é\\n\"}", rows["flat"]);
+        Assert.Equal("null", rows["json-null"]);
+        Assert.Equal("\"abc\"", rows["string"]);
+        Assert.Null(rows["sql-null"]);
+    }
+
+    /// <summary>
+    /// The RETURNING rows of a write over REST keep a JSON null document apart from SQL NULL too.
+    /// </summary>
+    [Fact]
+    public async Task ReturningRowsKeepJsonNullOverRest()
+    {
+        await using CamusConnection connection = await OpenAsync("");
+        string table = await CreateEventsAsync(connection, "jsonb_returning");
+
+        await using CamusCommand insert = connection.CreateCamusCommand(
+            $"INSERT INTO {table} (id, name, doc) VALUES (@a, 'json-null', @doc), (@b, 'sql-null', NULL) RETURNING name, doc");
+        insert.Parameters.Add("@a", ColumnType.Id, CamusObjectIdGenerator.GenerateAsString());
+        insert.Parameters.Add("@b", ColumnType.Id, CamusObjectIdGenerator.GenerateAsString());
+        insert.Parameters.Add("@doc", ColumnType.Jsonb, "null");
+
+        Dictionary<string, string?> rows = [];
+
+        await using CamusDataReader reader = await insert.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+            rows[reader.GetString(0)] = reader.IsDBNull(1) ? null : reader.GetString(1);
+
+        Assert.Equal("null", rows["json-null"]);
+        Assert.Null(rows["sql-null"]);
     }
 
     [Theory]
