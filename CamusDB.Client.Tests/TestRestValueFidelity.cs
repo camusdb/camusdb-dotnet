@@ -45,6 +45,13 @@ public class TestRestValueFidelity
         ["float32"] = (ColumnType.Float32, "[0,-0,-9.321863E+23,0.1,null]",
             [Float32(0f), Float32(-0f), Float32(-9.321863E+23f), Float32(0.1f), ColumnValue.Null]),
 
+        // JSON has no number for ±infinity or NaN, so the server writes their names.
+        ["float64 non-finite"] = (ColumnType.Float64, """[1.5,"NaN","Infinity","-Infinity",null]""",
+            [Float64(1.5), Float64(double.NaN), Float64(double.PositiveInfinity), Float64(double.NegativeInfinity), ColumnValue.Null]),
+
+        ["float32 non-finite"] = (ColumnType.Float32, """["Infinity",0.1,"NaN","-Infinity"]""",
+            [Float32(float.PositiveInfinity), Float32(0.1f), Float32(float.NaN), Float32(float.NegativeInfinity)]),
+
         ["int64"] = (ColumnType.Integer64, "[0,-9223372036854775808,null,9223372036854775807]",
             [Int64(0), Int64(long.MinValue), ColumnValue.Null, Int64(long.MaxValue)]),
 
@@ -176,6 +183,125 @@ public class TestRestValueFidelity
         Assert.Equal(-9.321863238689577E+23, cell.FloatValue);
         Assert.NotEqual(-9.321863E+23, cell.FloatValue);
     }
+
+    // ─── Infinity and NaN ─────────────────────────────────────────────────────
+
+    /// <summary>
+    /// The server writes ±infinity and NaN in a FLOAT64 or FLOAT32 cell as the strings "Infinity",
+    /// "-Infinity" and "NaN", because JSON has no number for them. Each decodes to the IEEE value the
+    /// gRPC transport gives, with the column's float type, not to a String that holds the name.
+    /// </summary>
+    [Theory]
+    [InlineData(5, "\"Infinity\"", double.PositiveInfinity)]
+    [InlineData(5, "\"-Infinity\"", double.NegativeInfinity)]
+    [InlineData(5, "\"NaN\"", double.NaN)]
+    [InlineData(6, "\"Infinity\"", double.PositiveInfinity)]
+    [InlineData(6, "\"-Infinity\"", double.NegativeInfinity)]
+    [InlineData(6, "\"NaN\"", double.NaN)]
+    public async Task NonFiniteFloatCellsDecodeAsTheGrpcTransportDecodesThem(int type, string cellJson, double expected)
+    {
+        ColumnType columnType = (ColumnType)type;
+        ColumnValue grpc = GrpcValueCodec.Decode(GrpcValueCodec.Encode(
+            columnType == ColumnType.Float32 ? Float32((float)expected) : Float64(expected)));
+
+        foreach (Func<string, string, Task<ColumnValue>> decode in Decoders)
+        {
+            ColumnValue cell = await decode($$"""[{"name":"f","type":{{type}}}]""", cellJson);
+
+            Assert.Equal(columnType, cell.Type);
+            Assert.Equal(double.IsNaN(grpc.FloatValue), double.IsNaN(cell.FloatValue));
+            if (!double.IsNaN(expected))
+                Assert.Equal(grpc.FloatValue, cell.FloatValue);
+        }
+    }
+
+    /// <summary>
+    /// Only the three names are values. Any other string in a float column, and a name in a column of
+    /// another type, stays a String, as before.
+    /// </summary>
+    [Theory]
+    [InlineData(5, "\"nan\"")]
+    [InlineData(5, "\"Inf\"")]
+    [InlineData(6, "\"abc\"")]
+    [InlineData(3, "\"NaN\"")]
+    [InlineData(3, "\"Infinity\"")]
+    public async Task OtherStringsStayStrings(int type, string cellJson)
+    {
+        using JsonDocument expected = JsonDocument.Parse(cellJson);
+
+        foreach (Func<string, string, Task<ColumnValue>> decode in Decoders)
+        {
+            ColumnValue cell = await decode($$"""[{"name":"f","type":{{type}}}]""", cellJson);
+
+            Assert.Equal(ColumnType.String, cell.Type);
+            Assert.Equal(expected.RootElement.GetString(), cell.StrValue);
+        }
+    }
+
+    /// <summary>
+    /// A ±infinity or NaN parameter goes into the request body as the string the server reads,
+    /// "Infinity", "-Infinity" or "NaN" — scalar or array element, Float64 or Float32, inline or
+    /// prepared. Before, writing the body threw, because JSON has no number for these values.
+    /// </summary>
+    [Fact]
+    public async Task NonFiniteParametersAreSentAsTheirNames()
+    {
+        using HttpTest httpTest = new();
+        httpTest.ForCallsTo("http://localhost:9346/execute-sql-query").RespondWith(
+            """{"status":"ok","columns":[{"name":"n","type":2}],"rows":[]}""");
+
+        using CamusConnection connection = new(new CamusConnectionStringBuilder("Endpoint=http://localhost:9346;Database=test"));
+        await using CamusCommand command = connection.CreateCamusCommand("SELECT n FROM t WHERE d = @d AND f = @f AND @a = a AND @af = af");
+        AddNonFiniteParameters(command);
+
+        await using (await command.ExecuteReaderAsync()) { }
+
+        using JsonDocument body = JsonDocument.Parse(await Assert.Single(httpTest.CallLog).HttpRequestMessage.Content!.ReadAsStringAsync());
+        JsonElement parameters = body.RootElement.GetProperty("parameters");
+
+        AssertFloatText("\"Infinity\"", parameters.GetProperty("@d"));
+        AssertFloatText("\"NaN\"", parameters.GetProperty("@f"));
+        AssertFloatText("\"-Infinity\"", parameters.GetProperty("@a").GetProperty("arrayValues")[0]);
+        AssertFloatText("1.5", parameters.GetProperty("@a").GetProperty("arrayValues")[1]);
+        AssertFloatText("\"NaN\"", parameters.GetProperty("@af").GetProperty("arrayValues")[1]);
+    }
+
+    [Fact]
+    public async Task NonFinitePreparedParametersAreSentAsTheirNames()
+    {
+        using HttpTest httpTest = new();
+        httpTest.ForCallsTo("http://localhost:9347/prepare-sql-statement").RespondWith(
+            """{"status":"ok","statementId":"s1","parameterNames":["@d","@f","@a","@af"]}""");
+        httpTest.ForCallsTo("http://localhost:9347/execute-sql-query").RespondWith(
+            """{"status":"ok","columns":[{"name":"n","type":2}],"rows":[]}""");
+
+        using CamusConnection connection = new(new CamusConnectionStringBuilder("Endpoint=http://localhost:9347;Database=test"));
+        await using CamusCommand command = connection.CreateCamusCommand("SELECT n FROM t WHERE d = @d AND f = @f AND @a = a AND @af = af");
+        await command.PrepareAsync();
+        AddNonFiniteParameters(command);
+
+        await using (await command.ExecuteReaderAsync()) { }
+
+        var execute = httpTest.CallLog.Single(c => c.Request.Url.ToString().EndsWith("/execute-sql-query", StringComparison.Ordinal));
+        using JsonDocument body = JsonDocument.Parse(await execute.HttpRequestMessage.Content!.ReadAsStringAsync());
+        JsonElement positional = body.RootElement.GetProperty("positionalParameters");
+
+        AssertFloatText("\"Infinity\"", positional[0]);
+        AssertFloatText("\"NaN\"", positional[1]);
+        AssertFloatText("\"-Infinity\"", positional[2].GetProperty("arrayValues")[0]);
+        AssertFloatText("\"NaN\"", positional[3].GetProperty("arrayValues")[1]);
+    }
+
+    private static void AddNonFiniteParameters(CamusCommand command)
+    {
+        command.Parameters.Add("@d", ColumnType.Float64, double.PositiveInfinity);
+        command.Parameters.Add("@f", ColumnType.Float32, float.NaN);
+        command.Parameters.Add("@a", ColumnType.Array, new[] { double.NegativeInfinity, 1.5 });
+        command.Parameters.Add("@af", ColumnType.Array, new[] { 1.5f, float.NaN });
+    }
+
+    private static void AssertFloatText(string expected, JsonElement parameter) =>
+        Assert.Equal(expected, parameter.GetProperty("floatValue").GetRawText());
 
     // ─── Negative zero ────────────────────────────────────────────────────────
 

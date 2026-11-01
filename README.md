@@ -722,6 +722,12 @@ A `FLOAT32` value, scalar or array element, reads back as the stored single-prec
 `GetDouble` widens exactly, on both transports. A `-0.0` parameter or array element is sent as negative
 zero, and a negative zero in a result keeps its sign.
 
+`Infinity`, `-Infinity` and `NaN` are float values too, on both transports. JSON has no number for them,
+so REST carries them as the strings `"Infinity"`, `"-Infinity"` and `"NaN"`. The client reads such a
+string in a `FLOAT64` or `FLOAT32` cell, or array element, as the float value, as gRPC gives it, and sends
+a non-finite parameter in the same form. Any other string stays a `String`. A server that is older than
+the PostgreSQL float rule cannot return these values over REST and refuses them in a parameter.
+
 #### Large values
 
 A server with large-value storage can store a large `string`, `bytes` or `ARRAY(T)` value compressed (LZ4), or under its own key outside the row. The form never changes a query result or the wire format, so reads and parameters work as before. It changes the I/O a query does and the size of each stored version: a query that does not name a column stored out of line never fetches it, and an update of another column does not rewrite it.

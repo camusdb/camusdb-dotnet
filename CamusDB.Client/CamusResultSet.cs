@@ -410,6 +410,9 @@ public sealed class CamusResultSet
         switch (reader.TokenType)
         {
             case JsonTokenType.String:
+                if (declared is ColumnType.Float64 or ColumnType.Float32 && TryNonFiniteFloat(ref reader, out double nonFinite))
+                    return new ColumnValue { Type = declared, FloatValue = nonFinite };
+
                 return new ColumnValue { Type = ColumnType.String, StrValue = reader.GetString() };
 
             case JsonTokenType.True:
@@ -621,6 +624,9 @@ public sealed class CamusResultSet
         switch (cell.ValueKind)
         {
             case JsonValueKind.String:
+                if (declared is ColumnType.Float64 or ColumnType.Float32 && TryNonFiniteFloat(cell, out double nonFinite))
+                    return new ColumnValue { Type = declared, FloatValue = nonFinite };
+
                 return new ColumnValue { Type = ColumnType.String, StrValue = cell.GetString() };
 
             case JsonValueKind.True:
@@ -645,5 +651,49 @@ public sealed class CamusResultSet
             default:
                 return ColumnValue.Null;
         }
+    }
+    /// <summary>
+    /// Reads the string the server writes for a non-finite float in a FLOAT64 or FLOAT32 cell or array
+    /// element: <c>"Infinity"</c>, <c>"-Infinity"</c> or <c>"NaN"</c>. JSON has no number for these
+    /// values, so a server with the PostgreSQL float rule sends them as strings, and the column's type
+    /// still says float. Without this, the cell decoded as a String holding the name, so a value read
+    /// over REST differed from the same value read over gRPC, which carries the IEEE double. Only these
+    /// three spellings are values; any other string in a float column stays a String, as before.
+    /// <para>The DOM form of this method is <see cref="TryNonFiniteFloat(JsonElement, out double)"/>;
+    /// the two decoders must stay in step.</para>
+    /// </summary>
+    private static bool TryNonFiniteFloat(ref Utf8JsonReader reader, out double value)
+    {
+        if (reader.ValueTextEquals("Infinity"u8))
+            value = double.PositiveInfinity;
+        else if (reader.ValueTextEquals("-Infinity"u8))
+            value = double.NegativeInfinity;
+        else if (reader.ValueTextEquals("NaN"u8))
+            value = double.NaN;
+        else
+        {
+            value = 0;
+            return false;
+        }
+
+        return true;
+    }
+
+    /// <summary>The <see cref="JsonElement"/> form of <see cref="TryNonFiniteFloat(ref Utf8JsonReader, out double)"/>.</summary>
+    private static bool TryNonFiniteFloat(JsonElement cell, out double value)
+    {
+        if (cell.ValueEquals("Infinity"u8))
+            value = double.PositiveInfinity;
+        else if (cell.ValueEquals("-Infinity"u8))
+            value = double.NegativeInfinity;
+        else if (cell.ValueEquals("NaN"u8))
+            value = double.NaN;
+        else
+        {
+            value = 0;
+            return false;
+        }
+
+        return true;
     }
 }

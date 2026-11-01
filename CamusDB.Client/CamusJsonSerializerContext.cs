@@ -3,7 +3,10 @@ using System.Text.Json.Serialization;
 namespace CamusDB.Client;
 
 // A response can carry jsonb documents as native JSON, nested up to CamusJsonb.MaxNestingDepth levels.
-[JsonSourceGenerationOptions(MaxDepth = CamusJsonb.ResponseMaxDepth)]
+// A float parameter can be ±infinity or NaN, which JSON has no number for: named literals write it as
+// "Infinity", "-Infinity" or "NaN", the form the server reads in a float parameter. Without them the
+// request failed while it was written. Finite numbers are unchanged.
+[JsonSourceGenerationOptions(MaxDepth = CamusJsonb.ResponseMaxDepth, NumberHandling = JsonNumberHandling.AllowNamedFloatingPointLiterals)]
 [JsonSerializable(typeof(ColumnValue))]
 [JsonSerializable(typeof(CamusColumnSchema))]
 [JsonSerializable(typeof(CamusErrorResponse))]
