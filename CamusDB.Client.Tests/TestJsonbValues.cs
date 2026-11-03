@@ -652,6 +652,149 @@ public class TestJsonbValues
     public void JsonFunctionsCannotRunInMemory()
     {
         Assert.Throws<InvalidOperationException>(() => EF.Functions.JsonContains("{}", "{}"));
+        Assert.Throws<InvalidOperationException>(() => EF.Functions.JsonValueText("{}", "a"));
+        Assert.Throws<InvalidOperationException>(() => EF.Functions.JsonPath("{}", "a", "b"));
+    }
+
+    // ─── EF Core: reading a value out of a document ───────────────────────────
+
+    [Fact]
+    public void JsonValueTextComparesAsAStringBesideAStringConstant()
+    {
+        using JsonContext ctx = new(Options<JsonContext>());
+
+        string sql = ctx.Events.Where(e => EF.Functions.JsonValueText(e.Payload, "kind") == "login").ToQueryString();
+
+        // Both constants are strings: the one extraction shape the server's GIN index serves.
+        Assert.Contains("jsonb_object_field_text(`e`.`Payload`, 'kind') = 'login'", sql);
+    }
+
+    [Fact]
+    public void JsonValueTextWithCapturedValuesBindsStringParameters()
+    {
+        using JsonContext ctx = new(Options<JsonContext>());
+        string key = "kind";
+        string value = "login";
+
+        string sql = ctx.Events.Where(e => EF.Functions.JsonValueText(e.Payload, key) == value).ToQueryString();
+
+        Assert.Contains("jsonb_object_field_text(`e`.`Payload`, @key) = @value", sql);
+        Assert.DoesNotContain("JSONB", sql.Split('\n').Last(l => l.Contains("WHERE")));
+    }
+
+    [Fact]
+    public void EveryDocumentColumnGivesTheSameCall()
+    {
+        using JsonContext ctx = new(Options<JsonContext>());
+
+        Assert.Contains("jsonb_object_field_text(`e`.`Payload`, 'k')", ctx.Events.Select(e => EF.Functions.JsonValueText(e.Payload, "k")).ToQueryString());
+        Assert.Contains("jsonb_object_field_text(`e`.`Node`, 'k')", ctx.Events.Select(e => EF.Functions.JsonValueText(e.Node!, "k")).ToQueryString());
+        Assert.Contains("jsonb_object_field_text(`e`.`Text`, 'k')", ctx.Events.Select(e => EF.Functions.JsonValueText(e.Text!, "k")).ToQueryString());
+
+        // A JsonElement column is a struct, so its box to object must not hide it behind a CAST.
+        foreach (string sql in new[]
+        {
+            ctx.Events.Select(e => EF.Functions.JsonValueText(e.Element, "k")).ToQueryString(),
+            ctx.Events.Select(e => EF.Functions.JsonValue(e.Element, "k")).ToQueryString(),
+            ctx.Events.Select(e => EF.Functions.JsonPathText(e.Element, "a", "b")).ToQueryString(),
+            ctx.Events.Select(e => EF.Functions.JsonPath(e.Element, "a", "b")).ToQueryString(),
+        })
+        {
+            Assert.Contains("(`e`.`Element`, ", sql);
+            Assert.DoesNotContain("CAST", sql);
+        }
+    }
+
+    [Fact]
+    public void JsonValueTranslatesToTheFieldFunction()
+    {
+        using JsonContext ctx = new(Options<JsonContext>());
+
+        Assert.Contains("jsonb_object_field(`e`.`Payload`, 'user')", ctx.Events.Select(e => EF.Functions.JsonValue(e.Payload, "user")).ToQueryString());
+        Assert.Contains("jsonb_object_field_text(`e`.`Tags`, -1)", ctx.Events.Select(e => EF.Functions.JsonValueText(e.Tags!, -1)).ToQueryString());
+        Assert.Contains("jsonb_object_field(`e`.`Tags`, 0)", ctx.Events.Select(e => EF.Functions.JsonValue(e.Tags!, 0)).ToQueryString());
+    }
+
+    [Fact]
+    public void ADocumentValueIsADocumentArgument()
+    {
+        using JsonContext ctx = new(Options<JsonContext>());
+
+        string sql = ctx.Events.Where(e => EF.Functions.JsonContains(EF.Functions.JsonValue(e.Payload, "user")!, """{"id": 7}""")).ToQueryString();
+
+        Assert.Contains("""jsonb_contains(jsonb_object_field(`e`.`Payload`, 'user'), JSONB '{"id": 7}')""", sql);
+    }
+
+    [Fact]
+    public void AConstantPathIsOneArgumentPerKey()
+    {
+        using JsonContext ctx = new(Options<JsonContext>());
+
+        Assert.Contains("jsonb_extract_path_text(`e`.`Payload`, 'recommendation', 'reason')",
+            ctx.Events.Select(e => EF.Functions.JsonPathText(e.Payload, "recommendation", "reason")).ToQueryString());
+
+        Assert.Contains("jsonb_extract_path(`e`.`Payload`, 'a,b', '{c}')",
+            ctx.Events.Select(e => EF.Functions.JsonPath(e.Payload, "a,b", "{c}")).ToQueryString());
+    }
+
+    [Fact]
+    public void AnEmptyPathIsTheWholeDocument()
+    {
+        using JsonContext ctx = new(Options<JsonContext>());
+
+        Assert.Contains("jsonb_path_get_text(`e`.`Payload`, '{}')", ctx.Events.Select(e => EF.Functions.JsonPathText(e.Payload)).ToQueryString());
+        Assert.Contains("jsonb_path_get(`e`.`Payload`, '{}')", ctx.Events.Select(e => EF.Functions.JsonPath(e.Payload)).ToQueryString());
+    }
+
+    [Fact]
+    public void APathInAVariableIsOneArrayParameter()
+    {
+        using JsonContext ctx = new(Options<JsonContext>());
+        string[] path = ["recommendation", "reason"];
+
+        Assert.Contains("jsonb_path_get_text(`e`.`Payload`, @path)", ctx.Events.Select(e => EF.Functions.JsonPathText(e.Payload, path)).ToQueryString());
+        Assert.Contains("jsonb_path_get(`e`.`Payload`, @path)", ctx.Events.Select(e => EF.Functions.JsonPath(e.Payload, path)).ToQueryString());
+    }
+
+    [Fact]
+    public void APathWithAVariableKeyTranslates()
+    {
+        using JsonContext ctx = new(Options<JsonContext>());
+        string key = "reason";
+
+        string sql = ctx.Events.Select(e => EF.Functions.JsonPathText(e.Payload, "recommendation", key)).ToQueryString();
+
+        Assert.Contains("jsonb_extract_path_text(`e`.`Payload`, 'recommendation', @key)", sql);
+    }
+
+    [Fact]
+    public void ExtractedValuesGroupAndSort()
+    {
+        using JsonContext ctx = new(Options<JsonContext>());
+
+        string grouped = ctx.Events
+            .GroupBy(e => new { Reason = EF.Functions.JsonPathText(e.Payload, "r", "reason"), Policy = EF.Functions.JsonPathText(e.Payload, "r", "policy") })
+            .Select(g => new { g.Key.Reason, g.Key.Policy, Count = g.Count() })
+            .ToQueryString();
+
+        // EF Core groups a composite key of expressions through a derived table.
+        Assert.Contains("SELECT jsonb_extract_path_text(`e`.`Payload`, 'r', 'reason') AS `Reason`, jsonb_extract_path_text(`e`.`Payload`, 'r', 'policy') AS `Policy`", grouped);
+        Assert.Contains("GROUP BY `e0`.`Reason`, `e0`.`Policy`", grouped);
+
+        string sorted = ctx.Events.OrderBy(e => (long?)Convert.ToInt64(EF.Functions.JsonValueText(e.Payload, "rank"))).Select(e => e.Id).ToQueryString();
+
+        Assert.Contains("ORDER BY CAST(jsonb_object_field_text(`e`.`Payload`, 'rank') AS int64)", sorted);
+    }
+
+    [Fact]
+    public void ConvertOfAStringIsACast()
+    {
+        using JsonContext ctx = new(Options<JsonContext>());
+
+        Assert.Contains("CAST(`e`.`Text` AS int64)", ctx.Events.Select(e => Convert.ToInt32(e.Text)).ToQueryString());
+        Assert.Contains("CAST(`e`.`Text` AS float64)", ctx.Events.Select(e => Convert.ToDouble(e.Text)).ToQueryString());
+        Assert.Contains("CAST(`e`.`Text` AS numeric)", ctx.Events.Select(e => Convert.ToDecimal(e.Text)).ToQueryString());
+        Assert.Contains("CAST(`e`.`Text` AS bool)", ctx.Events.Select(e => Convert.ToBoolean(e.Text)).ToQueryString());
     }
 
     public class Event

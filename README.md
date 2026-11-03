@@ -1695,7 +1695,41 @@ var logins = await ctx.Events
     .ToListAsync();
 ```
 
-The provider does not translate member access on a document (`e.Payload.RootElement.GetProperty("kind")`) or the `->` and `->>` operators. Use `FromSql` for those queries.
+To read a value out of a document, so that a query can project it, group by it, sort by it or compare it, use the value helpers (0.17.3 and later). They translate to the function forms of `->`, `->>`, `#>` and `#>>`:
+
+| LINQ | CamusDB | Result |
+| --- | --- | --- |
+| `EF.Functions.JsonValueText(json, key)` | `jsonb_object_field_text` (the `->>` operator) | `string?` |
+| `EF.Functions.JsonValueText(json, index)` | `jsonb_object_field_text` with an integer | `string?` |
+| `EF.Functions.JsonValue(json, key)` | `jsonb_object_field` (the `->` operator) | `JsonElement?` |
+| `EF.Functions.JsonValue(json, index)` | `jsonb_object_field` with an integer | `JsonElement?` |
+| `EF.Functions.JsonPathText(json, "a", "b", …)` | `jsonb_extract_path_text(json, 'a', 'b', …)` | `string?` |
+| `EF.Functions.JsonPath(json, "a", "b", …)` | `jsonb_extract_path(json, 'a', 'b', …)` | `JsonElement?` |
+
+```csharp
+var byReason = await ctx.Events
+    .Where(e => EF.Functions.JsonValueText(e.Payload, "kind") == "login")            // served by the GIN index
+    .GroupBy(e => EF.Functions.JsonPathText(e.Payload, "recommendation", "reason"))
+    .Select(g => new { Reason = g.Key, Count = g.Count() })
+    .ToListAsync();
+
+var byRank = await ctx.Events
+    .OrderBy(e => (long?)Convert.ToInt64(EF.Functions.JsonValueText(e.Payload, "rank")))   // CAST(… AS int64)
+    .ToListAsync();
+```
+
+The rules for the result:
+
+- A missing key, an index past the end, a key applied to a value that is not an object, and an index applied to a value that is not an array all give `NULL`. A negative index counts from the end.
+- The `…Text` helpers give a string member without its quotes, and a number, a boolean, an object or an array as its canonical JSON text (`1.50`, `true`, `{"z": [1]}`). A JSON `null` member gives `NULL`.
+- `JsonValue` and `JsonPath` give the value as a document. A JSON `null` member is a `JsonElement` of kind `Null`, not `NULL`. The result is typed `jsonb`, so it can be the document argument of another helper: `EF.Functions.JsonContains(EF.Functions.JsonValue(e.Payload, "user")!, """{"id": 7}""")`.
+- Each element of a path is one key, or the decimal text of an array index. A path written in place, constants and variables alike, becomes one argument per key, so a key that contains a comma or a brace stays one key. A path held in a `string[]` variable binds as one array parameter of `jsonb_path_get[_text]` (the `#>` and `#>>` operators). An empty path gives the whole document.
+
+**Only one shape uses a GIN index:** `JsonValueText(column, key) == text`, at the top level of a `Where`, with a constant or a variable as the key and as the text. No path helper and no other comparison uses the index, and the server has no expression index on a member, so those queries read every row of the table. C# has no `==` operator for `JsonElement`, so compare a document member with `JsonContains`, which the index serves.
+
+`Convert.ToInt32`, `ToInt64`, `ToDouble`, `ToDecimal` and `ToBoolean` of a string translate to `CAST(text AS int64 | float64 | numeric | bool)`, so a member can be grouped, sorted and compared as a number. The server refuses a text that is not a value of the target type with `CADB0400`: `'1.50'` is not an `int64`. Cast the result to a nullable type when the member can be missing, because `CAST(NULL …)` is `NULL`.
+
+The provider does not translate member access on a CLR document (`e.Payload.RootElement.GetProperty("kind")`, or a `JsonNode` indexer). Use the helpers above.
 
 ##### Vector search
 

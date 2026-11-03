@@ -6,6 +6,7 @@
  * file that was distributed with this source code.
  */
 
+using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 
 namespace CamusDB.EntityFrameworkCore;
@@ -185,6 +186,76 @@ public static class CamusDbFunctionsExtensions
     /// </summary>
     public static string JsonTypeof(this DbFunctions _, object json)
         => throw ClientEval(nameof(JsonTypeof));
+
+    // ── JSON documents: reading a value ───────────────────────────────────────────────────────────
+    //
+    // These methods read one value out of a document, so a query can project it, group by it, sort by it
+    // or compare it. A key or index that does not match gives SQL NULL; so does a key applied to a value
+    // that is not an object, and an index applied to a value that is not an array.
+    //
+    // A GIN index serves exactly one of these shapes: JsonValueText(column, key) == text, with a constant
+    // or a captured variable on both the key and the text, at the top level of a Where. No path method is
+    // served, and the server has no expression index on a member, so any other use reads every row.
+
+    /// <summary>
+    /// <c>jsonb_object_field_text(json, key)</c>, the <c>-&gt;&gt;</c> operator: the member
+    /// <paramref name="key"/> of an object, as text. A string member gives its value without quotes; a
+    /// number, a boolean, an object or an array gives its canonical JSON text; a JSON <c>null</c> member
+    /// gives SQL <c>NULL</c>.
+    ///
+    /// <para>A GIN index on the column serves <c>JsonValueText(column, key) == text</c> at the top level of
+    /// a <c>Where</c>.</para>
+    /// </summary>
+    public static string? JsonValueText(this DbFunctions _, object json, string key)
+        => throw ClientEval(nameof(JsonValueText));
+
+    /// <summary>
+    /// <c>jsonb_object_field_text(json, index)</c>, the <c>-&gt;&gt;</c> operator with an integer: the
+    /// element at <paramref name="index"/> of an array, as text, with the rules of
+    /// <see cref="JsonValueText(DbFunctions, object, string)"/>. A negative index counts from the end.
+    /// No GIN index serves it.
+    /// </summary>
+    public static string? JsonValueText(this DbFunctions _, object json, int index)
+        => throw ClientEval(nameof(JsonValueText));
+
+    /// <summary>
+    /// <c>jsonb_object_field(json, key)</c>, the <c>-&gt;</c> operator: the member <paramref name="key"/> of
+    /// an object, as a document. A JSON <c>null</c> member is the JSON <c>null</c> document, not SQL
+    /// <c>NULL</c>; over REST it reads as SQL <c>NULL</c> unless the server supports <c>jsonbAsText</c>.
+    /// The result is typed <c>jsonb</c>, so it can be the document argument of another JSON method.
+    /// </summary>
+    public static JsonElement? JsonValue(this DbFunctions _, object json, string key)
+        => throw ClientEval(nameof(JsonValue));
+
+    /// <summary>
+    /// <c>jsonb_object_field(json, index)</c>, the <c>-&gt;</c> operator with an integer: the element at
+    /// <paramref name="index"/> of an array, as a document, with the rules of
+    /// <see cref="JsonValue(DbFunctions, object, string)"/>. A negative index counts from the end.
+    /// </summary>
+    public static JsonElement? JsonValue(this DbFunctions _, object json, int index)
+        => throw ClientEval(nameof(JsonValue));
+
+    /// <summary>
+    /// The value at <paramref name="path"/>, as text, with the rules of
+    /// <see cref="JsonValueText(DbFunctions, object, string)"/>. Each element of the path is one key, or
+    /// the decimal text of an array index. An empty path gives the whole document.
+    ///
+    /// <para>Constant path elements become <c>jsonb_extract_path_text(json, 'a', 'b')</c>, one argument per
+    /// key, so a key that contains a comma or a brace is still one key. A path held in a variable binds as
+    /// one array parameter of <c>jsonb_path_get_text(json, @path)</c>, the <c>#&gt;&gt;</c> operator. No GIN
+    /// index serves either form.</para>
+    /// </summary>
+    public static string? JsonPathText(this DbFunctions _, object json, params string[] path)
+        => throw ClientEval(nameof(JsonPathText));
+
+    /// <summary>
+    /// The value at <paramref name="path"/>, as a document, with the rules of
+    /// <see cref="JsonValue(DbFunctions, object, string)"/> and the path forms of
+    /// <see cref="JsonPathText(DbFunctions, object, string[])"/>: <c>jsonb_extract_path</c> for constant
+    /// elements, and <c>jsonb_path_get</c> (the <c>#&gt;</c> operator) for a path held in a variable.
+    /// </summary>
+    public static JsonElement? JsonPath(this DbFunctions _, object json, params string[] path)
+        => throw ClientEval(nameof(JsonPath));
 
     private static InvalidOperationException ClientEval(string name) => new(
         $"EF.Functions.{name} is a CamusDB SQL translation and cannot be evaluated in memory; " +

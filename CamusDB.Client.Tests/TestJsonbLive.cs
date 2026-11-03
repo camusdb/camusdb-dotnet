@@ -280,6 +280,242 @@ public class TestJsonbLive : BaseTest
         }
     }
 
+    // ─── EF Core: reading a value out of a document ───────────────────────────
+
+    private static DbContextOptions<ExtractContext> ExtractOptions(string protocol) => new DbContextOptionsBuilder<ExtractContext>()
+        .UseCamusDB(protocol == "grpc"
+            ? "Endpoint=http://localhost:5096;Database=test;Protocol=grpc"
+            : "Endpoint=http://localhost:5095;Database=test").Options;
+
+    /// <summary>Creates the table and its GIN index, and writes four rows under a new tag.</summary>
+    private static async Task<string> SeedExtractRowsAsync(DbContextOptions<ExtractContext> options)
+    {
+        await using (ExtractContext ctx = new(options))
+        {
+            await ctx.Database.EnsureCreatedAsync();
+            await ctx.Database.ExecuteSqlRawAsync("CREATE INDEX IF NOT EXISTS ef_jsonb_extract_gin ON ef_jsonb_extract USING GIN (Doc)");
+        }
+
+        string tag = Guid.NewGuid().ToString("n");
+
+        await using (ExtractContext ctx = new(options))
+        {
+            ctx.Rows.Add(Row(tag, "a", """{"kind": "login", "n": 1.50, "s": "x", "b": true, "o": {"z": [1]}, "nul": null, "rank": 2, "r": {"reason": "new", "policy": "p1"}, "arr": [10, 20]}"""));
+            ctx.Rows.Add(Row(tag, "b", """{"kind": "logout", "rank": 10, "r": {"reason": "new", "policy": "p2"}}"""));
+            ctx.Rows.Add(Row(tag, "c", """{"kind": "login", "rank": 1, "r": {"reason": "top", "policy": "p1"}}"""));
+            ctx.Rows.Add(Row(tag, "d", """[1, 2]"""));
+            await ctx.SaveChangesAsync();
+        }
+
+        return tag;
+    }
+
+    private static ExtractRow Row(string tag, string name, string json) => new()
+    {
+        Id = CamusObjectIdGenerator.GenerateAsString(),
+        Tag = tag,
+        Name = name,
+        Doc = JsonDocument.Parse(json),
+    };
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("grpc")]
+    public async Task EntityFrameworkFiltersOnAMember(string protocol)
+    {
+        DbContextOptions<ExtractContext> options = ExtractOptions(protocol);
+        string tag = await SeedExtractRowsAsync(options);
+
+        await using ExtractContext ctx = new(options);
+
+        List<string> constant = await ctx.Rows
+            .Where(e => e.Tag == tag && EF.Functions.JsonValueText(e.Doc, "kind") == "login")
+            .OrderBy(e => e.Name).Select(e => e.Name).ToListAsync();
+
+        string key = "kind";
+        string value = "logout";
+
+        List<string> captured = await ctx.Rows
+            .Where(e => e.Tag == tag && EF.Functions.JsonValueText(e.Doc, key) == value)
+            .Select(e => e.Name).ToListAsync();
+
+        Assert.Equal(["a", "c"], constant);
+        Assert.Equal(["b"], captured);
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("grpc")]
+    public async Task EntityFrameworkReadsMembersWithTheDocumentedNullRules(string protocol)
+    {
+        DbContextOptions<ExtractContext> options = ExtractOptions(protocol);
+        string tag = await SeedExtractRowsAsync(options);
+
+        await using ExtractContext ctx = new(options);
+
+        var a = await ctx.Rows.Where(e => e.Tag == tag && e.Name == "a").Select(e => new
+        {
+            Missing = EF.Functions.JsonValueText(e.Doc, "zz"),
+            JsonNull = EF.Functions.JsonValueText(e.Doc, "nul"),
+            String = EF.Functions.JsonValueText(e.Doc, "s"),
+            Number = EF.Functions.JsonValueText(e.Doc, "n"),
+            Boolean = EF.Functions.JsonValueText(e.Doc, "b"),
+            Object = EF.Functions.JsonValueText(e.Doc, "o"),
+            Last = EF.Functions.JsonValueText(EF.Functions.JsonValue(e.Doc, "arr")!, -1),
+            First = EF.Functions.JsonPathText(e.Doc, "arr", "0"),
+            Whole = EF.Functions.JsonPathText(e.Doc, "r"),
+            MissingDocument = EF.Functions.JsonValue(e.Doc, "zz"),
+            JsonNullDocument = EF.Functions.JsonValue(e.Doc, "nul"),
+            StringDocument = EF.Functions.JsonValue(e.Doc, "s"),
+            ObjectDocument = EF.Functions.JsonPath(e.Doc, "o"),
+        }).SingleAsync();
+
+        Assert.Null(a.Missing);
+        Assert.Null(a.JsonNull);
+        Assert.Equal("x", a.String);
+        Assert.Equal("1.50", a.Number);
+        Assert.Equal("true", a.Boolean);
+        Assert.Equal("""{"z": [1]}""", a.Object);
+        Assert.Equal("20", a.Last);
+        Assert.Equal("10", a.First);
+        Assert.Equal("""{"policy": "p1", "reason": "new"}""", a.Whole);
+
+        Assert.Null(a.MissingDocument);
+        Assert.Equal(JsonValueKind.Null, a.JsonNullDocument!.Value.ValueKind);
+        Assert.Equal("x", a.StringDocument!.Value.GetString());
+        Assert.Equal(1, a.ObjectDocument!.Value.GetProperty("z")[0].GetInt32());
+
+        // A key applied to an array is SQL NULL, not an error.
+        string? onArray = await ctx.Rows.Where(e => e.Tag == tag && e.Name == "d")
+            .Select(e => EF.Functions.JsonValueText(e.Doc, "kind")).SingleAsync();
+
+        Assert.Null(onArray);
+
+        // A captured index binds as an int64 parameter.
+        int index = 1;
+        string? second = await ctx.Rows.Where(e => e.Tag == tag && e.Name == "d")
+            .Select(e => EF.Functions.JsonValueText(e.Doc, index)).SingleAsync();
+
+        Assert.Equal("2", second);
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("grpc")]
+    public async Task EntityFrameworkGroupsAndSortsByMembers(string protocol)
+    {
+        DbContextOptions<ExtractContext> options = ExtractOptions(protocol);
+        string tag = await SeedExtractRowsAsync(options);
+
+        await using ExtractContext ctx = new(options);
+
+        var byPolicy = await ctx.Rows
+            .Where(e => e.Tag == tag && EF.Functions.JsonExists(e.Doc, "r"))
+            .GroupBy(e => EF.Functions.JsonPathText(e.Doc, "r", "policy"))
+            .Select(g => new { Policy = g.Key, Count = g.Count() })
+            .ToListAsync();
+
+        Assert.Equal([("p1", 2), ("p2", 1)], byPolicy.Select(g => (g.Policy, g.Count)).OrderBy(g => g.Policy));
+
+        string field = "reason";
+
+        var byPair = await ctx.Rows
+            .Where(e => e.Tag == tag && EF.Functions.JsonExists(e.Doc, "r"))
+            .GroupBy(e => new { Reason = EF.Functions.JsonPathText(e.Doc, "r", field), Policy = EF.Functions.JsonPathText(e.Doc, "r", "policy") })
+            .Select(g => new { g.Key.Reason, g.Key.Policy, Count = g.Count() })
+            .ToListAsync();
+
+        Assert.Equal(
+            [("new", "p1", 1), ("new", "p2", 1), ("top", "p1", 1)],
+            byPair.Select(g => (g.Reason, g.Policy, g.Count)).OrderBy(g => g.Reason).ThenBy(g => g.Policy));
+
+        // As text, "10" sorts before "2". As a number it sorts last.
+        List<string> byRank = await ctx.Rows
+            .Where(e => e.Tag == tag && EF.Functions.JsonExists(e.Doc, "rank"))
+            .OrderBy(e => (long?)Convert.ToInt64(EF.Functions.JsonValueText(e.Doc, "rank")))
+            .Select(e => e.Name).ToListAsync();
+
+        Assert.Equal(["c", "a", "b"], byRank);
+
+        long?[] ranks = (await ctx.Rows
+            .Where(e => e.Tag == tag && e.Name != "d")
+            .Select(e => (long?)Convert.ToInt64(EF.Functions.JsonValueText(e.Doc, "rank")))
+            .ToListAsync()).Order().ToArray();
+
+        Assert.Equal([1L, 2L, 10L], ranks);
+    }
+
+    [Fact]
+    public async Task OnlySingleKeyEqualityUsesTheGinIndex()
+    {
+        DbContextOptions<ExtractContext> options = ExtractOptions("");
+        await SeedExtractRowsAsync(options);
+
+        await using ExtractContext ctx = new(options);
+
+        string member = ctx.Rows.Where(e => EF.Functions.JsonValueText(e.Doc, "kind") == "login").Select(e => e.Name).ToQueryString();
+        string path = ctx.Rows.Where(e => EF.Functions.JsonPathText(e.Doc, "r", "policy") == "p1").Select(e => e.Name).ToQueryString();
+
+        await using CamusConnection connection = await OpenAsync("");
+
+        Assert.Contains("gin-scan", await PlanAsync(connection, member));
+        Assert.DoesNotContain("gin-scan", await PlanAsync(connection, path));
+
+        // The parameter form EF writes for captured variables is served too.
+        Assert.Contains("gin-scan", await PlanAsync(connection,
+            "SELECT Name FROM ef_jsonb_extract WHERE jsonb_object_field_text(Doc, @key) = @value",
+            ("@key", ColumnType.String, "kind"), ("@value", ColumnType.String, "login")));
+    }
+
+    private static async Task<string> PlanAsync(CamusConnection connection, string sql, params (string Name, ColumnType Type, object Value)[] parameters)
+    {
+        StringBuilder plan = new();
+
+        await using CamusCommand explain = connection.CreateCamusCommand("EXPLAIN " + sql);
+
+        foreach ((string name, ColumnType type, object value) in parameters)
+            explain.Parameters.Add(name, type, value);
+
+        await using CamusDataReader reader = await explain.ExecuteReaderAsync();
+
+        while (await reader.ReadAsync())
+        {
+            for (int i = 0; i < reader.FieldCount; i++)
+                if (!reader.IsDBNull(i))
+                    plan.AppendLine(reader.GetValue(i).ToString());
+        }
+
+        return plan.ToString();
+    }
+
+    public class ExtractRow
+    {
+        public string Id { get; set; } = "";
+
+        public string Tag { get; set; } = "";
+
+        public string Name { get; set; } = "";
+
+        public JsonDocument Doc { get; set; } = null!;
+    }
+
+    private class ExtractContext(DbContextOptions options) : DbContext(options)
+    {
+        public DbSet<ExtractRow> Rows => Set<ExtractRow>();
+
+        protected override void OnModelCreating(ModelBuilder modelBuilder)
+        {
+            modelBuilder.Entity<ExtractRow>(b =>
+            {
+                b.ToTable("ef_jsonb_extract");
+                b.HasKey(e => e.Id);
+                b.Property(e => e.Id).HasColumnType("id").ValueGeneratedOnAdd();
+                b.Property(e => e.Tag).HasMaxLength(32);
+                b.HasIndex(e => e.Doc).HasMethod("gin");
+            });
+        }
+    }
+
     public class EventRow
     {
         public string Id { get; set; } = "";

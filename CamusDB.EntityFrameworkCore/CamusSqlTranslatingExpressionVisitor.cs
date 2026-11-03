@@ -66,9 +66,49 @@ public class CamusSqlTranslatingExpressionVisitor : RelationalSqlTranslatingExpr
             : base.VisitBinary(binaryExpression);
 
     protected override Expression VisitMethodCall(MethodCallExpression methodCallExpression)
-        => TryTranslateFormat(methodCallExpression, out SqlExpression? translated)
-            ? translated
-            : base.VisitMethodCall(methodCallExpression);
+    {
+        if (TryTranslateFormat(methodCallExpression, out SqlExpression? translated))
+            return translated;
+
+        if (TryTranslateJsonPath(methodCallExpression, out translated))
+            return translated;
+
+        return base.VisitMethodCall(methodCallExpression);
+    }
+
+    /// <summary>
+    /// Translates <c>EF.Functions.JsonPathText</c> and <c>JsonPath</c> when the path is written in place and
+    /// holds a variable, such as <c>JsonPathText(e.Doc, "a", key)</c>. EF Core turns a path of constants
+    /// into one constant array and a path variable into one parameter, and the method translator handles
+    /// both; a mixed path stays an array expression, which the relational base cannot translate. Each
+    /// element here becomes one argument of <c>jsonb_extract_path[_text]</c>.
+    /// </summary>
+    private bool TryTranslateJsonPath(MethodCallExpression call, out SqlExpression translated)
+    {
+        translated = null!;
+
+        if (call.Method.DeclaringType != typeof(CamusDbFunctionsExtensions)
+            || call.Method.Name is not (nameof(CamusDbFunctionsExtensions.JsonPathText) or nameof(CamusDbFunctionsExtensions.JsonPath))
+            || call.Arguments[2] is not NewArrayExpression { NodeType: ExpressionType.NewArrayInit } path)
+            return false;
+
+        if (Visit(call.Arguments[1]) is not SqlExpression document)
+            return false;
+
+        List<SqlExpression> keys = new(path.Expressions.Count);
+
+        foreach (Expression key in path.Expressions)
+        {
+            if (Visit(key) is not SqlExpression sqlKey)
+                return false;
+
+            keys.Add(sqlKey);
+        }
+
+        CamusJsonMethodTranslator json = new(Dependencies.SqlExpressionFactory, Dependencies.TypeMappingSource);
+        translated = json.ExtractPath(document, keys, text: call.Method.Name == nameof(CamusDbFunctionsExtensions.JsonPathText));
+        return true;
+    }
 
     /// <summary>
     /// Translates <c>string.Format(format, args)</c> to the concatenation of the literal parts of
