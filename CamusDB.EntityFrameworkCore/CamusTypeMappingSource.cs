@@ -72,8 +72,26 @@ public sealed class CamusTypeMappingSource : RelationalTypeMappingSource
         }
     }
 
+    /// <summary>
+    /// Prints a bool constant as <c>TRUE</c> or <c>FALSE</c>. The default mapping prints <c>1</c> and
+    /// <c>0</c>, which are Integer64 to the server: EF reduces an empty <c>local.Contains(column)</c> to
+    /// a constant false, and <c>WHERE 0</c> is refused because a condition must be a bool.
+    /// </summary>
+    private sealed class CamusBoolTypeMapping : BoolTypeMapping
+    {
+        public CamusBoolTypeMapping() : base("bool") { }
+
+        private CamusBoolTypeMapping(RelationalTypeMappingParameters parameters) : base(parameters) { }
+
+        protected override RelationalTypeMapping Clone(RelationalTypeMappingParameters parameters)
+            => new CamusBoolTypeMapping(parameters);
+
+        protected override string GenerateNonNullSqlLiteral(object value)
+            => (bool)value ? "TRUE" : "FALSE";
+    }
+
     private static readonly StringTypeMapping StringMapping = new("string", DbType.String);
-    private static readonly BoolTypeMapping BoolMapping = new("bool");
+    private static readonly BoolTypeMapping BoolMapping = new CamusBoolTypeMapping();
     private static readonly ShortTypeMapping Int16Mapping = new("int64");
     private static readonly IntTypeMapping Int32Mapping = new("int64");
     private static readonly LongTypeMapping Int64Mapping = new("int64");
