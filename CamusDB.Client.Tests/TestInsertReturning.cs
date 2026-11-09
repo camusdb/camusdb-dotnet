@@ -25,6 +25,8 @@ public class TestInsertReturning
     [InlineData("INSERT INTO t (a) VALUES ('it''s') RETURNING a")]
     [InlineData("INSERT INTO t (a) VALUES ('a\\'b') RETURNING a")]
     [InlineData("INSERT INTO t SELECT * FROM s /* comment */ RETURNING id")]
+    [InlineData("INSERT INTO t (a) VALUES ($$ it's $$) RETURNING a")]
+    [InlineData("INSERT INTO t (a) VALUES ($a$ $$ $a$) RETURNING a")]
     public void KeywordIsFound(string sql)
         => Assert.True(CamusSqlSyntax.HasReturningKeyword(sql));
 
@@ -39,6 +41,9 @@ public class TestInsertReturning
     [InlineData("INSERT INTO returning_log (a) VALUES (1)")]
     [InlineData("INSERT INTO t (a) VALUES (\"RETURNING\")")]
     [InlineData("INSERT INTO t (a) VALUES ('unterminated RETURNING")]
+    [InlineData("INSERT INTO t (a) VALUES ($$ RETURNING $$)")]
+    [InlineData("INSERT INTO t (a) VALUES ($q$ it's $$ RETURNING $q$)")]
+    [InlineData("INSERT INTO t (a) VALUES ($$ unterminated RETURNING")]
     public void KeywordIsNotFound(string sql)
         => Assert.False(CamusSqlSyntax.HasReturningKeyword(sql));
 

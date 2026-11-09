@@ -16,8 +16,9 @@ namespace CamusDB.Client;
 /// <c>TraceQueryText=Sanitized</c>.
 /// </summary>
 /// <remarks>
-/// This is a scan of tokens, not a parse. It knows string, number and bytes literals, backtick
-/// identifiers, <c>@</c> parameters and comments, and it takes a table from the name that follows
+/// This is a scan of tokens, not a parse. It knows string, number and bytes literals, dollar-quoted
+/// text (<c>$$ … $$</c>, a literal), backtick identifiers, <c>@</c> parameters and comments, and it
+/// takes a table from the name that follows
 /// <c>FROM</c>, <c>JOIN</c>, <c>INTO</c>, <c>UPDATE</c> or <c>TABLE</c>. A comma join names only its
 /// first table, and a common table expression is named as a table. Literal values never reach a
 /// summary, because a table name is never a literal.
@@ -232,6 +233,12 @@ internal static partial class CamusQueryText
                 index = SkipQuoted(sql, index + 1, '\'', backslashEscapes: false);
                 tokens.Add(new Token(TokenKind.Literal, start, index - start, string.Empty));
             }
+            else if (current == '$' && CamusSqlSyntax.DollarQuoteLength(sql, index) > 0)
+            {
+                // The C# body of CREATE FUNCTION: one literal, so its words name no table.
+                index = CamusSqlSyntax.SkipDollarQuoted(sql, index);
+                tokens.Add(new Token(TokenKind.Literal, start, index - start, string.Empty));
+            }
             else if (current == '`')
             {
                 index = SkipQuoted(sql, index, '`', backslashEscapes: false);
@@ -246,7 +253,8 @@ internal static partial class CamusQueryText
             else if (IsWordStart(current) || (current == '@' && IsWordStart(next)))
             {
                 index++;
-                while (index < sql.Length && IsWordPart(sql[index]))
+                while (index < sql.Length && IsWordPart(sql[index])
+                       && !(sql[index] == '$' && CamusSqlSyntax.DollarQuoteLength(sql, index) > 0))
                     index++;
 
                 TokenKind kind = current == '@' ? TokenKind.Parameter : TokenKind.Word;

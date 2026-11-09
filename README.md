@@ -51,7 +51,7 @@ The links are absolute because NuGet shows this file as the package page.
 | [Reading data](https://github.com/camusdb/camusdb-dotnet/blob/main/docs/client/reading-data.md) | SELECT, streaming results, query result cache |
 | [Transactions](https://github.com/camusdb/camusdb-dotnet/blob/main/docs/client/transactions.md) | Transactions, isolation, locking, retries |
 | [Prepared statements](https://github.com/camusdb/camusdb-dotnet/blob/main/docs/client/prepared-statements.md) | Automatic and explicit statement preparation |
-| [C# extensions](https://github.com/camusdb/camusdb-dotnet/blob/main/docs/client/csharp-extensions.md) | Stored procedures, triggers and functions written in C# |
+| [C# extensions](https://github.com/camusdb/camusdb-dotnet/blob/main/docs/client/csharp-extensions.md) | Stored procedures, triggers, extension functions and inline functions written in C# |
 | [Backups](https://github.com/camusdb/camusdb-dotnet/blob/main/docs/client/backups.md) | Online backups and point-in-time recovery |
 | [Node stats](https://github.com/camusdb/camusdb-dotnet/blob/main/docs/client/node-stats.md) | Disk, CPU and memory of a node |
 | [Provider factory](https://github.com/camusdb/camusdb-dotnet/blob/main/docs/client/provider-factory.md) | `DbProviderFactory` and `DbDataSource` |

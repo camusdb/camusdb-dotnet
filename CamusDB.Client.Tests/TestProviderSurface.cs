@@ -270,6 +270,13 @@ public class TestProviderSurface
     [InlineData("CREATE UNIQUE INDEX idx ON robots (name)")]
     [InlineData("CREATE TRIGGER audit ON robots AFTER INSERT, UPDATE EXTERNAL NAME 'MyCompany.Ext.AuditTrigger'")]
     [InlineData("DROP TRIGGER audit ON robots")]
+    [InlineData("CREATE EXTENSION geo VERSION '1.2.0'")]
+    [InlineData("ALTER EXTENSION geo UPDATE")]
+    [InlineData("DROP EXTENSION geo")]
+    [InlineData("CREATE FUNCTION slugify(s STRING) RETURNS STRING LANGUAGE csharp AS $$\n    return s.Trim().Replace(' ', '-');\n$$")]
+    [InlineData("CREATE OR REPLACE FUNCTION twice(n INT64) RETURNS INT64 LANGUAGE csharp AS $fn$ return n * 2; $fn$")]
+    [InlineData("DROP FUNCTION IF EXISTS slugify")]
+    [InlineData("ALTER FUNCTION slugify OWNER TO alice")]
     [InlineData("  create table robots (id OID PRIMARY KEY NOT NULL)")]  // leading whitespace + lowercase
     public async Task TestExecuteNonQueryRoutesDdlToExecuteSqlDdl(string sql)
     {

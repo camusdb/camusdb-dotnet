@@ -4,7 +4,7 @@ Calling server-side C# extensions from EF Core, and what the provider does not s
 
 ## Extension functions
 
-Map a C# function that the server loads ([C# extensions](../client/csharp-extensions.md)) with `HasDbFunction`:
+Map a C# function that the server loads ([C# extensions](../client/csharp-extensions.md)), or an [inline function](../client/csharp-extensions.md#inline-functions), with `HasDbFunction`:
 
 ```csharp
 public class AppDbContext : DbContext
@@ -23,7 +23,7 @@ List<Post> posts = await ctx.Posts.Where(p => AppDbContext.Slugify(p.Title) == "
 
 The server has no schemas, so the name is written bare. It must be a plain identifier (a letter or `_`, then letters, digits or `_`), or translation throws `InvalidOperationException`.
 
-Run a procedure with `ctx.Database.ExecuteSqlAsync($"CALL transfer({from}, {to}, {amount})")`. Create a trigger with `migrationBuilder.Sql("CREATE TRIGGER ...")` (no model API).
+Run a procedure with `ctx.Database.ExecuteSqlAsync($"CALL transfer({from}, {to}, {amount})")`. Create a trigger or an inline function with `migrationBuilder.Sql("CREATE TRIGGER ...")` or `migrationBuilder.Sql("CREATE FUNCTION ... AS $$ ... $$")` (no model API). The migration sends the text as one command, so the `;` characters in a body are safe.
 
 ## Provider Limitations
 

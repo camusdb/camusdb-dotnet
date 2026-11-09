@@ -123,7 +123,7 @@ internal static class CamusSqlSyntax
     /// <para><c>RETURNING</c> is a reserved word on the server, so a token match is the clause itself.
     /// A column or a table called <c>returning</c> must be written with backticks, which this skips.
     /// The scan follows the lexer rules described above: a backslash and the character after it are one
-    /// unit, and a doubled quote stays inside the literal.</para>
+    /// unit, and a doubled quote stays inside the literal. Dollar-quoted text is skipped whole.</para>
     /// </summary>
     internal static bool HasReturningKeyword(string sql)
     {
@@ -138,6 +138,12 @@ internal static class CamusSqlSyntax
             if (c is '\'' or '"' or '`')
             {
                 i = SkipDelimited(text, i, c);
+                continue;
+            }
+
+            if (c == '$' && DollarQuoteLength(text, i) > 0)
+            {
+                i = SkipDollarQuoted(text, i);
                 continue;
             }
 
@@ -158,7 +164,7 @@ internal static class CamusSqlSyntax
             if (IsWordChar(c))
             {
                 int start = i;
-                while (i < text.Length && IsWordChar(text[i]))
+                while (i < text.Length && IsWordChar(text[i]) && !(text[i] == '$' && DollarQuoteLength(text, i) > 0))
                     i++;
 
                 if (text[start..i].Equals(Keyword.AsSpan(), StringComparison.OrdinalIgnoreCase))
@@ -203,6 +209,43 @@ internal static class CamusSqlSyntax
 
             return text.Length;
         }
+    }
+
+    /// <summary>
+    /// The length of the dollar quote that opens at <paramref name="start"/>: <c>$$</c>, or <c>$</c>, a
+    /// tag and <c>$</c>, as in <c>$fn$</c>. Zero when the character there opens no quote.
+    ///
+    /// <para>The rule is the server lexer's: a tag is a letter or <c>_</c>, then letters, digits or
+    /// <c>_</c>, all ASCII. A dollar quote holds the body of <c>CREATE FUNCTION … LANGUAGE csharp</c>.</para>
+    /// </summary>
+    internal static int DollarQuoteLength(ReadOnlySpan<char> text, int start)
+    {
+        if (start >= text.Length || text[start] != '$')
+            return 0;
+
+        int i = start + 1;
+        if (i < text.Length && (char.IsAsciiLetter(text[i]) || text[i] == '_'))
+        {
+            while (i < text.Length && (char.IsAsciiLetterOrDigit(text[i]) || text[i] == '_'))
+                i++;
+        }
+
+        return i < text.Length && text[i] == '$' ? i + 1 - start : 0;
+    }
+
+    /// <summary>
+    /// The index after the dollar-quoted text that opens at <paramref name="start"/>. The text between
+    /// two equal quotes is raw: quotes, semicolons and comments in it are text, with no escape. With no
+    /// closing quote the rest of the text is in it, as the server's script splitter reads it. The caller
+    /// checks first that a quote opens there (<see cref="DollarQuoteLength"/>).
+    /// </summary>
+    internal static int SkipDollarQuoted(ReadOnlySpan<char> text, int start)
+    {
+        int length = DollarQuoteLength(text, start);
+        ReadOnlySpan<char> quote = text.Slice(start, length);
+        int bodyStart = start + length;
+        int close = text[bodyStart..].IndexOf(quote, StringComparison.Ordinal);
+        return close < 0 ? text.Length : bodyStart + close + length;
     }
 
     /// <summary>

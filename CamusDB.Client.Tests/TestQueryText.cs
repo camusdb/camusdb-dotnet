@@ -40,6 +40,9 @@ public sealed class TestQueryText
     [InlineData("SELECT 'FROM fake' FROM robots", "robots")]
     [InlineData("SELECT 1", "")]
     [InlineData("BEGIN", "")]
+    [InlineData("CREATE FUNCTION f(s STRING) RETURNS STRING LANGUAGE csharp AS $$\n    // read from cache\n    return string.Join(\",\", s);\n$$", "")]
+    [InlineData("CREATE FUNCTION f(c STRING) RETURNS BOOL LANGUAGE csharp AS $$ return c == \"'\"; $$; SELECT * FROM robots", "robots")]
+    [InlineData("SELECT f(name) FROM robots WHERE g($x$ from fake $$ $x$)", "robots")]
     public void Tables_NamesEachTableOnceInOrder(string sql, string expected)
     {
         string[] tables = expected.Length == 0 ? [] : expected.Split(',');
@@ -71,7 +74,7 @@ public sealed class TestQueryText
     public void AnyText_IsReadWithoutAnException()
     {
         // The scan runs inside every sampled command, so it must accept any text, finished or not.
-        const string alphabet = "SELECT FROM JOIN INTO UPDATE TABLE IF NOT EXISTS TRUNCATE EXTRACT(`'\"\\-/*@.,;()0123456789xXeE \n";
+        const string alphabet = "SELECT FROM JOIN INTO UPDATE TABLE IF NOT EXISTS TRUNCATE EXTRACT(`'\"\\-/*@.,;()$0123456789xXeE \n";
         Random random = new(20261026);
         for (int sample = 0; sample < 20_000; sample++)
         {
@@ -100,6 +103,12 @@ public sealed class TestQueryText
     [InlineData("SELECT /* user 7 */ id FROM t", "SELECT   id FROM t")]
     [InlineData("SELECT * FROM t WHERE b = TRUE AND c IS NULL", "SELECT * FROM t WHERE b = TRUE AND c IS NULL")]
     [InlineData("SELECT * FROM t WHERE s = 'unterminated", "SELECT * FROM t WHERE s = ?")]
+    [InlineData(
+        "CREATE FUNCTION f(s STRING) RETURNS STRING LANGUAGE csharp AS $$\n    return s.Replace('\\'', '-') + \"secret\";\n$$",
+        "CREATE FUNCTION f(s STRING) RETURNS STRING LANGUAGE csharp AS ?")]
+    [InlineData("CREATE FUNCTION f() RETURNS STRING LANGUAGE csharp AS$fn$ return \"$$\"; $fn$", "CREATE FUNCTION f() RETURNS STRING LANGUAGE csharp AS?")]
+    [InlineData("SELECT $$ unterminated 'x", "SELECT ?")]
+    [InlineData("SELECT price$ FROM t WHERE a = $1", "SELECT price$ FROM t WHERE a = $?")]
     public void Sanitize_ReplacesEachLiteralValue(string sql, string expected)
     {
         Assert.Equal(expected, CamusQueryText.Sanitize(sql));
