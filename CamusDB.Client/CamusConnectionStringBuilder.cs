@@ -248,9 +248,12 @@ public class CamusConnectionStringBuilder
     ///
     /// <para><c>ChannelPoolSize</c> is the CamusDB analogue of Spanner's <c>NumChannels</c>: how many
     /// long-lived <c>BatchExecute</c> streams exist per endpoint. It is <i>not</i> a cap on in-flight
-    /// transactions — many transactions hash onto the same streams and interleave — so the default of 2 is
-    /// right for most workloads. Raise it when many long-running streaming queries per endpoint would
-    /// otherwise queue behind each other on a shared stream.</para>
+    /// transactions — many transactions hash onto the same streams and interleave. It does cap how many
+    /// statements this process has running on a node, because the server admits at most
+    /// <c>grpc_batch_max_in_flight</c> (default 64) operations per stream; every <c>CamusConnection</c> on
+    /// the same deployment and identity shares these streams. The default of 8 serves a few hundred
+    /// concurrent callers. Raise it when more callers than that share one process, or when many
+    /// long-running streaming queries per endpoint would otherwise queue behind each other.</para>
     ///
     /// <para>Out-of-range values (a pool below 1, a threshold below 1, a negative delay) fall back to the
     /// default rather than throwing, matching how the other keys treat unparseable input.</para>

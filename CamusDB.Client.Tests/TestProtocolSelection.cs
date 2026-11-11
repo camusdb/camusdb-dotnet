@@ -83,7 +83,7 @@ public class TestProtocolSelection
         CamusConnectionStringBuilder otherEndpoint = new("Endpoint=http://localhost:5296;Database=db");
         CamusConnectionStringBuilder otherProtocol = new("Endpoint=http://localhost:5295;Database=db;Protocol=grpc");
         CamusConnectionStringBuilder otherUser = new("Endpoint=http://localhost:5295;Database=db;User=someone;Password=x");
-        CamusConnectionStringBuilder otherPoolSize = new("Endpoint=http://localhost:5295;Database=db;ChannelPoolSize=8");
+        CamusConnectionStringBuilder otherPoolSize = new("Endpoint=http://localhost:5295;Database=db;ChannelPoolSize=4");
 
         ICamusTransport transport = rest.GetTransport();
 

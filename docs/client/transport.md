@@ -33,7 +33,11 @@ Over gRPC, queries, non-queries and transactions share a small pool of long-live
 - A transaction's `BEGIN`, statements and `COMMIT` stay on one stream, so the server keeps their order.
 - DDL and ping use single-request calls.
 
-`ChannelPoolSize` (default `2`) sets the number of streams per endpoint. It does not limit concurrent transactions. Raise it when many long-running streaming queries to one endpoint queue behind each other.
+`ChannelPoolSize` (default `8`) sets the number of streams per endpoint. It does not limit concurrent transactions.
+
+The stream count limits how many statements one process runs on a node at the same time. The server runs at most `grpc_batch_max_in_flight` (default `64`) operations per stream, and other operations wait for a slot. All `CamusConnection` objects with the same endpoints, credentials and stream settings share one set of streams. Thus 128 connections with the default settings have at most 512 statements that run at the same time on one node, not 128 × 64.
+
+Raise `ChannelPoolSize` when more than a few hundred callers in one process send statements at the same time. Also raise it when many long-running streaming queries to one endpoint wait for each other. In a test with 256 workers on a 3-node cluster, 2 streams made each statement wait about 1 ms for a slot. With 8 streams, the read p50 went from 2.9 ms to 1.7 ms. With 32 streams, the result was the same as with 8.
 
 `CoalescingThreshold` (default `10`) and `CoalescingDelay` (default `0`, off) trade latency for larger messages when a burst of operations arrives on one connection. The delay never applies to a lone operation, because a caller that waits for each reply would pay it on every round trip.
 

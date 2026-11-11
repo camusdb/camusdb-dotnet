@@ -106,19 +106,26 @@ internal sealed class PipelineUnsupportedException(string reason)
 }
 
 /// <summary>
-/// Tunables for the batcher. Defaults mirror the server's <c>CamusDB.Grpc.Client</c> (itself modeled on
+/// Tunables for the batcher, modeled on the server's <c>CamusDB.Grpc.Client</c> (itself modeled on
 /// Kahuna). <see cref="ChannelPoolSize"/> bounds how many long-lived <c>BatchExecute</c> streams exist
 /// per endpoint — not how many transactions can be in flight (many transactions hash onto the same
-/// streams and interleave), so a small pool is normal. Coalescing trades a tiny latency delay for fewer,
-/// larger writes when a burst of ops arrives together.
+/// streams and interleave). It does bound how many statements run on the node at once, because the
+/// server admits at most <c>grpc_batch_max_in_flight</c> operations per stream. Coalescing trades a tiny
+/// latency delay for fewer, larger writes when a burst of ops arrives together.
 /// </summary>
 internal sealed class GrpcBatchOptions
 {
     /// <summary>The defaults, as the source of the fallbacks used when a connection string omits a knob.</summary>
     public static GrpcBatchOptions Default { get; } = new();
 
-    /// <summary>Number of long-lived <c>BatchExecute</c> streams multiplexed per endpoint.</summary>
-    public int ChannelPoolSize { get; init; } = 2;
+    /// <summary>Number of long-lived <c>BatchExecute</c> streams multiplexed per endpoint. Default 8.
+    /// The server runs at most <c>grpc_batch_max_in_flight</c> (default 64) operations per stream at once,
+    /// so the stream count — not the number of <c>CamusConnection</c> objects, which all share these
+    /// streams — caps what one process has running on a node. Measured on a 3-node cluster with 256
+    /// closed-loop workers (half point reads, half two-row transfers): the former default of 2 made every
+    /// statement wait about 1 ms for an execution slot on the server, and read p50 was 2.9 ms; 8 streams
+    /// gave read p50 1.7 ms and 3.8% more throughput; 32 streams gave no more than 8.</summary>
+    public int ChannelPoolSize { get; init; } = 8;
 
     /// <summary>When a pump drain produces at least two but fewer than this many ops, wait
     /// <see cref="CoalescingDelayMs"/> to let more accumulate before the next drain. A threshold of 1 (or a

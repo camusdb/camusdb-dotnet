@@ -38,7 +38,7 @@ await connection.OpenAsync();
 | `TokenLifetime` | `600` | Seconds to reuse a token when the server reports no expiry. Renewed at 80%. |
 | `MaxAutoPrepare` | `128` | Statements to keep prepared; `0` disables. See [Prepared statements](prepared-statements.md). |
 | `AutoPrepareMinUsages` | `2` | Runs of the same SQL before it is prepared. |
-| `ChannelPoolSize` | `2` | gRPC only: `BatchExecute` streams per endpoint. See [Stream pool](transport.md#stream-pool). |
+| `ChannelPoolSize` | `8` | gRPC only: `BatchExecute` streams per endpoint. The stream count, not the number of connections, limits the statements that run at once. See [Stream pool](transport.md#stream-pool). |
 | `CoalescingThreshold` | `10` | gRPC only: `1` disables coalescing. See [Stream pool](transport.md#stream-pool). |
 | `CoalescingDelay` | `0` | gRPC only: coalescing wait in ms; `0` is off. |
 | `RequestFrames` | `true` | gRPC only: send waiting operations as one message. Also gates [pipelined transactions](transactions.md#pipelined-transactions). See [Stream frames](transport.md#stream-frames). |
