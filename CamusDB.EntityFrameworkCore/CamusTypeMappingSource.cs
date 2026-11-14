@@ -174,6 +174,8 @@ public sealed class CamusTypeMappingSource : RelationalTypeMappingSource
         { typeof(DateTime), DateTimeMapping },
         { typeof(DateTimeOffset), DateTimeOffsetMapping },
         { typeof(Guid), UuidMapping },
+        // An interval is an expression value only; CamusModelValidator refuses it as a table column.
+        { typeof(TimeSpan), CamusIntervalTypeMapping.Instance },
     };
 
     private static readonly Dictionary<string, RelationalTypeMapping> StoreTypeMappings
@@ -193,6 +195,7 @@ public sealed class CamusTypeMappingSource : RelationalTypeMappingSource
         { "oid", IdStringMapping },
         { "uuid", UuidMapping },
         { "guid", UuidMapping },
+        { CamusIntervalTypeMapping.StoreTypeName, CamusIntervalTypeMapping.Instance },
     };
 
     public CamusTypeMappingSource(

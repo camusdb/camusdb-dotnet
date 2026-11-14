@@ -62,6 +62,7 @@ b.ToTable("robots", t => t.HasCheckConstraint("ck_robots_price", "price >= 0"));
 | `byte[]` | `bytes` (alias `blob`) | `BYTES` |
 | `DateOnly` | `date` | `DATE` |
 | `DateTime`, `DateTimeOffset` | `datetime` (alias `timestamp`) | `DATETIME` |
+| `TimeSpan` | `interval` | none: expressions only |
 | `long[]`, `string[]`, `double[]`, `bool[]` | `array(int64/string/float64/bool)` | `ARRAY(T)` |
 | `JsonDocument`, `JsonElement`, `JsonNode`, `JsonObject`, `JsonArray` | `jsonb` (alias `json`) | `JSONB` |
 | `string` + `HasColumnType("jsonb")` | `jsonb` (alias `json`) | `JSONB` |
@@ -71,6 +72,7 @@ A property maps by its CLR type, or by an explicit `HasColumnType(...)`.
 - **`Guid`** maps to `UUID` without `HasColumnType`; it is indexable and ordered by big-endian bytes. Do not give it `HasColumnType("id")`: an `OID` column refuses GUID values.
 - **`decimal`** maps to `NUMERIC` with fixed precision 38 and scale 9; `HasPrecision` changes nothing. A `decimal` constant becomes `NUMERIC '9.99'`, which compares exactly and can use an index. A bare `9.99` is `FLOAT64`.
 - **`DateTime`** is converted to UTC, stored as UTC ticks, and read back as `DateTimeKind.Utc`.
+- **`TimeSpan`** maps to `interval`, which only an expression can have, such as `e.Finished - e.Started` ([Dates and intervals](querying.md#dates-and-intervals)). A `TimeSpan` property on a table throws `NotSupportedException` when the model builds. Store it with `HasConversion<long>()` (ticks) or `HasConversion<string>()`. An entity mapped with `ToView` or `ToSqlQuery` can have a `TimeSpan` property.
 - **`byte[]`** travels as base64 in JSON; SQL literals use `0x` hex.
 
 A migration snapshot from before 0.13.3 maps a plain `Guid` to `id`, and CamusDB cannot change it to `uuid`. Drop and re-add that column (it holds only NULLs).

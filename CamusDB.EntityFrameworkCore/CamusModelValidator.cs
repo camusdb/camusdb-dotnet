@@ -30,6 +30,34 @@ public class CamusModelValidator : RelationalModelValidator
         ValidateColumnStorage(model);
         ValidateSequences(model);
         ValidateVectors(model);
+        ValidateIntervals(model);
+    }
+
+    /// <summary>
+    /// No table column can have the <c>interval</c> type: the server refuses it in <c>CREATE TABLE</c>,
+    /// in <c>ALTER TABLE … ADD COLUMN</c>, and in an INSERT or an UPDATE. A <see cref="TimeSpan"/> property
+    /// with no value converter maps to <c>interval</c>, so it is refused on an entity that maps to a table.
+    /// An entity that maps to a view or to a SQL query can have one, because it creates no column.
+    /// </summary>
+    private static void ValidateIntervals(IModel model)
+    {
+        foreach (var entityType in model.GetEntityTypes())
+        {
+            if (entityType.GetTableName() is null)
+                continue;
+
+            foreach (var property in entityType.GetDeclaredProperties())
+            {
+                if (property.FindRelationalTypeMapping() is not CamusIntervalTypeMapping)
+                    continue;
+
+                throw new NotSupportedException(
+                    $"Property '{entityType.DisplayName()}.{property.Name}' maps to the interval type, and CamusDB " +
+                    "has no interval column: an interval is a value of an expression only. Store the TimeSpan as " +
+                    "int64 ticks with HasConversion<long>(), or as text with HasConversion<string>(). A query can " +
+                    "still compute a TimeSpan, for example e.Finished - e.Started.");
+            }
+        }
     }
 
     private static readonly HashSet<Type> SupportedConcurrencyTokenClrTypes = new()

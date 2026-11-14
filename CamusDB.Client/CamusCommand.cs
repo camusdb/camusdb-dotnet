@@ -483,6 +483,11 @@ public class CamusCommand : DbCommand, ICloneable
             case ColumnType.Array:
                 return BuildArrayColumnValue(name, value, arrayElementType, uuidAsString);
 
+            // An interval has no wire type: it travels as its ISO-8601 text, and the SQL casts it with
+            // CAST(@p AS interval). The .NET TimeSpan text (1.02:03:04) is not an interval to the server.
+            case ColumnType.String when value is TimeSpan or CamusInterval:
+                return new() { Type = ColumnType.String, StrValue = CamusInterval.ToParameterText(value) };
+
             case ColumnType.String:
                 return new() { Type = ColumnType.String, StrValue = Convert.ToString(value, CultureInfo.InvariantCulture) ?? "" };
 
@@ -804,6 +809,11 @@ public class CamusCommand : DbCommand, ICloneable
             throw new CamusException("CADB0400",
                 $"CamusDB has no ARRAY(JSONB), so an array of {type.Name} cannot bind. Bind one JSON array document instead.");
 
+        // An interval cannot be an array element on the server, so an array of TimeSpan infers no type.
+        // An explicit element type of String binds the interval text of each element.
+        if (type == typeof(TimeSpan) || type == typeof(CamusInterval))
+            return ColumnType.Null;
+
         return columnType == ColumnType.Numeric ? ColumnType.Float64 : columnType;
     }
 
@@ -823,6 +833,7 @@ public class CamusCommand : DbCommand, ICloneable
         _ when type == typeof(Guid) => ColumnType.Uuid,
         _ when type == typeof(CamusObjectIdValue) => ColumnType.Id,
         _ when type == typeof(byte[]) => ColumnType.Bytes,
+        _ when type == typeof(TimeSpan) || type == typeof(CamusInterval) => ColumnType.String,
         _ when CamusJsonb.IsDocumentType(type) => ColumnType.Jsonb,
         _ => ColumnType.Null
     };

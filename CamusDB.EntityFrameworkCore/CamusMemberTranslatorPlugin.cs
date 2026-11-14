@@ -11,14 +11,19 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Diagnostics;
 using Microsoft.EntityFrameworkCore.Query;
 using Microsoft.EntityFrameworkCore.Query.SqlExpressions;
+using Microsoft.EntityFrameworkCore.Storage;
 
 namespace CamusDB.EntityFrameworkCore;
 
 public sealed class CamusMemberTranslatorPlugin : IMemberTranslatorPlugin
 {
-    public CamusMemberTranslatorPlugin(ISqlExpressionFactory sqlExpressionFactory)
+    public CamusMemberTranslatorPlugin(ISqlExpressionFactory sqlExpressionFactory, IRelationalTypeMappingSource typeMappingSource)
     {
-        Translators = [new CamusStringMemberTranslator(sqlExpressionFactory)];
+        Translators =
+        [
+            new CamusStringMemberTranslator(sqlExpressionFactory),
+            new CamusDateTimeMemberTranslator(sqlExpressionFactory, typeMappingSource),
+        ];
     }
 
     public IEnumerable<IMemberTranslator> Translators { get; }

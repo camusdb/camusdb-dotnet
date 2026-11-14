@@ -289,7 +289,8 @@ public class TestParameterBinding
     [Fact]
     public void UntypedValueWithNoColumnTypeIsRefused()
     {
-        CamusException ex = Assert.Throws<CamusException>(() => BuildUntyped(TimeSpan.FromSeconds(1)));
+        // A TimeSpan binds as interval text, so this uses a type that has no CamusDB type.
+        CamusException ex = Assert.Throws<CamusException>(() => BuildUntyped(new Version(1, 2)));
 
         Assert.Contains("'@a'", ex.Message);
     }

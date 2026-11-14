@@ -26,14 +26,31 @@ public class CamusQuerySqlGenerator : QuerySqlGenerator
             Visit(selectExpression.Limit);
         }
 
+        // An OFFSET with no LIMIT stands alone, as in PostgreSQL. The server refuses a negative LIMIT
+        // (CADB0400), so the SQLite form LIMIT -1 OFFSET n is not available.
         if (selectExpression.Offset != null)
         {
             if (selectExpression.Limit == null)
-                Sql.AppendLine().Append("LIMIT -1");
+                Sql.AppendLine().Append("OFFSET ");
+            else
+                Sql.Append(" OFFSET ");
 
-            Sql.Append(" OFFSET ");
             Visit(selectExpression.Offset);
         }
+    }
+
+    // The server does not read a string parameter as an interval by itself, so an interval parameter is
+    // cast. Its value is the ISO-8601 text that the command binds for a TimeSpan.
+    protected override Expression VisitSqlParameter(SqlParameterExpression sqlParameterExpression)
+    {
+        if (sqlParameterExpression.TypeMapping is not CamusIntervalTypeMapping)
+            return base.VisitSqlParameter(sqlParameterExpression);
+
+        Sql.Append("CAST(");
+        base.VisitSqlParameter(sqlParameterExpression);
+        Sql.Append(" AS ").Append(CamusIntervalTypeMapping.StoreTypeName).Append(")");
+
+        return sqlParameterExpression;
     }
 
     protected override Expression VisitColumn(ColumnExpression columnExpression)

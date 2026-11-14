@@ -23,7 +23,10 @@ public static class CamusDapper
 
     /// <summary>
     /// Registers the handlers that change no existing Dapper behavior: <see cref="CamusObjectIdTypeHandler"/>
-    /// for <see cref="CamusDB.Core.Util.ObjectIds.CamusObjectIdValue"/>, and <see cref="CamusJsonbTypeHandler{T}"/>
+    /// for <see cref="CamusDB.Core.Util.ObjectIds.CamusObjectIdValue"/>, <see cref="CamusIntervalTypeHandler"/> for
+    /// <see cref="CamusInterval"/>, <see cref="CamusTimeSpanTypeHandler"/> for <see cref="TimeSpan"/> (Dapper
+    /// binds a <see cref="TimeSpan"/> the same way without it, and cannot read one from interval text), and
+    /// <see cref="CamusJsonbTypeHandler{T}"/>
     /// for the <c>System.Text.Json</c> document types, which Dapper cannot bind without a handler. Calling it
     /// more than once has no effect.
     /// </summary>
@@ -33,6 +36,8 @@ public static class CamusDapper
             return;
 
         SqlMapper.AddTypeHandler(new CamusObjectIdTypeHandler());
+        SqlMapper.AddTypeHandler(new CamusIntervalTypeHandler());
+        SqlMapper.AddTypeHandler(new CamusTimeSpanTypeHandler());
         SqlMapper.AddTypeHandler(new CamusJsonbTypeHandler<System.Text.Json.JsonDocument>());
         SqlMapper.AddTypeHandler(new CamusJsonbTypeHandler<System.Text.Json.JsonElement>());
         SqlMapper.AddTypeHandler(new CamusJsonbTypeHandler<System.Text.Json.Nodes.JsonNode>());

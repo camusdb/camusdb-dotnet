@@ -61,9 +61,62 @@ public class CamusSqlTranslatingExpressionVisitor : RelationalSqlTranslatingExpr
     }
 
     protected override Expression VisitBinary(BinaryExpression binaryExpression)
-        => TryTranslateStringComparison(binaryExpression, out SqlExpression? translated)
-            ? translated
-            : base.VisitBinary(binaryExpression);
+    {
+        if (TryTranslateStringComparison(binaryExpression, out SqlExpression? translated))
+            return translated;
+
+        if (IsIntervalArithmetic(binaryExpression))
+            return TranslateIntervalArithmetic(binaryExpression);
+
+        return base.VisitBinary(binaryExpression);
+    }
+
+    // An operator with a TimeSpan operand or result: datetime - datetime, datetime ± TimeSpan,
+    // TimeSpan ± TimeSpan, TimeSpan * double and TimeSpan / double.
+    private static bool IsIntervalArithmetic(BinaryExpression binary)
+        => binary.NodeType is ExpressionType.Add or ExpressionType.Subtract or ExpressionType.Multiply or ExpressionType.Divide
+            && (CamusIntervalSql.Unwrap(binary.Type) == typeof(TimeSpan)
+                || CamusIntervalSql.Unwrap(binary.Left.Type) == typeof(TimeSpan)
+                || CamusIntervalSql.Unwrap(binary.Right.Type) == typeof(TimeSpan));
+
+    /// <summary>
+    /// Translates an operator of date and interval arithmetic. The relational base gives both operands
+    /// one type mapping, so a datetime minus a datetime would be read back as a datetime, and a
+    /// TimeSpan times a double would cast the double as an interval. The server refuses an interval
+    /// divided by an interval, so <c>TimeSpan / TimeSpan</c> does not translate.
+    /// </summary>
+    private Expression TranslateIntervalArithmetic(BinaryExpression binary)
+    {
+        if (Visit(binary.Left) is not SqlExpression left || Visit(binary.Right) is not SqlExpression right)
+            return QueryCompilationContext.NotTranslatedExpression;
+
+        Type leftType = CamusIntervalSql.Unwrap(binary.Left.Type);
+        Type rightType = CamusIntervalSql.Unwrap(binary.Right.Type);
+        Type resultType = CamusIntervalSql.Unwrap(binary.Type);
+        CamusIntervalSql sql = new(Dependencies.SqlExpressionFactory);
+
+        switch (binary.NodeType)
+        {
+            case ExpressionType.Subtract when CamusIntervalSql.IsTemporal(leftType) && leftType == rightType:
+                return sql.Difference(left, right);
+
+            case ExpressionType.Add or ExpressionType.Subtract when CamusIntervalSql.IsTemporal(leftType) && rightType == typeof(TimeSpan):
+                return sql.AddInterval(left, right, resultType, subtract: binary.NodeType == ExpressionType.Subtract);
+
+            case ExpressionType.Add when leftType == typeof(TimeSpan) && CamusIntervalSql.IsTemporal(rightType):
+                return sql.AddInterval(right, left, resultType);
+
+            case ExpressionType.Add or ExpressionType.Subtract when leftType == typeof(TimeSpan) && rightType == typeof(TimeSpan):
+            case ExpressionType.Multiply or ExpressionType.Divide when leftType == typeof(TimeSpan) && rightType == typeof(double):
+                return sql.Binary(binary.NodeType, left, right, typeof(TimeSpan), CamusIntervalTypeMapping.Instance);
+
+            case ExpressionType.Multiply when leftType == typeof(double) && rightType == typeof(TimeSpan):
+                return sql.Binary(binary.NodeType, left, right, typeof(TimeSpan), CamusIntervalTypeMapping.Instance);
+
+            default:
+                return QueryCompilationContext.NotTranslatedExpression;
+        }
+    }
 
     protected override Expression VisitMethodCall(MethodCallExpression methodCallExpression)
     {

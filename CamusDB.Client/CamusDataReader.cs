@@ -618,6 +618,12 @@ public class CamusDataReader : DbDataReader
         if (target == typeof(TimeOnly))
             return (T)(object)TimeOnly.FromDateTime(GetDateTime(ordinal));
 
+        if (target == typeof(TimeSpan))
+            return (T)(object)GetTimeSpan(ordinal);
+
+        if (target == typeof(CamusInterval))
+            return (T)(object)GetInterval(ordinal);
+
         if (target == typeof(byte[]))
             return (T)(object)(Cell(ordinal).BytesValue ?? Array.Empty<byte>());
 
@@ -662,6 +668,69 @@ public class CamusDataReader : DbDataReader
             return (T)(object)GetGuid(ordinal);
 
         return base.GetFieldValue<T>(ordinal);
+    }
+
+    /// <summary>
+    /// Reads an <c>interval</c> value as a <see cref="CamusInterval"/>. The server sends an interval
+    /// as its ISO-8601 text in a string column, so this reads a string cell. Use it for a value with
+    /// a month part, such as the result of <c>age(a, b)</c>, which <see cref="GetTimeSpan"/> refuses.
+    /// </summary>
+    /// <exception cref="InvalidCastException">The cell is not a string, or its text is not an
+    /// ISO-8601 interval.</exception>
+    public CamusInterval GetInterval(int ordinal)
+    {
+        string text = IntervalText(ordinal, nameof(CamusInterval));
+
+        try
+        {
+            return CamusInterval.Parse(text);
+        }
+        catch (Exception e) when (e is FormatException or OverflowException)
+        {
+            throw new InvalidCastException(
+                $"Column '{GetName(ordinal)}' cannot be read as a {nameof(CamusInterval)}: {e.Message}", e);
+        }
+    }
+
+    /// <summary>
+    /// Reads an <c>interval</c> value as a <see cref="TimeSpan"/>. The server sends an interval as its
+    /// ISO-8601 text in a string column. A string cell in the .NET <c>TimeSpan</c> form
+    /// (<c>1.02:03:04</c>) is read too.
+    /// </summary>
+    /// <exception cref="InvalidCastException">The cell is not a string, the text is not an interval,
+    /// the interval has a month part, or the value does not fit in a <see cref="TimeSpan"/>.</exception>
+    public TimeSpan GetTimeSpan(int ordinal)
+    {
+        string text = IntervalText(ordinal, nameof(TimeSpan));
+
+        if (!CamusInterval.TryParse(text, out CamusInterval interval))
+        {
+            if (TimeSpan.TryParse(text, CultureInfo.InvariantCulture, out TimeSpan span))
+                return span;
+
+            throw new InvalidCastException(
+                $"Column '{GetName(ordinal)}' cannot be read as a TimeSpan: '{text}' is not an ISO-8601 interval.");
+        }
+
+        try
+        {
+            return interval.ToTimeSpan();
+        }
+        catch (Exception e) when (e is InvalidOperationException or OverflowException)
+        {
+            throw new InvalidCastException($"Column '{GetName(ordinal)}' cannot be read as a TimeSpan: {e.Message}", e);
+        }
+    }
+
+    private string IntervalText(int ordinal, string target)
+    {
+        ref readonly ColumnValue column = ref Cell(ordinal);
+
+        if (column.Type != ColumnType.String)
+            throw new InvalidCastException(
+                $"Column '{GetName(ordinal)}' of type {column.Type} cannot be read as a {target}; an interval arrives as a string.");
+
+        return column.StrValue ?? "";
     }
 
     /// <summary>

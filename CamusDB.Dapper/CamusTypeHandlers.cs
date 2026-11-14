@@ -144,6 +144,73 @@ public sealed class CamusJsonbTypeHandler<T> : SqlMapper.TypeHandler<T>
     }
 }
 
+/// <summary>
+/// Binds a <see cref="TimeSpan"/> as its ISO-8601 interval text and reads the text of an
+/// <c>interval</c> expression into one. Without it, Dapper binds a <see cref="TimeSpan"/> as
+/// <see cref="DbType.Time"/>, which the command also sends as interval text, but Dapper cannot convert
+/// the string cell of a result into a <see cref="TimeSpan"/>. The SQL casts the parameter:
+/// <c>CAST(@p AS interval)</c>.
+/// </summary>
+public sealed class CamusTimeSpanTypeHandler : SqlMapper.TypeHandler<TimeSpan>
+{
+    /// <inheritdoc />
+    public override void SetValue(IDbDataParameter parameter, TimeSpan value)
+    {
+        CamusTypeHandlers.SetColumnType(parameter, ColumnType.String);
+        parameter.Value = value;
+    }
+
+    /// <inheritdoc />
+    public override TimeSpan Parse(object value)
+    {
+        if (value is TimeSpan span)
+            return span;
+
+        if (value is not string text)
+            throw new DataException($"Cannot read a TimeSpan from {value.GetType().Name}.");
+
+        if (CamusInterval.TryParse(text, out CamusInterval interval))
+        {
+            try
+            {
+                return interval.ToTimeSpan();
+            }
+            catch (Exception ex) when (ex is InvalidOperationException or OverflowException)
+            {
+                throw new DataException(ex.Message, ex);
+            }
+        }
+
+        if (TimeSpan.TryParse(text, CultureInfo.InvariantCulture, out span))
+            return span;
+
+        throw new DataException($"'{text}' is not an ISO-8601 interval.");
+    }
+}
+
+/// <summary>
+/// Binds a <see cref="CamusInterval"/> as its ISO-8601 text and reads the text of an <c>interval</c>
+/// expression into one. The SQL casts the parameter: <c>CAST(@p AS interval)</c>.
+/// </summary>
+public sealed class CamusIntervalTypeHandler : SqlMapper.TypeHandler<CamusInterval>
+{
+    /// <inheritdoc />
+    public override void SetValue(IDbDataParameter parameter, CamusInterval value)
+    {
+        CamusTypeHandlers.SetColumnType(parameter, ColumnType.String);
+        parameter.Value = value.ToString();
+    }
+
+    /// <inheritdoc />
+    public override CamusInterval Parse(object value) => value switch
+    {
+        CamusInterval interval => interval,
+        string text when CamusInterval.TryParse(text, out CamusInterval parsed) => parsed,
+        string text => throw new DataException($"'{text}' is not an ISO-8601 interval."),
+        _ => throw new DataException($"Cannot read an interval from {value.GetType().Name}.")
+    };
+}
+
 internal static class CamusTypeHandlers
 {
     /// <summary>

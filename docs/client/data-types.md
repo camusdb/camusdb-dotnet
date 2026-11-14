@@ -1,6 +1,6 @@
 # Data types
 
-Column types and their .NET mappings, `NUMERIC`, `JSONB`, large-value storage, and identifier quoting.
+Column types and their .NET mappings, `NUMERIC`, `INTERVAL`, `JSONB`, large-value storage, and identifier quoting.
 
 ## Type mapping
 
@@ -89,6 +89,32 @@ insert.Parameters.Add("total", ColumnType.Numeric, "12345678901234567890.1234567
 
 decimal price = reader.GetDecimal(0);
 string exact = reader.GetString(1);
+```
+
+### INTERVAL
+
+An interval (server 2026-11-13 or later) is a span of months, days and microseconds, as in PostgreSQL. It is an expression value only: no column, array element or stored value can be an interval. Use it for date arithmetic: `created > now() - INTERVAL '7 days'`, `finished - started`, `ts + INTERVAL 1 MONTH`.
+
+- A result interval arrives as ISO-8601 text (`P1DT2H`, `P-7D`, `PT0S`) in a `STRING` column, on REST and gRPC.
+- `GetTimeSpan`, `GetFieldValue<TimeSpan>` read it as a `TimeSpan`. An interval with months (for example from `age(a, b)`) throws `InvalidCastException`, because a `TimeSpan` has no months.
+- `GetInterval`, `GetFieldValue<CamusInterval>` read every interval. `CamusInterval` holds `Months`, `Days` and `Microseconds`; `ToString()` gives the ISO-8601 text, and `ToTimeSpan()` converts one with no months.
+- A `TimeSpan` or `CamusInterval` parameter binds as its ISO-8601 text (also with no `ColumnType`, and with `DbType.Time`). The server does not read text as an interval by itself, so cast it: `CAST(@p AS interval)`. The server rounds the seconds to a microsecond.
+- An array of `TimeSpan` needs `ArrayElementType = ColumnType.String`; it binds the text of each element.
+
+```csharp
+await using CamusCommand select = connection.CreateCamusCommand("""
+    SELECT name, finished - started AS length
+    FROM jobs
+    WHERE finished - started > CAST(@limit AS interval)
+    """);
+
+select.Parameters.Add("@limit", ColumnType.Null, TimeSpan.FromHours(1));
+
+await using CamusDataReader reader = await select.ExecuteReaderAsync();
+while (await reader.ReadAsync())
+{
+    TimeSpan length = reader.GetTimeSpan(1);   // P1DT3H → 1.03:00:00
+}
 ```
 
 ### JSONB

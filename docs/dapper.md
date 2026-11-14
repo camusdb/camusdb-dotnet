@@ -15,8 +15,9 @@ using CamusDB.Client;
 using CamusDB.Dapper;
 using Dapper;
 
-// Once at startup: registers the handlers for CamusObjectIdValue and for the JsonDocument,
-// JsonElement, JsonNode, JsonObject and JsonArray document types (bound and read as JSONB).
+// Once at startup: registers the handlers for CamusObjectIdValue, TimeSpan and CamusInterval
+// (interval text), and for the JsonDocument, JsonElement, JsonNode, JsonObject and JsonArray
+// document types (bound and read as JSONB).
 CamusDapper.Register();
 
 await using CamusConnection connection = new("Endpoint=http://localhost:5095;Database=test");
@@ -34,7 +35,7 @@ long count = await connection.ExecuteScalarAsync<long>("SELECT COUNT(*) FROM rob
 
 Dapper sends a bare name such as `from`; the driver adds the `@`, so it binds `@from`.
 
-Parameters bind by CLR type, per [Data Types](client/data-types.md#data-types): `Guid` as `UUID`, `DateOnly` as `DATE`, an enum as its integer.
+Parameters bind by CLR type, per [Data Types](client/data-types.md#data-types): `Guid` as `UUID`, `DateOnly` as `DATE`, an enum as its integer, a `TimeSpan` or `CamusInterval` as interval text for `CAST(@p AS interval)` ([INTERVAL](client/data-types.md#interval)).
 
 ## Typed values: `CamusValue`
 

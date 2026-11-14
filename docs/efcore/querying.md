@@ -31,6 +31,36 @@ These `string` members run on the server:
 
 `x` may be a column or parameter; no `LIKE` escaping. A non-constant `StringComparison` compares case-sensitively.
 
+### Dates and intervals
+
+Date arithmetic translates to SQL `interval` arithmetic (server 2026-11-13 or later). All values are UTC, so a day is always 24 hours.
+
+| LINQ | SQL |
+| --- | --- |
+| `DateTime.UtcNow`, `DateTimeOffset.UtcNow` | `now()`, the start of the transaction |
+| `d.AddYears(n)` … `d.AddMicroseconds(n)` | `d + INTERVAL 'P-7D'` for a constant, else `d + (n * INTERVAL 'P1D')` |
+| `d.Add(span)`, `d.Subtract(span)`, `d + span`, `d - span` | `d + CAST(@span AS interval)` |
+| `a - b`, `a.Subtract(b)` (two `DateTime` or `DateTimeOffset`) | `a - b`, read back as a `TimeSpan` |
+| `span1 + span2`, `span * 2.0`, `span / 2.0`, `span.Negate()` | interval arithmetic |
+| `TimeSpan.FromDays(x)` … `FromMicroseconds(x)` with a column | `x * INTERVAL 'P1D'` |
+| `day.AddDays(n)` (`DateOnly`) | `day + n` |
+| `day.AddMonths(n)`, `day.AddYears(n)` (`DateOnly`) | `CAST(day + INTERVAL 'P1M' AS date)` |
+
+```csharp
+TimeSpan limit = TimeSpan.FromHours(1);
+
+var slow = await ctx.Jobs
+    .Where(j => j.Started > DateTime.UtcNow.AddDays(-7) && j.Finished - j.Started > limit)
+    .Select(j => new { j.Name, Length = j.Finished - j.Started })
+    .ToListAsync();
+// WHERE `j`.`started` > (now() + INTERVAL 'P-7D')
+//   AND (`j`.`finished` - `j`.`started`) > CAST(@limit AS interval)
+```
+
+- A month added to the 31st moves back to the last day of the month, as in .NET: January 31 plus one month is February 29 in 2024.
+- A fraction of a day goes to the server, which moves it into the time: `AddDays(1.5)` adds 1 day 12 hours.
+- Not translated: `DateTime.Now` and `DateTime.Today` (local time), `TimeSpan.TotalDays` and the other `Total…` and component members (the server reads whole seconds only), and `span1 / span2`.
+
 ### String concatenation
 
 `a + b` and `string.Concat(...)` translate to `||` (server 2026-10-12 or later; older ones return `CADB0400`). Numbers and dates are cast to `string`. EF Core wraps nullable operands in `COALESCE(x, '')`, so `"a" + null` is `"a"`, as in C#.

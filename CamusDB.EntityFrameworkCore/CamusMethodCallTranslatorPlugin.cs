@@ -22,6 +22,7 @@ public sealed class CamusMethodCallTranslatorPlugin : IMethodCallTranslatorPlugi
             new CamusVectorMethodTranslator(sqlExpressionFactory, typeMappingSource),
             new CamusJsonMethodTranslator(sqlExpressionFactory, typeMappingSource),
             new CamusConvertTranslator(sqlExpressionFactory, typeMappingSource),
+            new CamusIntervalMethodTranslator(sqlExpressionFactory, typeMappingSource),
         ];
     }
 
