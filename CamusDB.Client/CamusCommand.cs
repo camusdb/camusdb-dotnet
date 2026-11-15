@@ -348,9 +348,14 @@ public class CamusCommand : DbCommand, ICloneable
 
     private static bool RunsInOwnTransaction(string sql) => StartsWithAny(sql, OwnTransactionPrefixes);
 
+    /// <summary>
+    /// Whether the statement in <paramref name="sql"/> starts with one of <paramref name="prefixes"/>. A
+    /// leading <c>WITH</c> clause is skipped, so <c>WITH s AS (…) UPDATE …</c> is an <c>UPDATE</c> and
+    /// goes to the non-query endpoint, as the server runs it. Leading comments are skipped too.
+    /// </summary>
     private static bool StartsWithAny(string sql, string[] prefixes)
     {
-        ReadOnlySpan<char> trimmed = sql.AsSpan().TrimStart();
+        ReadOnlySpan<char> trimmed = CamusSqlSyntax.SkipLeadingWith(sql);
         foreach (string prefix in prefixes)
         {
             if (trimmed.Length >= prefix.Length &&
@@ -1392,6 +1397,9 @@ public class CamusCommand : DbCommand, ICloneable
     ///
     /// <para>A statement that starts with a parenthesis is a query: a set operation whose first operand
     /// has its own ORDER BY or LIMIT, as in <c>(SELECT …) UNION SELECT …</c>.</para>
+    ///
+    /// <para>A leading <c>WITH</c> clause is skipped before the match (see <see cref="StartsWithAny"/>). The
+    /// server writes the clause out at parse time, so the prepared statement is the one after it.</para>
     /// </summary>
     private static readonly string[] PreparablePrefixes =
     [

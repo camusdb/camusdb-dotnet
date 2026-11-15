@@ -28,8 +28,23 @@ These `string` members run on the server:
 | `s.Trim()` / `s.TrimStart()` / `s.TrimEnd()` | `trim` / `ltrim` / `rtrim` |
 | `s.Replace(a, b)` | `replace` |
 | `s.Length` | `length` |
+| `s.Substring(i)` / `s.Substring(i, n)` | `substring(s, i + 1)` / `substring(s, i + 1, n)` |
+| `s.IndexOf(x)` (`string` or `char`) | `strpos(s, x) - 1` |
+| `s[i]` | `substring(s, i + 1, 1)` |
+| `s.Trim(c)`, `s.TrimStart('a', 'b')`, `s.TrimEnd(…)` | `trim(s, 'ab')` / `ltrim` / `rtrim` |
+| `s.Replace('a', 'b')`, `s.Contains('a')`, `s.StartsWith('a')`, `s.EndsWith('a')` | the same functions, with the `char` as a one-character string |
+| `string.IsNullOrWhiteSpace(s)` | `s IS NULL OR regexp_like(s, '^\s*$')` |
+| `x.ToString()`, `Convert.ToString(x)` | `CAST(x AS string)`; for a `bool`, `CASE WHEN x THEN 'True' ELSE 'False' END` |
+| `int.Parse(s)`, `long.Parse`, `double.Parse`, `decimal.Parse`, `bool.Parse`, `Guid.Parse` | `CAST(s AS int64 / float64 / numeric / bool / uuid)` |
+| `Guid.NewGuid()` | `gen_uuid_v4()` |
 
 `x` may be a column or parameter; no `LIKE` escaping. A non-constant `StringComparison` compares case-sensitively.
+
+- .NET throws when `Substring` or `s[i]` goes past the end of the string. The server returns the part that exists, or an empty string.
+- A `char` is stored as a string of one character. A `char` property maps to a `string` column.
+- `x.ToString()` translates for `int`, `long`, `short`, `double`, `Guid`, `char` and `bool`. It does not translate for `decimal`, because the server drops the trailing zeros that .NET keeps (`1.50` is `'1.5'`). It does not translate for `float`, or for the date types, whose .NET text depends on the culture.
+- `Parse` fails on the server with `CADB0400` for a text that is not a value of the type. .NET throws `FormatException`.
+- `TrimStart` and the other trims with a `char[]` translate only when the array is a constant, such as `s.TrimStart('a', 'b')`.
 
 ### Dates and intervals
 
@@ -59,6 +74,20 @@ var slow = await ctx.Jobs
 
 - A month added to the 31st moves back to the last day of the month, as in .NET: January 31 plus one month is February 29 in 2024.
 - A fraction of a day goes to the server, which moves it into the time: `AddDays(1.5)` adds 1 day 12 hours.
+The parts of a date run on the server too:
+
+| LINQ | SQL |
+| --- | --- |
+| `d.Year`, `Month`, `Day`, `Hour`, `Minute`, `Second`, `Millisecond`, `DayOfWeek`, `DayOfYear` | `date_part('year', d)` … `date_part('dow', d)`, `date_part('doy', d)` |
+| `day.Year`, `Month`, `Day`, `DayOfWeek`, `DayOfYear` (`DateOnly`) | `date_part(…, day)` |
+| `d.Date` | `date_trunc('day', d)` |
+| `d.TimeOfDay` | `d - date_trunc('day', d)`, read back as a `TimeSpan` |
+| `DateOnly.FromDateTime(d)` | `CAST(d AS date)` |
+
+The parts are the UTC parts. `Second` is the whole seconds, `Millisecond` is the fraction of the second (0–999), and `DayOfWeek` counts from 0 = Sunday, as in .NET. `DateTimeOffset` parts do not translate.
+
+A `DateTime`, `DateOnly` or `DateTimeOffset` constant in a query is written as `CAST('2024-01-02T03:04:05.0000000Z' AS datetime)` or `CAST('2024-01-02' AS date)`, in UTC. Earlier versions of the provider wrote `TIMESTAMP '…'`, which the server does not parse.
+
 - Not translated: `DateTime.Now` and `DateTime.Today` (local time), `TimeSpan.TotalDays` and the other `Total…` and component members (the server reads whole seconds only), and `span1 / span2`.
 
 ### String concatenation
@@ -117,6 +146,37 @@ var valid = await ctx.People
 ```
 
 Flags: `i` case-insensitive, `c` case-sensitive, `m`/`n` multiline, `s` dot matches newline, `x` extended, `g` replace all. `RegexOptions` must be a constant of `IgnoreCase`, `Multiline`, `Singleline` or `IgnorePatternWhitespace` (`Compiled` and `CultureInvariant` are ignored); otherwise the call does not translate. The same patterns work in `HasCheckConstraint` (`"email ~* '^[^@]+@[^@]+$'"`). The server has no `regexp_matches` or `regexp_split_to_table`.
+
+### Math functions
+
+The `Math` methods translate to the server's numeric functions. The trigonometric functions need a server from 2026-11-13 or later.
+
+| LINQ | CamusDB |
+| --- | --- |
+| `Math.Abs(x)` | `abs(x)` |
+| `Math.Ceiling(x)`, `Math.Floor(x)`, `Math.Truncate(x)` | `ceil(x)`, `floor(x)`, `trunc(x)` |
+| `Math.Round(x, MidpointRounding.AwayFromZero)` | `round(x)` |
+| `Math.Round(x, n, MidpointRounding.AwayFromZero)` | `round(x, n)` |
+| `Math.Sign(x)` | `sign(x)` |
+| `Math.Sqrt(x)`, `Math.Exp(x)`, `Math.Pow(x, y)` | `sqrt(x)`, `exp(x)`, `pow(x, y)` |
+| `Math.Log(x)`, `Math.Log(x, b)`, `Math.Log10(x)` | `ln(x)`, `log(b, x)`, `log10(x)` |
+| `Math.Sin`, `Cos`, `Tan`, `Asin`, `Acos`, `Atan` | `sin`, `cos`, `tan`, `asin`, `acos`, `atan` |
+| `Math.Atan2(y, x)` | `atan2(y, x)` |
+| `double.DegreesToRadians(x)`, `double.RadiansToDegrees(x)` | `radians(x)`, `degrees(x)` |
+
+```csharp
+var near = await ctx.Places
+    .Where(p => Math.Sin(double.DegreesToRadians(p.Latitude)) > 0.5)   // sin(radians(`p`.`latitude`)) > 0.5
+    .ToListAsync();
+```
+
+- `abs`, `ceil`, `floor`, `trunc` and `round` translate for `double` and `decimal`. `Math.Abs` and `Math.Sign` also translate for `short`, `int` and `long`. The other functions translate for `double`.
+- `Math.Max(a, b)` and `Math.Min(a, b)` are a `CASE` expression, because the server has no `greatest` or `least`: `CASE WHEN a >= b THEN a ELSE b END`. Each argument can run more than one time.
+- `EF.Functions.Random()` is `random()`. Earlier versions of the provider wrote `RAND()`, which the server does not have.
+- `Math.Round` without `MidpointRounding.AwayFromZero` does not translate. .NET rounds a midpoint to the even number, and the server rounds it away from zero.
+- `Math.Sign(decimal)` does not translate, because the server returns a `numeric` for it.
+- `MathF` (`float`) does not translate.
+- A value out of the domain fails on the server with `CADB0400`, for example `Math.Asin(2)` or `Math.Log(0)`. .NET returns `NaN` for these.
 
 ### JSON documents
 

@@ -1,10 +1,12 @@
 using System.Data;
+using System.Globalization;
 using System.Data.Common;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using CamusDB.Client;
 using Microsoft.EntityFrameworkCore.ChangeTracking;
 using Microsoft.EntityFrameworkCore.Storage;
+using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 
 namespace CamusDB.EntityFrameworkCore;
 
@@ -91,6 +93,11 @@ public sealed class CamusTypeMappingSource : RelationalTypeMappingSource
     }
 
     private static readonly StringTypeMapping StringMapping = new("string", DbType.String);
+    // CamusDB has no character type, so a char is a string of one character. The converter turns a char
+    // parameter or literal into that string, and the first character of a read string back into a char.
+    // A char comes from translations such as string.Contains(char) and s[i], and from a char property.
+    private static readonly RelationalTypeMapping CharMapping =
+        (RelationalTypeMapping)new StringTypeMapping("string", DbType.String).WithComposedConverter(new CharToStringConverter());
     private static readonly BoolTypeMapping BoolMapping = new CamusBoolTypeMapping();
     private static readonly ShortTypeMapping Int16Mapping = new("int64");
     private static readonly IntTypeMapping Int32Mapping = new("int64");
@@ -100,10 +107,11 @@ public sealed class CamusTypeMappingSource : RelationalTypeMappingSource
     private static readonly CamusNumericTypeMapping NumericMapping = new();
     private static readonly ByteArrayTypeMapping BytesMapping = new("bytes", DbType.Binary);
     // Date is exposed as both DateOnly (preferred) and DateTime; DateTime is exposed as DateTime/DateTimeOffset.
-    private static readonly DateOnlyTypeMapping DateOnlyMapping = new("date", DbType.Date);
-    private static readonly DateTimeTypeMapping DateAsDateTimeMapping = new("date", DbType.Date);
-    private static readonly DateTimeTypeMapping DateTimeMapping = new("datetime", DbType.DateTime);
-    private static readonly DateTimeOffsetTypeMapping DateTimeOffsetMapping = new("datetime", DbType.DateTime);
+    // The server parses no TIMESTAMP '…' or DATE '…' literal, so these write CAST('…' AS datetime | date).
+    private static readonly DateOnlyTypeMapping DateOnlyMapping = new CamusDateOnlyTypeMapping();
+    private static readonly DateTimeTypeMapping DateAsDateTimeMapping = new CamusDateTimeTypeMapping("date");
+    private static readonly DateTimeTypeMapping DateTimeMapping = new CamusDateTimeTypeMapping("datetime");
+    private static readonly DateTimeOffsetTypeMapping DateTimeOffsetMapping = new CamusDateTimeOffsetTypeMapping();
     // DbType.Guid → CamusParameter.FromDbType → ColumnType.Id (OID), while StringTypeMapping keeps
     // ClrType=string so the EF Core key-factory gets ValueComparer<string>, not DefaultValueComparer<Guid>.
     private static readonly StringTypeMapping IdStringMapping = new("id", DbType.Guid);
@@ -162,6 +170,7 @@ public sealed class CamusTypeMappingSource : RelationalTypeMappingSource
     private static readonly Dictionary<Type, RelationalTypeMapping> ClrTypeMappings = new()
     {
         { typeof(string), StringMapping },
+        { typeof(char), CharMapping },
         { typeof(bool), BoolMapping },
         { typeof(short), Int16Mapping },
         { typeof(int), Int32Mapping },
@@ -276,4 +285,66 @@ public sealed class CamusTypeMappingSource : RelationalTypeMappingSource
 
         return null;
     }
+}
+
+/// <summary>
+/// The literal forms of the date types. The server parses an ISO-8601 UTC text in a cast and has no
+/// <c>TIMESTAMP '…'</c> or <c>DATE '…'</c> literal, which the relational base writes. A literal is
+/// converted to UTC by the rule that the command applies to a parameter: a <see cref="DateTimeKind.Local"/>
+/// value goes to UTC, and an <see cref="DateTimeKind.Unspecified"/> value is read as UTC.
+/// </summary>
+internal static class CamusDateLiteral
+{
+    public static string DateTime(DateTime value)
+        => $"CAST('{ToUtc(value).ToString("yyyy-MM-dd'T'HH:mm:ss.fffffff'Z'", CultureInfo.InvariantCulture)}' AS datetime)";
+
+    public static string Date(DateTime value)
+        => $"CAST('{ToUtc(value).ToString("yyyy-MM-dd", CultureInfo.InvariantCulture)}' AS date)";
+
+    private static DateTime ToUtc(DateTime value) => value.Kind switch
+    {
+        DateTimeKind.Utc => value,
+        DateTimeKind.Local => value.ToUniversalTime(),
+        _ => System.DateTime.SpecifyKind(value, DateTimeKind.Utc),
+    };
+}
+
+/// <summary>A <see cref="DateTime"/> in a <c>datetime</c> or a <c>date</c> column. See <see cref="CamusDateLiteral"/>.</summary>
+internal sealed class CamusDateTimeTypeMapping : DateTimeTypeMapping
+{
+    public CamusDateTimeTypeMapping(string storeType)
+        : base(storeType, storeType == "date" ? System.Data.DbType.Date : System.Data.DbType.DateTime) { }
+
+    private CamusDateTimeTypeMapping(RelationalTypeMappingParameters parameters) : base(parameters) { }
+
+    protected override RelationalTypeMapping Clone(RelationalTypeMappingParameters parameters) => new CamusDateTimeTypeMapping(parameters);
+
+    protected override string GenerateNonNullSqlLiteral(object value)
+        => StoreType == "date" ? CamusDateLiteral.Date((DateTime)value) : CamusDateLiteral.DateTime((DateTime)value);
+}
+
+/// <summary>A <see cref="DateOnly"/> in a <c>date</c> column. See <see cref="CamusDateLiteral"/>.</summary>
+internal sealed class CamusDateOnlyTypeMapping : DateOnlyTypeMapping
+{
+    public CamusDateOnlyTypeMapping() : base("date", System.Data.DbType.Date) { }
+
+    private CamusDateOnlyTypeMapping(RelationalTypeMappingParameters parameters) : base(parameters) { }
+
+    protected override RelationalTypeMapping Clone(RelationalTypeMappingParameters parameters) => new CamusDateOnlyTypeMapping(parameters);
+
+    protected override string GenerateNonNullSqlLiteral(object value)
+        => CamusDateLiteral.Date(((DateOnly)value).ToDateTime(TimeOnly.MinValue, DateTimeKind.Utc));
+}
+
+/// <summary>A <see cref="DateTimeOffset"/> in a <c>datetime</c> column, as its UTC instant. See <see cref="CamusDateLiteral"/>.</summary>
+internal sealed class CamusDateTimeOffsetTypeMapping : DateTimeOffsetTypeMapping
+{
+    public CamusDateTimeOffsetTypeMapping() : base("datetime", System.Data.DbType.DateTime) { }
+
+    private CamusDateTimeOffsetTypeMapping(RelationalTypeMappingParameters parameters) : base(parameters) { }
+
+    protected override RelationalTypeMapping Clone(RelationalTypeMappingParameters parameters) => new CamusDateTimeOffsetTypeMapping(parameters);
+
+    protected override string GenerateNonNullSqlLiteral(object value)
+        => CamusDateLiteral.DateTime(((DateTimeOffset)value).UtcDateTime);
 }

@@ -1,6 +1,6 @@
 # Writing data
 
-Inserts, `RETURNING`, and key conflicts.
+Inserts, `RETURNING`, key conflicts, and writes that read other relations.
 
 ## Insert Rows
 
@@ -118,3 +118,28 @@ await using CamusCommand upsert = connection.CreateCamusCommand(
 - `CreateInsertCommand` cannot upsert; use SQL.
 
 Full rules: `docs/insert-on-conflict.md` in the server repository.
+
+## WITH, UPDATE … FROM and DELETE … USING
+
+A `WITH` clause names queries that the statement after it reads as tables. It can go in front of a `SELECT`, an `INSERT`, an `UPSERT`, an `UPDATE` or a `DELETE` (server 2026-11-14 or later). `UPDATE … FROM` and `DELETE … USING` read other relations to find the rows and the new values.
+
+```csharp
+await using CamusCommand settle = connection.CreateCamusCommand("""
+    WITH totals AS (SELECT account_id, SUM(amount) AS total FROM deltas GROUP BY account_id)
+    UPDATE accounts AS a SET balance = a.balance + t.total
+      FROM totals AS t
+     WHERE t.account_id = a.id
+    RETURNING a.id, a.balance
+    """);
+
+await using CamusDataReader reader = await settle.ExecuteReaderAsync();
+```
+
+- The driver reads the statement after the `WITH` clause to choose the endpoint. A write after `WITH` goes to the non-query endpoint on every `Execute*` method, so `ExecuteReaderAsync` without `RETURNING` gives a reader with no rows and the affected-row count.
+- A statement with a `WITH` clause can be prepared.
+- An `UPDATE … FROM` fails with `CADB0400` when one target row matches two or more rows of the list. Make one row for each target row first, for example with `GROUP BY`.
+- `RETURNING` reads the target row only. `LIMIT` is not allowed in these forms.
+- `WITH RECURSIVE` is not supported (`CADB0533`).
+- `using` is a reserved word. Put a column or table with that name in backticks.
+
+Full rules: `docs/common-table-expressions.md` and `docs/update-from-delete-using.md` in the server repository.

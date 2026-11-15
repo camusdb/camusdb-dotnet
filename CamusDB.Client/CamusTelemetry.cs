@@ -198,15 +198,16 @@ internal sealed class CamusOperation
 
     /// <summary>
     /// The operation name for <paramref name="sql"/>: its first keyword in upper case when that keyword is
-    /// a known statement verb, and <see langword="null"/> otherwise. Leading spaces and opening parentheses
-    /// are skipped.
+    /// a known statement verb, and <see langword="null"/> otherwise. Leading spaces, comments, opening
+    /// parentheses and a leading <c>WITH</c> clause are skipped.
     /// </summary>
     internal static string? OperationName(string? sql)
     {
         if (sql is null)
             return null;
 
-        ReadOnlySpan<char> text = sql.AsSpan().TrimStart();
+        // The operation of WITH s AS (…) SELECT … is the SELECT: the clause only names queries.
+        ReadOnlySpan<char> text = CamusSqlSyntax.SkipLeadingWith(sql);
         while (!text.IsEmpty && text[0] == '(')
             text = text[1..].TrimStart();
 

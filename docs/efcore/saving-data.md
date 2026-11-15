@@ -76,8 +76,21 @@ int removed = await ctx.Orders
     .ExecuteDeleteAsync();
 ```
 
-- A filter on the target table alone becomes the `WHERE`. Any other filter (navigation, `Any(...)`, join, `OrderBy`/`Take`/`Skip`) becomes `WHERE <pk> IN (SELECT ...)`, which needs a single-column primary key.
-- `SetProperty` values may use constants, parameters and the row's own columns. Reading another table throws `InvalidOperationException`.
+- A filter on the target table alone becomes the `WHERE`. Any other filter (navigation, `Any(...)`, join, `OrderBy`/`Take`/`Skip`) becomes `WHERE <pk> IN (SELECT ...)` when the table has a single-column primary key. Every server version runs these two forms.
+- A `SetProperty` value can read another table: a column of a joined table, or a subquery on the row. The provider then writes `UPDATE t AS a SET ... FROM ... WHERE ...` (server 2026-11-14 or later):
+
+```csharp
+await (from o in ctx.Orders
+       join c in ctx.Customers on o.CustomerId equals c.Id
+       where c.Region == "eu"
+       select new { o, c })
+    .ExecuteUpdateAsync(s => s.SetProperty(x => x.o.Region, x => x.c.Region));
+// UPDATE `orders` AS `o` SET `region` = `c`.`region` FROM `customers` AS `c` WHERE `o`.`customerid` = `c`.`id` AND `c`.`region` = 'eu'
+```
+
+- With `FROM`, a target row that two or more joined rows match fails with `CamusException` `CADB0400`, and nothing is written. SQL Server and PostgreSQL update such a row with one of the matches. Group the other table first, so that each target row matches one row.
+- A table with a composite primary key uses the same alias form for a filter that needs a subquery: `UPDATE t AS a ... FROM ...` or `DELETE FROM t AS a WHERE EXISTS (...)` (server 2026-11-14 or later).
+- An outer join in such a statement throws `InvalidOperationException`.
 - Tracked entities and `[Timestamp]` row versions are not updated; set the version in `SetProperty` if needed.
 
 ## Empty a table

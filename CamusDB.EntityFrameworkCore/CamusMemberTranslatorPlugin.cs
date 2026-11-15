@@ -23,6 +23,7 @@ public sealed class CamusMemberTranslatorPlugin : IMemberTranslatorPlugin
         [
             new CamusStringMemberTranslator(sqlExpressionFactory),
             new CamusDateTimeMemberTranslator(sqlExpressionFactory, typeMappingSource),
+            new CamusDatePartTranslator(sqlExpressionFactory, typeMappingSource),
         ];
     }
 

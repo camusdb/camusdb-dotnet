@@ -17,12 +17,15 @@ public sealed class CamusMethodCallTranslatorPlugin : IMethodCallTranslatorPlugi
     {
         Translators =
         [
-            new CamusStringMethodTranslator(sqlExpressionFactory),
+            new CamusStringMethodTranslator(sqlExpressionFactory, typeMappingSource),
             new CamusRegexMethodTranslator(sqlExpressionFactory),
             new CamusVectorMethodTranslator(sqlExpressionFactory, typeMappingSource),
             new CamusJsonMethodTranslator(sqlExpressionFactory, typeMappingSource),
             new CamusConvertTranslator(sqlExpressionFactory, typeMappingSource),
             new CamusIntervalMethodTranslator(sqlExpressionFactory, typeMappingSource),
+            new CamusMathTranslator(sqlExpressionFactory, typeMappingSource),
+            new CamusTextConversionTranslator(sqlExpressionFactory, typeMappingSource),
+            new CamusDatePartTranslator(sqlExpressionFactory, typeMappingSource),
         ];
     }
 

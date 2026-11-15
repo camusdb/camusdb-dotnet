@@ -53,6 +53,7 @@ b.ToTable("robots", t => t.HasCheckConstraint("ck_robots_price", "price >= 0"));
 | `string` (ID / PK) | `id` or `oid` | `OID` |
 | `Guid` | `uuid` (alias `guid`) | `UUID` |
 | `string` | `string` | `STRING` |
+| `char` | `string` (one character) | `STRING` |
 | `string` + `HasMaxLength(n)` | `string` | `STRING(n)` |
 | `bool` | `bool` | `BOOL` |
 | `short`, `int`, `long` | `int64` | `INT64` |
@@ -101,7 +102,15 @@ Arrays map to native `ARRAY(T)` columns, not EF's JSON primitive collections. No
 b.Property(e => e.Tags);   // long[]  → ARRAY(INT64)
 ```
 
-Arrays are not indexable and have no SQL literal, so they cannot appear in a `Where(...)` predicate, a default value or seed data.
+Arrays are not indexable and have no SQL literal, so they cannot appear in a default value or seed data. In a query, these members read an array column as a whole:
+
+| LINQ | SQL |
+| --- | --- |
+| `e.Tags.Contains(x)` | `array_contains(tags, x)` |
+| `e.Tags.Length`, `e.Tags.Count()` | `cardinality(tags)` |
+| `e.Tags.Any()` | `cardinality(tags) > 0` |
+
+Any other query over the elements, such as `e.Tags.Count(t => t > 2)` or `e.Tags.Where(...)`, throws `InvalidOperationException`: the server has no function that turns an array into rows. `array_contains(tags, NULL)` is never true, also for a `string[]` that holds a `null` element. `e.Data.Length` for a `byte[]` is `octet_length(data)`.
 
 ## Database and Table Lifecycle
 

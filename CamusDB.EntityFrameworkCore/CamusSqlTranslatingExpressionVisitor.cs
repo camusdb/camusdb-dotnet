@@ -8,6 +8,7 @@
 
 using System.Linq.Expressions;
 using System.Reflection;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Query;
 using Microsoft.EntityFrameworkCore.Query.SqlExpressions;
 using Microsoft.EntityFrameworkCore.Storage;
@@ -58,6 +59,72 @@ public class CamusSqlTranslatingExpressionVisitor : RelationalSqlTranslatingExpr
         QueryableMethodTranslatingExpressionVisitor queryableMethodTranslatingExpressionVisitor)
         : base(dependencies, queryCompilationContext, queryableMethodTranslatingExpressionVisitor)
     {
+    }
+
+    /// <summary>
+    /// <see cref="Math.Max(double, double)"/>, also nested, which EF Core flattens into one list. The server
+    /// has no <c>greatest</c>, so the provider writes <c>CASE WHEN a &gt;= b AND a &gt;= c THEN a WHEN b &gt;= c
+    /// THEN b ELSE c END</c>. Each argument is evaluated more than one time, so a volatile argument such as
+    /// <c>EF.Functions.Random()</c> can give different values. A NULL argument makes its comparisons NULL,
+    /// so the result moves to the next argument.
+    /// </summary>
+    public override SqlExpression? GenerateGreatest(IReadOnlyList<SqlExpression> expressions, Type resultType)
+        => GenerateExtreme(expressions, resultType, greatest: true);
+
+    /// <summary><see cref="Math.Min(double, double)"/>: the <c>&lt;=</c> form of <see cref="GenerateGreatest"/>.</summary>
+    public override SqlExpression? GenerateLeast(IReadOnlyList<SqlExpression> expressions, Type resultType)
+        => GenerateExtreme(expressions, resultType, greatest: false);
+
+    private SqlExpression? GenerateExtreme(IReadOnlyList<SqlExpression> expressions, Type resultType, bool greatest)
+    {
+        if (expressions.Count == 0)
+            return null;
+
+        ISqlExpressionFactory sql = Dependencies.SqlExpressionFactory;
+        RelationalTypeMapping? mapping = ExpressionExtensions.InferTypeMapping(expressions.ToArray());
+        SqlExpression[] values = expressions.Select(e => sql.ApplyTypeMapping(e, mapping)).ToArray();
+
+        if (values.Length == 1)
+            return values[0];
+
+        List<CaseWhenClause> clauses = [];
+        for (int i = 0; i < values.Length - 1; i++)
+        {
+            SqlExpression? test = null;
+            for (int j = i + 1; j < values.Length; j++)
+            {
+                SqlExpression compare = greatest
+                    ? sql.GreaterThanOrEqual(values[i], values[j])
+                    : sql.LessThanOrEqual(values[i], values[j]);
+                test = test == null ? compare : sql.AndAlso(test, compare);
+            }
+
+            clauses.Add(new CaseWhenClause(test!, values[i]));
+        }
+
+        return sql.Case(clauses, values[^1]);
+    }
+
+    /// <summary>
+    /// <c>array.Length</c>: <c>octet_length(x)</c> for a <c>byte[]</c>, and <c>cardinality(x)</c> for an array
+    /// column. The relational base has no translation for either.
+    /// </summary>
+    protected override Expression VisitUnary(UnaryExpression unaryExpression)
+    {
+        if (unaryExpression.NodeType == ExpressionType.ArrayLength
+            && Visit(unaryExpression.Operand) is SqlExpression array)
+        {
+            string? name = array.Type == typeof(byte[]) ? "octet_length"
+                : array.TypeMapping is CamusArrayTypeMapping ? "cardinality"
+                : null;
+
+            if (name != null)
+                return Dependencies.SqlExpressionFactory.Function(
+                    name, [array], nullable: true, argumentsPropagateNullability: [true], typeof(int),
+                    Dependencies.TypeMappingSource.FindMapping(typeof(int)));
+        }
+
+        return base.VisitUnary(unaryExpression);
     }
 
     protected override Expression VisitBinary(BinaryExpression binaryExpression)

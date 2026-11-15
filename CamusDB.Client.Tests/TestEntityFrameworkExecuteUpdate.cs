@@ -1,9 +1,10 @@
 /**
  * This file is part of CamusDB
  *
- * End-to-end ExecuteUpdate/ExecuteDelete tests against a running CamusDB server. Covers both shapes the
- * provider writes: the direct UPDATE/DELETE for a single-table filter, and the primary-key IN subquery
- * for navigation filters, joins and Take. TestEntityFrameworkExecuteUpdateSql pins the SQL text.
+ * End-to-end ExecuteUpdate/ExecuteDelete tests against a running CamusDB server. Covers the shapes the
+ * provider writes: the direct UPDATE/DELETE for a single-table filter, the primary-key IN subquery for
+ * navigation filters, joins and Take, and the alias form (UPDATE ... FROM, server commit 3d8247a2) for a
+ * value from another table and for a composite key. TestEntityFrameworkExecuteUpdateSql pins the SQL text.
  *
  * Each test tags its rows with a unique per-run marker and filters on it, so tables reused across
  * runs by EnsureCreated don't cross-contaminate assertions.
@@ -159,6 +160,98 @@ public class TestEntityFrameworkExecuteUpdate
     }
 
     [Fact]
+    public async Task UpdateSetsAValueFromAJoinedTable()
+    {
+        string tag = await SeedAsync();
+        await using var ctx = new BulkContext(Options());
+
+        int rows = await (from o in ctx.Orders
+                          join c in ctx.Customers on o.CustomerId equals c.Id
+                          where o.Tag == tag && c.Tag == tag
+                          select new { o, c })
+            .ExecuteUpdateAsync(s => s.SetProperty(x => x.o.Status, x => x.c.Name));
+
+        Assert.Equal(4, rows);
+        Assert.Equal(["alice", "alice", "alice", "bob"], (await OrdersAsync(tag)).Select(o => o.Status));
+    }
+
+    [Fact]
+    public async Task UpdateSetsAValueFromACorrelatedSubquery()
+    {
+        string tag = await SeedAsync();
+        await using var ctx = new BulkContext(Options());
+
+        int rows = await ctx.Orders.Where(o => o.Tag == tag && o.Total >= 3)
+            .ExecuteUpdateAsync(s => s.SetProperty(
+                o => o.Status, o => ctx.Customers.Where(c => c.Id == o.CustomerId).Select(c => c.Name).First()));
+
+        Assert.Equal(2, rows);
+        Assert.Equal(["open", "open", "alice", "bob"], (await OrdersAsync(tag)).Select(o => o.Status));
+    }
+
+    [Fact]
+    public async Task UpdateWithTakeSetsAValueFromACorrelatedSubquery()
+    {
+        string tag = await SeedAsync();
+        await using var ctx = new BulkContext(Options());
+
+        int rows = await ctx.Orders.Where(o => o.Tag == tag).OrderByDescending(o => o.Total).Take(2)
+            .ExecuteUpdateAsync(s => s.SetProperty(
+                o => o.Status, o => ctx.Customers.Where(c => c.Id == o.CustomerId).Select(c => c.Name).First()));
+
+        Assert.Equal(2, rows);
+        Assert.Equal(["open", "open", "alice", "bob"], (await OrdersAsync(tag)).Select(o => o.Status));
+    }
+
+    // UPDATE ... FROM refuses a target row that two rows of the joined tables match, because the new
+    // value would depend on which match the plan reads. SQL Server and PostgreSQL pick one match.
+    [Fact]
+    public async Task UpdateFromAJoinThatMatchesARowTwiceFails()
+    {
+        string tag = await SeedAsync();
+        await using var ctx = new BulkContext(Options());
+
+        var ex = await Assert.ThrowsAnyAsync<Exception>(() =>
+            (from o in ctx.Orders
+             join other in ctx.Orders on o.CustomerId equals other.CustomerId
+             where o.Tag == tag && other.Tag == tag
+             select new { o, other })
+            .ExecuteUpdateAsync(s => s.SetProperty(x => x.o.Total, x => x.other.Total)));
+
+        Assert.Contains("more than once", ex.ToString());
+        Assert.Equal([1L, 2L, 3L, 4L], (await OrdersAsync(tag)).Select(o => o.Total));
+    }
+
+    [Fact]
+    public async Task CompositeKeyUpdateAndDeleteUseTheAliasForm()
+    {
+        string tag = await SeedAsync();
+        await using var ctx = new BulkContext(Options());
+
+        string orderId = (await OrdersAsync(tag))[0].Id;
+        for (int line = 1; line <= 3; line++)
+            ctx.Lines.Add(new BulkLine { OrderId = orderId, LineNo = line, Qty = line * 10, Tag = tag });
+        await ctx.SaveChangesAsync();
+
+        int updated = await (from l in ctx.Lines
+                             join o in ctx.Orders on l.OrderId equals o.Id
+                             where l.Tag == tag && o.Tag == tag
+                             select l)
+            .ExecuteUpdateAsync(s => s.SetProperty(l => l.Qty, l => l.Qty + 1));
+        Assert.Equal(3, updated);
+
+        int deleted = await ctx.Lines.Where(l => l.Tag == tag).OrderByDescending(l => l.Qty).Take(1).ExecuteDeleteAsync();
+        Assert.Equal(1, deleted);
+
+        int bounded = await ctx.Lines.Where(l => l.Tag == tag).OrderBy(l => l.Qty).Take(1)
+            .ExecuteUpdateAsync(s => s.SetProperty(l => l.Qty, 0));
+        Assert.Equal(1, bounded);
+
+        List<int> left = await ctx.Lines.AsNoTracking().Where(l => l.Tag == tag).OrderBy(l => l.LineNo).Select(l => l.Qty).ToListAsync();
+        Assert.Equal([0, 21], left);
+    }
+
+    [Fact]
     public async Task UpdateRollsBackWithTransaction()
     {
         string tag = await SeedAsync();
@@ -178,6 +271,7 @@ public class TestEntityFrameworkExecuteUpdate
     {
         public DbSet<BulkCustomer> Customers => Set<BulkCustomer>();
         public DbSet<BulkOrder> Orders => Set<BulkOrder>();
+        public DbSet<BulkLine> Lines => Set<BulkLine>();
 
         protected override void OnModelCreating(ModelBuilder mb)
         {
@@ -199,6 +293,15 @@ public class TestEntityFrameworkExecuteUpdate
                 b.Property(e => e.Status).HasColumnName("status").HasMaxLength(32);
                 b.Property(e => e.Tag).HasColumnName("tag").HasMaxLength(64);
             });
+            mb.Entity<BulkLine>(b =>
+            {
+                b.ToTable("bulk_lines_v1");
+                b.HasKey(e => new { e.OrderId, e.LineNo });
+                b.Property(e => e.OrderId).HasColumnName("orderid").HasColumnType("id");
+                b.Property(e => e.LineNo).HasColumnName("lineno");
+                b.Property(e => e.Qty).HasColumnName("qty");
+                b.Property(e => e.Tag).HasColumnName("tag").HasMaxLength(64);
+            });
         }
     }
 
@@ -215,6 +318,14 @@ public class TestEntityFrameworkExecuteUpdate
         public string CustomerId { get; set; } = "";
         public long Total { get; set; }
         public string Status { get; set; } = "";
+        public string Tag { get; set; } = "";
+    }
+
+    private class BulkLine
+    {
+        public string OrderId { get; set; } = "";
+        public int LineNo { get; set; }
+        public int Qty { get; set; }
         public string Tag { get; set; } = "";
     }
 }

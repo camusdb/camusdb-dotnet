@@ -180,35 +180,218 @@ internal static class CamusSqlSyntax
 
         // '@', '$' and '.' join the word so that "@returning" and "t.returning" are not the keyword.
         static bool IsWordChar(char ch) => char.IsLetterOrDigit(ch) || ch is '_' or '@' or '$' or '.';
+    }
 
-        static int SkipDelimited(ReadOnlySpan<char> text, int open, char quote)
+    /// <summary>
+    /// The index after the quoted text that opens at <paramref name="open"/> with <paramref name="quote"/>:
+    /// a string literal (<c>'</c> or <c>"</c>) or a delimited identifier (<c>`</c>). In a literal, a
+    /// backslash and the character after it are one unit. A doubled quote stays inside the text. With no
+    /// closing quote, the rest of the text is in it.
+    /// </summary>
+    private static int SkipDelimited(ReadOnlySpan<char> text, int open, char quote)
+    {
+        int j = open + 1;
+        while (j < text.Length)
         {
-            int j = open + 1;
-            while (j < text.Length)
+            char ch = text[j];
+            if (ch == '\\' && quote != '`')
             {
-                char ch = text[j];
-                if (ch == '\\' && quote != '`')
+                j += 2;
+                continue;
+            }
+
+            if (ch == quote)
+            {
+                if (j + 1 < text.Length && text[j + 1] == quote)
                 {
                     j += 2;
                     continue;
                 }
 
-                if (ch == quote)
-                {
-                    if (j + 1 < text.Length && text[j + 1] == quote)
-                    {
-                        j += 2;
-                        continue;
-                    }
-
-                    return j + 1;
-                }
-
-                j++;
+                return j + 1;
             }
 
-            return text.Length;
+            j++;
         }
+
+        return text.Length;
+    }
+
+    /// <summary>
+    /// The statement that a leading <c>WITH</c> clause introduces: the text from its first keyword, such
+    /// as <c>SELECT</c> in <c>WITH s AS (…) SELECT …</c> or <c>UPDATE</c> in <c>WITH s AS (…) UPDATE …</c>.
+    /// For a statement with no <c>WITH</c> clause, the text from its first token. Leading white space and
+    /// comments are skipped in both cases.
+    ///
+    /// <para>The server parses <c>WITH</c> in front of a <c>SELECT</c>, an <c>INSERT</c>, an <c>UPSERT</c>,
+    /// an <c>UPDATE</c> and a <c>DELETE</c>, and it writes each common table expression out as a derived
+    /// table. The statement after the clause is then the statement that the server runs, so the driver
+    /// sends it to the endpoint of that statement. The scan reads the clause as
+    /// <c>WITH [RECURSIVE] name [(columns)] AS [[NOT] MATERIALIZED] (query) [, …]</c>. When the text does
+    /// not have that form, the method returns the text from the <c>WITH</c> keyword, and the server
+    /// reports the syntax error.</para>
+    /// </summary>
+    internal static ReadOnlySpan<char> SkipLeadingWith(ReadOnlySpan<char> sql)
+    {
+        int start = SkipTrivia(sql, 0);
+        if (!IsKeywordAt(sql, start, "WITH", out int i))
+            return sql[start..];
+
+        i = SkipTrivia(sql, i);
+        if (IsKeywordAt(sql, i, "RECURSIVE", out int next))
+            i = SkipTrivia(sql, next);
+
+        while (true)
+        {
+            if (!TrySkipName(sql, ref i))
+                return sql[start..];
+
+            i = SkipTrivia(sql, i);
+            if (i < sql.Length && sql[i] == '(')
+            {
+                i = SkipParenthesized(sql, i);
+                if (i < 0)
+                    return sql[start..];
+
+                i = SkipTrivia(sql, i);
+            }
+
+            if (!IsKeywordAt(sql, i, "AS", out i))
+                return sql[start..];
+
+            i = SkipTrivia(sql, i);
+            if (IsKeywordAt(sql, i, "NOT", out next))
+                i = SkipTrivia(sql, next);
+            if (IsKeywordAt(sql, i, "MATERIALIZED", out next))
+                i = SkipTrivia(sql, next);
+
+            if (i >= sql.Length || sql[i] != '(')
+                return sql[start..];
+
+            i = SkipParenthesized(sql, i);
+            if (i < 0)
+                return sql[start..];
+
+            i = SkipTrivia(sql, i);
+            if (i < sql.Length && sql[i] == ',')
+            {
+                i = SkipTrivia(sql, i + 1);
+                continue;
+            }
+
+            return sql[i..];
+        }
+    }
+
+    /// <summary>The index of the first character at or after <paramref name="i"/> that is not white space
+    /// and not in a comment.</summary>
+    private static int SkipTrivia(ReadOnlySpan<char> text, int i)
+    {
+        while (i < text.Length)
+        {
+            char c = text[i];
+            if (char.IsWhiteSpace(c))
+            {
+                i++;
+            }
+            else if (c == '-' && i + 1 < text.Length && text[i + 1] == '-')
+            {
+                int end = text[i..].IndexOf('\n');
+                i = end < 0 ? text.Length : i + end + 1;
+            }
+            else if (c == '/' && i + 1 < text.Length && text[i + 1] == '*')
+            {
+                int end = text[(i + 2)..].IndexOf("*/".AsSpan());
+                i = end < 0 ? text.Length : i + 2 + end + 2;
+            }
+            else
+            {
+                break;
+            }
+        }
+
+        return i;
+    }
+
+    /// <summary>Whether the keyword <paramref name="keyword"/> starts at <paramref name="i"/> as a whole
+    /// word. <paramref name="end"/> is the index after it.</summary>
+    private static bool IsKeywordAt(ReadOnlySpan<char> text, int i, string keyword, out int end)
+    {
+        end = i + keyword.Length;
+        return end <= text.Length
+               && text.Slice(i, keyword.Length).Equals(keyword.AsSpan(), StringComparison.OrdinalIgnoreCase)
+               && (end == text.Length || !IsNameChar(text[end]));
+    }
+
+    /// <summary>Moves past a plain name or a name in backticks. False when no name starts at
+    /// <paramref name="i"/>.</summary>
+    private static bool TrySkipName(ReadOnlySpan<char> text, ref int i)
+    {
+        if (i >= text.Length)
+            return false;
+
+        if (text[i] == '`')
+        {
+            i = SkipDelimited(text, i, '`');
+            return true;
+        }
+
+        if (!IsNameChar(text[i]) || char.IsAsciiDigit(text[i]))
+            return false;
+
+        while (i < text.Length && IsNameChar(text[i]))
+            i++;
+
+        return true;
+    }
+
+    private static bool IsNameChar(char c) => char.IsLetterOrDigit(c) || c == '_';
+
+    /// <summary>
+    /// The index after the <c>)</c> that closes the <c>(</c> at <paramref name="open"/>, or -1 when the
+    /// text ends first. Parentheses in literals, delimited identifiers, dollar-quoted text and comments
+    /// do not count.
+    /// </summary>
+    private static int SkipParenthesized(ReadOnlySpan<char> text, int open)
+    {
+        int depth = 0;
+        int i = open;
+        while (i < text.Length)
+        {
+            char c = text[i];
+            if (c is '\'' or '"' or '`')
+            {
+                i = SkipDelimited(text, i, c);
+                continue;
+            }
+
+            if (c == '$' && DollarQuoteLength(text, i) > 0)
+            {
+                i = SkipDollarQuoted(text, i);
+                continue;
+            }
+
+            if ((c == '-' && i + 1 < text.Length && text[i + 1] == '-') || (c == '/' && i + 1 < text.Length && text[i + 1] == '*'))
+            {
+                i = SkipTrivia(text, i);
+                continue;
+            }
+
+            if (c == '(')
+            {
+                depth++;
+            }
+            else if (c == ')')
+            {
+                depth--;
+                if (depth == 0)
+                    return i + 1;
+            }
+
+            i++;
+        }
+
+        return -1;
     }
 
     /// <summary>

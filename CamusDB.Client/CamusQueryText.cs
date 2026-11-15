@@ -19,7 +19,8 @@ namespace CamusDB.Client;
 /// This is a scan of tokens, not a parse. It knows string, number and bytes literals, dollar-quoted
 /// text (<c>$$ … $$</c>, a literal), backtick identifiers, <c>@</c> parameters and comments, and it
 /// takes a table from the name that follows
-/// <c>FROM</c>, <c>JOIN</c>, <c>INTO</c>, <c>UPDATE</c> or <c>TABLE</c>. A comma join names only its
+/// <c>FROM</c>, <c>JOIN</c>, <c>INTO</c>, <c>UPDATE</c> or <c>TABLE</c>, and after the <c>USING</c> of a
+/// <c>DELETE</c>. A comma join names only its
 /// first table, and a common table expression is named as a table. Literal values never reach a
 /// summary, because a table name is never a literal.
 /// </remarks>
@@ -59,6 +60,10 @@ internal static partial class CamusQueryText
         List<string> tables = [];
         Stack<bool> fromIsArgument = new();
         bool expectTable = false;
+
+        // DELETE FROM t USING u: the list after USING names tables. In other statements USING starts a
+        // join column list or an index method, so it names no table there.
+        bool usingNamesTables = CamusSqlSyntax.SkipLeadingWith(sql).StartsWith("DELETE", StringComparison.OrdinalIgnoreCase);
 
         for (int index = 0; index < tokens.Count; index++)
         {
@@ -109,7 +114,8 @@ internal static partial class CamusQueryText
                 }
             }
 
-            if (token.Kind == TokenKind.Word && TableKeywords.Contains(token.Text))
+            if (token.Kind == TokenKind.Word
+                && (TableKeywords.Contains(token.Text) || (usingNamesTables && token.Text.Equals("USING", StringComparison.OrdinalIgnoreCase))))
             {
                 bool insideArgument = fromIsArgument.Count > 0 && fromIsArgument.Peek();
                 expectTable = !(insideArgument && token.Text.Equals("FROM", StringComparison.OrdinalIgnoreCase));

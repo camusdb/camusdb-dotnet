@@ -5,9 +5,10 @@
  * for ExecuteUpdate/ExecuteDelete. ExecuteUpdate has no ToQueryString, so interceptors suppress the
  * connection open and the command, and keep the command text.
  *
- * CamusDB's UPDATE/DELETE take no alias on the target and need a WHERE, and the server cannot evaluate
- * a subquery correlated with the target row there. These pin the two shapes the provider writes: the
- * direct form (bare target columns) and the primary-key IN subquery for everything else.
+ * The provider writes the plain UPDATE/DELETE (no target alias, bare target columns, a mandatory WHERE)
+ * in two shapes: the direct form, and the primary-key IN subquery. It writes the alias form
+ * (UPDATE t AS a ... FROM ..., DELETE FROM t AS a ...) only when a new value reads another table or the
+ * filter needs the IN subquery on a table with no single-column key. These tests pin all three.
  */
 
 using System.Data.Common;
@@ -111,29 +112,108 @@ public class TestEntityFrameworkExecuteUpdateSql
     }
 
     [Fact]
-    public async Task ValueFromAnotherTableIsRejected()
+    public async Task ValueFromCorrelatedSubqueryUsesTheAliasForm()
     {
         var (ctx, capture) = NewContext();
         await using var _ = ctx;
 
-        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() =>
-            ctx.Customers.ExecuteUpdateAsync(s => s.SetProperty(c => c.OrderCount, c => ctx.Orders.Count(o => o.CustomerId == c.Id))));
+        await ctx.Customers.ExecuteUpdateAsync(s => s.SetProperty(c => c.OrderCount, c => ctx.Orders.Count(o => o.CustomerId == c.Id)));
 
-        Assert.Contains("reads another table", ex.Message);
-        Assert.Empty(capture.Commands);
+        Assert.Equal(
+            "UPDATE `xu_customers_v1` AS `x`\nSET `ordercount` = (\n    SELECT COUNT(*)\n    FROM `xu_orders_v1` AS `x0`\n    WHERE `x0`.`customerid` = `x`.`Id`)\nWHERE TRUE",
+            capture.Single());
     }
 
     [Fact]
-    public async Task CompositeKeyWithTakeIsRejected()
+    public async Task ValueFromJoinedTableUsesUpdateFrom()
     {
         var (ctx, capture) = NewContext();
         await using var _ = ctx;
 
-        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() =>
-            ctx.Lines.OrderBy(l => l.Qty).Take(1).ExecuteDeleteAsync());
+        await (from o in ctx.Orders
+               join c in ctx.Customers on o.CustomerId equals c.Id
+               where c.Name == "alice"
+               select new { o, c })
+            .ExecuteUpdateAsync(s => s.SetProperty(x => x.o.Status, x => x.c.Name));
 
-        Assert.Contains("single-column primary key", ex.Message);
-        Assert.Empty(capture.Commands);
+        Assert.Equal(
+            "UPDATE `xu_orders_v1` AS `x`\nSET `status` = `x0`.`name`\nFROM `xu_customers_v1` AS `x0`\nWHERE `x`.`customerid` = `x0`.`Id` AND `x0`.`name` = 'alice'",
+            capture.Single());
+    }
+
+    [Fact]
+    public async Task ValueFromTakeUsesUpdateFrom()
+    {
+        var (ctx, capture) = NewContext();
+        await using var _ = ctx;
+
+        await ctx.Orders.OrderBy(o => o.Total).Take(2)
+            .ExecuteUpdateAsync(s => s.SetProperty(o => o.Status, o => ctx.Customers.Where(c => c.Id == o.CustomerId).Select(c => c.Name).First()));
+
+        // EF Core joins the bounded query as a derived table, and the value reads it.
+        string sql = capture.Single();
+        Assert.StartsWith("UPDATE `xu_orders_v1` AS `x0`\nSET `status` = (", sql);
+        Assert.Contains("WHERE `x2`.`Id` = `x1`.`customerid`", sql);
+        Assert.Contains("FROM (\n    SELECT `x`.`Id`, `x`.`customerid`\n    FROM `xu_orders_v1` AS `x`\n    ORDER BY `x`.`total`\n    LIMIT @p\n) AS `x1`", sql);
+        Assert.EndsWith("WHERE `x0`.`Id` = `x1`.`Id`", sql);
+    }
+
+    [Fact]
+    public async Task CompositeKeyWithTakeUsesTheAliasForm()
+    {
+        var (ctx, capture) = NewContext();
+        await using var _ = ctx;
+
+        await ctx.Lines.OrderBy(l => l.Qty).Take(1).ExecuteDeleteAsync();
+
+        string sql = capture.Single();
+        Assert.StartsWith("DELETE FROM `xu_lines_v1` AS `x`\nWHERE EXISTS (", sql);
+        Assert.Contains("LIMIT @p", sql);
+        Assert.DoesNotContain("USING", sql);
+    }
+
+    [Fact]
+    public async Task CompositeKeyUpdateWithJoinUsesUpdateFrom()
+    {
+        var (ctx, capture) = NewContext();
+        await using var _ = ctx;
+
+        await (from l in ctx.Lines
+               join o in ctx.Orders on l.OrderId equals o.Id
+               where o.Tag == "t1"
+               select l)
+            .ExecuteUpdateAsync(s => s.SetProperty(l => l.Qty, l => l.Qty + 1));
+
+        Assert.Equal(
+            "UPDATE `xu_lines_v1` AS `x`\nSET `qty` = `x`.`qty` + 1\nFROM `xu_orders_v1` AS `x0`\nWHERE `x`.`orderid` = `x0`.`Id` AND `x0`.`tag` = 't1'",
+            capture.Single());
+    }
+
+    [Fact]
+    public async Task CompositeKeyUpdateWithTakeUsesUpdateFrom()
+    {
+        var (ctx, capture) = NewContext();
+        await using var _ = ctx;
+
+        await ctx.Lines.OrderBy(l => l.Qty).Take(3).ExecuteUpdateAsync(s => s.SetProperty(l => l.Qty, 0));
+
+        Assert.Equal(
+            "UPDATE `xu_lines_v1` AS `x0`\nSET `qty` = @p1\nFROM (\n    SELECT `x`.`orderid`, `x`.`lineno`\n    FROM `xu_lines_v1` AS `x`\n    ORDER BY `x`.`qty`\n    LIMIT @p\n) AS `x1`\n" +
+            "WHERE `x0`.`orderid` = `x1`.`orderid` AND `x0`.`lineno` = `x1`.`lineno`",
+            capture.Single());
+    }
+
+    [Fact]
+    public async Task CompositeKeyDeleteWithCorrelatedFilterUsesTheAliasForm()
+    {
+        var (ctx, capture) = NewContext();
+        await using var _ = ctx;
+
+        await ctx.Lines.Where(l => ctx.Orders.Any(o => o.Id == l.OrderId && o.Tag == "t1")).ExecuteDeleteAsync();
+
+        Assert.Equal(
+            "DELETE FROM `xu_lines_v1` AS `x`\nWHERE EXISTS (\n    SELECT 1\n    FROM `xu_orders_v1` AS `x0`\n    WHERE `x0`.`Id` = `x`.`orderid` AND `x0`.`tag` = 't1')",
+            capture.Single());
     }
 
     [Fact]
