@@ -152,9 +152,18 @@ public static class CamusPropertyBuilderExtensions
 
         if (property.ClrType == typeof(float[]))
         {
-            // EF Core maps a float[] as a primitive collection (ARRAY(FLOAT32)) by convention. A vector is
+#if NET11_0_OR_GREATER
+            // From EF Core 11, Property maps a float[] as one scalar value, and the element type of a
+            // primitive collection is set only when the property is made. IsVector starts from Property.
+            if (property.IsPrimitiveCollection)
+                throw new InvalidOperationException(
+                    $"Property '{property.DeclaringType.DisplayName()}.{property.Name}' is a primitive collection. " +
+                    "Configure a vector with Property(...).IsVector(...), not PrimitiveCollection(...).");
+#else
+            // EF Core 10 maps a float[] as a primitive collection (ARRAY(FLOAT32)) by convention. A vector is
             // one scalar value, so the element type goes before the converter is set.
             property.SetElementType(null);
+#endif
             property.SetValueConverter(CamusVectorValueConverter.Instance);
             property.SetValueComparer(CamusVectorValueComparer.Instance);
         }

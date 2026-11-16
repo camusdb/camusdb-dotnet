@@ -102,6 +102,8 @@ Arrays map to native `ARRAY(T)` columns, not EF's JSON primitive collections. No
 b.Property(e => e.Tags);   // long[]  → ARRAY(INT64)
 ```
 
+`b.PrimitiveCollection(e => e.Tags)` gives the same column. From EF Core 11, `Property` maps an array as one scalar value and `PrimitiveCollection` makes it a primitive collection. The column and the translations below are the same for both forms. Only the error for an element query that the provider cannot translate is different: with `Property` on EF Core 11, EF Core writes the message.
+
 Arrays are not indexable and have no SQL literal, so they cannot appear in a default value or seed data. In a query, these members read an array column as a whole:
 
 | LINQ | SQL |

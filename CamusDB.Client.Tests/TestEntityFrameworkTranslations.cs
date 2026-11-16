@@ -66,6 +66,11 @@ public class TestEntityFrameworkTranslations
             { "WHERE cardinality(`e`.`tags`) > 0", r => r.Tags.Any() },
             { "WHERE array_contains(`e`.`tags`, 2)", r => r.Tags.Contains(2L) },
             { "WHERE array_contains(`e`.`names`, `e`.`name`)", r => r.Names.Contains(r.Name) },
+            // Names is mapped with Property, so on EF Core 11 it is a scalar column, not a primitive collection.
+            { "WHERE cardinality(`e`.`names`) = 2", r => r.Names.Count() == 2 },
+            { "WHERE cardinality(`e`.`names`) = 2", r => r.Names.LongCount() == 2L },
+            { "WHERE cardinality(`e`.`names`) > 0", r => r.Names.Any() },
+            { "WHERE array_contains(`e`.`names`, 'b')", r => r.Names.Contains("b") },
             { "WHERE octet_length(`e`.`data`) = 4", r => r.Data.Length == 4 },
         };
     }
@@ -210,6 +215,7 @@ public class TestEntityFrameworkTranslations
         Assert.Equal(1, await tagged.CountAsync(r => r.At.DayOfWeek == DayOfWeek.Tuesday && r.At.Millisecond == 678 && r.N == 3));
         Assert.Equal(1, await tagged.CountAsync(r => r.Name.Substring(2, 5) == "Hello" && r.Name.IndexOf('W') == 8 && r.Name[0] == 'x'));
         Assert.Equal(1, await tagged.CountAsync(r => r.Tags.Contains(3L) && r.Tags.Length == 3 && r.Data.Length == 4));
+        Assert.Equal(1, await tagged.CountAsync(r => r.Names.Contains("b") && r.Names.Count() == 2 && r.Names.Any()));
         Assert.Equal(1, await tagged.CountAsync(r => r.B.ToString() == "True" && int.Parse(r.NumText) == 42));
         Assert.Equal(2, await tagged.CountAsync(r => r.At.Date == new DateTime(2024, 3, 5, 0, 0, 0, DateTimeKind.Utc) && r.Day < new DateOnly(2024, 3, 1)));
         Assert.Equal(1, await tagged.CountAsync(r => Math.Max(r.X, 1.0) == 2.5));
@@ -237,7 +243,9 @@ public class TestEntityFrameworkTranslations
                 b.Property(e => e.G).HasColumnName("g");
                 b.Property(e => e.NumText).HasColumnName("numtext");
                 b.Property(e => e.GuidText).HasColumnName("guidtext");
-                b.Property(e => e.Tags).HasColumnName("tags");
+                // Tags is a primitive collection on every EF Core version. From EF Core 11, Property maps an
+                // array as a scalar column, so Names covers that form (CamusArrayMethodTranslator).
+                b.PrimitiveCollection(e => e.Tags).HasColumnName("tags");
                 b.Property(e => e.Names).HasColumnName("names");
                 b.Property(e => e.Data).HasColumnName("data");
             });

@@ -151,7 +151,7 @@ public class CamusQueryableMethodTranslatingExpressionVisitor : RelationalQuerya
         array = null;
         if (source.QueryExpression is not SelectExpression
             {
-                Tables: [TableValuedFunctionExpression { Name: ArrayElementsFunction, Arguments: [var column] } elements],
+                Tables: [TableValuedFunctionExpression { Name: ArrayElementsFunction, Arguments: [SqlExpression column] } elements],
                 Predicate: null, GroupBy: [], Having: null, IsDistinct: false, Limit: null, Offset: null, Orderings: [],
             } select)
             return false;

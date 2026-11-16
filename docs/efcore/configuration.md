@@ -14,6 +14,18 @@ Or:
 Install-Package CamusDB.EntityFrameworkCore
 ```
 
+### Supported versions
+
+The package has one build for each EF Core major version. NuGet picks the build from the target framework of your project:
+
+| Your project targets | EF Core |
+| --- | --- |
+| `net10.0` | 10.0.x |
+| `net11.0` or later | 11.0.x |
+
+- From 0.19.0, a `net11.0` project gets EF Core 11. If it references an EF Core 10 package directly, the restore fails with `NU1605` (package downgrade). Update those references to 11.0.x.
+- Do not use EF Core 11 with a provider release before 0.19.0. Those releases have an EF Core 10 build only, and some queries fail on EF Core 11 with `MissingMethodException`. On .NET 11 with an older release, keep EF Core 10.
+
 ## Configuration
 
 Register the provider:

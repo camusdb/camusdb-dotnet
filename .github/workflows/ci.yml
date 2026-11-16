@@ -15,13 +15,15 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v5
 
-      - name: Setup .NET (8, 9, 10)
+      - name: Setup .NET (8, 9, 10, 11)
+        # 11 builds the net11.0 target of CamusDB.EntityFrameworkCore (EF Core 11) and runs the tests on it.
         uses: actions/setup-dotnet@v5
         with:
           dotnet-version: |
             8.0.x
             9.0.x
             10.0.x
+            11.0.x
 
       - name: Start CamusDB
         # 5095 = REST/JSON API, 5096 = gRPC API (exercised by the Protocol=grpc transport tests).
@@ -122,13 +124,15 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v5
 
-      - name: Setup .NET (8, 9, 10)
+      - name: Setup .NET (8, 9, 10, 11)
+        # 11 builds the net11.0 target of CamusDB.EntityFrameworkCore (EF Core 11) and runs the tests on it.
         uses: actions/setup-dotnet@v5
         with:
           dotnet-version: |
             8.0.x
             9.0.x
             10.0.x
+            11.0.x
 
       - name: Generate bootstrap credentials
         # There is deliberately no default account: the server refuses to start with authentication on and
