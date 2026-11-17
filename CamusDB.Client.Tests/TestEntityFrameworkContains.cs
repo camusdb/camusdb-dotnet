@@ -53,6 +53,27 @@ public class TestEntityFrameworkContains
         Assert.True(found.ContainsKey("carol"));
     }
 
+    // The shape of the query in Vorpal 4c9f8a28: a non-empty List<T>, then an ordering. A provider asset
+    // built for another EF Core major failed on this query with MissingMethodException.
+    [Fact]
+    public async Task ContainsOnParameterizedListWithOrderingFiltersRows()
+    {
+        string tag = await SeedAsync();
+        await using var ctx = new PeopleContext(Options());
+
+        List<string> wanted = ["dave", "alice", "zzz-missing"];
+
+        List<string> names = await ctx.People
+            .AsNoTracking()
+            .Where(p => p.Tag == tag && wanted.Contains(p.Name))
+            .OrderBy(p => p.Name)
+            .ThenBy(p => p.Id)
+            .Select(p => p.Name)
+            .ToListAsync();
+
+        Assert.Equal(["alice", "dave"], names);
+    }
+
     [Fact]
     public async Task ContainsOnEmptyParameterizedArrayReturnsNothing()
     {

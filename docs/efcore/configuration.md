@@ -25,6 +25,9 @@ The package has one build for each EF Core major version. NuGet picks the build 
 
 - From 0.19.0, a `net11.0` project gets EF Core 11. If it references an EF Core 10 package directly, the restore fails with `NU1605` (package downgrade). Update those references to 11.0.x.
 - Do not use EF Core 11 with a provider release before 0.19.0. Those releases have an EF Core 10 build only, and some queries fail on EF Core 11 with `MissingMethodException`. On .NET 11 with an older release, keep EF Core 10.
+- From 0.19.1, the provider checks the EF Core major at the first `UseCamusDB` call. If the process loads an EF Core major that the provider build was not compiled against, the call throws `InvalidOperationException`. The message names both versions and both file paths. Without this check, the wrong build fails later, in the first query that uses a changed EF Core member, with `MissingMethodException`.
+- Both builds have the same assembly version, so a deployment can put the wrong one next to the application. Typical causes are a publish folder that is not clean, a copy from another build, or a plugin folder with its own copy of `CamusDB.EntityFrameworkCore.dll`. Deploy the build for the target framework of the application.
+- To skip the check, set the `AppContext` switch `CamusDB.EntityFrameworkCore.DisableEfCoreVersionCheck` to `true`. Do this only for diagnosis.
 
 ## Configuration
 

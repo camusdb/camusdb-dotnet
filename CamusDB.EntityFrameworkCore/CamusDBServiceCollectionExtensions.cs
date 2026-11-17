@@ -17,6 +17,9 @@ public static class CamusDBServiceCollectionExtensions
     {
         ArgumentNullException.ThrowIfNull(serviceCollection);
 
+        // Applications that register the provider services without UseCamusDB reach the check here.
+        CamusEfCoreVersionCheck.EnsureCompatible();
+
         var builder = new EntityFrameworkRelationalServicesBuilder(serviceCollection);
 
         builder.TryAdd<IProviderConventionSetBuilder, CamusConventionSetBuilder>();

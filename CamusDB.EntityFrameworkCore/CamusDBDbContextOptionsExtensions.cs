@@ -13,6 +13,7 @@ public static class CamusDBDbContextOptionsExtensions
     {
         ArgumentNullException.ThrowIfNull(optionsBuilder);
         ArgumentException.ThrowIfNullOrWhiteSpace(connectionString);
+        CamusEfCoreVersionCheck.EnsureCompatible();
 
         var extension = (CamusDBOptionsExtension)(
             optionsBuilder.Options.FindExtension<CamusDBOptionsExtension>() ?? new CamusDBOptionsExtension()
@@ -42,6 +43,7 @@ public static class CamusDBDbContextOptionsExtensions
     {
         ArgumentNullException.ThrowIfNull(optionsBuilder);
         ArgumentNullException.ThrowIfNull(connection);
+        CamusEfCoreVersionCheck.EnsureCompatible();
 
         var extension = (CamusDBOptionsExtension)(
             optionsBuilder.Options.FindExtension<CamusDBOptionsExtension>() ?? new CamusDBOptionsExtension()
