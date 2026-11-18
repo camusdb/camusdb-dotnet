@@ -2,8 +2,9 @@
  * This file is part of CamusDB
  *
  * End-to-end join tests against a running CamusDB server: the LINQ shapes that EF Core translates to
- * LEFT, RIGHT and CROSS JOIN, and the padded rows (NULL right columns) they read back. The model is
- * TestEntityFrameworkJoinsSql.JoinContext; TestEntityFrameworkJoinsSql pins the SQL.
+ * LEFT, RIGHT and CROSS JOIN, LATERAL joins, ROW_NUMBER() and VALUES lists, and the padded rows (NULL
+ * right columns) they read back. The model is TestEntityFrameworkJoinsSql.JoinContext;
+ * TestEntityFrameworkJoinsSql pins the SQL. The LATERAL and VALUES tests need a server from 2026-11-16 or later.
  *
  * Each test seeds its own rows with a unique run tag and random keys, and filters on the tag.
  */
@@ -202,6 +203,137 @@ public class TestEntityFrameworkJoins
         Assert.Equal(3, rows.Count);
         Assert.Null(rows.Single(r => r.Name == "bob").Region);
         Assert.All(rows.Where(r => r.Name == "alice"), r => Assert.Equal("north", r.Region));
+    }
+
+    [Fact]
+    public async Task TestCorrelatedSelectManyWithTakeRunsAsCrossJoinLateral()
+    {
+        var (tag, _) = await SeedAsync();
+        await using JoinContext ctx = NewContext();
+
+        // The correlation is not an equality key, so EF writes CROSS APPLY: CROSS JOIN LATERAL on CamusDB.
+        var rows = await ctx.Customers.Where(c => c.Tag == tag)
+            .SelectMany(c => ctx.Orders.Where(o => o.Tag == tag && o.Total > c.Name.Length * 2).OrderBy(o => o.Total).Take(2),
+                (c, o) => new { c.Name, o.Total })
+            .ToListAsync();
+
+        // alice and carol (5 letters) keep the order above 10; bob (3 letters) the two lowest above 6.
+        Assert.Equal([("alice", 20L), ("bob", 7L), ("bob", 10L), ("carol", 20L)],
+            rows.Select(r => (r.Name, r.Total)).OrderBy(r => r.Name).ThenBy(r => r.Total));
+    }
+
+    [Fact]
+    public async Task TestCorrelatedDefaultIfEmptyRunsAsLeftJoinLateral()
+    {
+        var (tag, _) = await SeedAsync();
+        await using JoinContext ctx = NewContext();
+
+        var rows = await (from c in ctx.Customers.Where(c => c.Tag == tag)
+                          from o in ctx.Orders.Where(o => o.Tag == tag && o.Total > c.Name.Length * 4).OrderBy(o => o.Total).Take(1).DefaultIfEmpty()
+                          select new { c.Name, Total = (long?)o!.Total }).ToListAsync();
+
+        // Only bob (limit 12) has an order above his limit; alice and carol (limit 20) keep one padded row.
+        Assert.Equal([("alice", (long?)null), ("bob", 20L), ("carol", null)],
+            rows.Select(r => (r.Name, r.Total)).OrderBy(r => r.Name));
+    }
+
+    [Fact]
+    public async Task TestProjectedCollectionWithTakeRunsAsLeftJoinLateral()
+    {
+        var (tag, _) = await SeedAsync();
+        await using JoinContext ctx = NewContext();
+
+        var rows = await ctx.Customers.Where(c => c.Tag == tag)
+            .OrderBy(c => c.Name)
+            .Select(c => new
+            {
+                c.Name,
+                Top = c.Orders.Where(o => o.Total > c.Name.Length).OrderByDescending(o => o.Total).Take(1).Select(o => o.Total).ToList(),
+            })
+            .ToListAsync();
+
+        Assert.Equal(["alice", "bob", "carol"], rows.Select(r => r.Name));
+        Assert.Equal([20L], rows[0].Top);
+        Assert.Equal([5L], rows[1].Top);
+        Assert.Empty(rows[2].Top);
+    }
+
+    [Fact]
+    public async Task TestFilteredIncludeWithTakeUsesRowNumber()
+    {
+        var (tag, _) = await SeedAsync();
+        await using JoinContext ctx = NewContext();
+
+        List<JoinCustomer> customers = await ctx.Customers.Where(c => c.Tag == tag)
+            .Include(c => c.Orders.OrderByDescending(o => o.Total).Take(1))
+            .OrderBy(c => c.Name)
+            .ToListAsync();
+
+        Assert.Equal(["alice", "bob", "carol"], customers.Select(c => c.Name));
+        Assert.Equal([20L], customers[0].Orders.Select(o => o.Total));
+        Assert.Equal([5L], customers[1].Orders.Select(o => o.Total));
+        Assert.Empty(customers[2].Orders);
+    }
+
+    [Fact]
+    public async Task TestFirstOfEachGroupUsesRowNumber()
+    {
+        var (tag, _) = await SeedAsync();
+        await using JoinContext ctx = NewContext();
+
+        // EF Core joins each group to its first row with `key = key`, so a group with a NULL key matches no
+        // row and its First() is null, on every provider. The order with no customer is left out.
+        List<JoinOrder> firsts = await ctx.Orders.Where(o => o.Tag == tag && o.CustomerId != null)
+            .GroupBy(o => o.CustomerId)
+            .Select(g => g.OrderBy(o => o.Total).First())
+            .ToListAsync();
+
+        // alice's lowest order is 10 and bob's is 5.
+        Assert.Equal([5L, 10L], firsts.Select(o => o.Total).Order());
+    }
+
+    [Fact]
+    public async Task TestTakeOverKeylessSequence()
+    {
+        var (tag, _) = await SeedAsync();
+        await using JoinContext ctx = NewContext();
+
+        // A keyless sequence has no order, so ROW_NUMBER() has no ORDER BY and the row kept is not defined.
+        var rows = await ctx.Customers.Where(c => c.Tag == tag)
+            .SelectMany(c => ctx.OrderRows.Where(k => k.CustomerId == c.Id).Take(1), (c, k) => new { c.Name, k.Total })
+            .ToListAsync();
+
+        Assert.Equal(["alice", "bob"], rows.Select(r => r.Name).Order());
+        Assert.Contains(rows.Single(r => r.Name == "alice").Total, new[] { 10L, 20L });
+        Assert.Equal(5L, rows.Single(r => r.Name == "bob").Total);
+    }
+
+    [Fact]
+    public async Task TestInlineAndParameterCollectionsAreValuesLists()
+    {
+        var (tag, b) = await SeedAsync();
+        await using JoinContext ctx = NewContext();
+
+        // alice, bob and carol have the keys b + 10, b + 11 and b + 12.
+        List<string> names = await ctx.Customers.Where(c => c.Tag == tag && new[] { c.Id - b, 11L }.Count(v => v > 10) == 2)
+            .OrderBy(c => c.Name)
+            .Select(c => c.Name)
+            .ToListAsync();
+        Assert.Equal(["bob", "carol"], names);
+
+        long[] limits = [6, 15];
+        List<long> ids = await ctx.Orders.Where(o => o.Tag == tag && limits.Any(t => t > o.Total))
+            .OrderBy(o => o.Id)
+            .Select(o => o.Id)
+            .ToListAsync();
+        Assert.Equal([b + 100, b + 102, b + 103], ids);
+
+        // A VALUES list after LATERAL splits each customer into the values above 4.
+        var split = await (from c in ctx.Customers.Where(c => c.Tag == tag)
+                           from v in new[] { c.Id - b, (long)c.Name.Length }.Where(x => x > 4)
+                           select new { c.Name, v }).ToListAsync();
+        Assert.Equal([("alice", 5L), ("alice", 10L), ("bob", 11L), ("carol", 5L), ("carol", 12L)],
+            split.Select(r => (r.Name, r.v)).OrderBy(r => r.Name).ThenBy(r => r.v));
     }
 
     [Fact]

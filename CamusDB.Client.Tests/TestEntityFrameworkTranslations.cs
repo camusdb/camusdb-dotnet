@@ -87,16 +87,13 @@ public class TestEntityFrameworkTranslations
             WhereSql(r => r.B.ToString() == "True"));
 
     [Fact]
-    public void MaxAndMinAreCaseExpressions()
+    public void MaxAndMinAreGreatestAndLeast()
     {
-        Assert.Equal(
-            "WHERE CASE\n    WHEN `e`.`x` >= 1.0 THEN `e`.`x`\n    ELSE 1.0\nEND > 2.0",
-            WhereSql(r => Math.Max(r.X, 1.0) > 2));
+        Assert.Equal("WHERE greatest(`e`.`x`, 1.0) > 2.0", WhereSql(r => Math.Max(r.X, 1.0) > 2));
 
-        // Nested calls are one list: each argument is compared with every argument after it.
-        Assert.Equal(
-            "WHERE CASE\n    WHEN `e`.`n` <= 2 AND `e`.`n` <= 7 THEN `e`.`n`\n    WHEN 2 <= 7 THEN 2\n    ELSE 7\nEND = 2",
-            WhereSql(r => Math.Min(Math.Min(r.N, 2), 7) == 2));
+        // Nested calls are one list, and so are Max and Min over an inline array.
+        Assert.Equal("WHERE least(`e`.`n`, 2, 7) = 2", WhereSql(r => Math.Min(Math.Min(r.N, 2), 7) == 2));
+        Assert.Equal("WHERE greatest(`e`.`n`, 2, 7) = 7", WhereSql(r => new[] { r.N, 2, 7 }.Max() == 7));
     }
 
     [Fact]
@@ -219,6 +216,7 @@ public class TestEntityFrameworkTranslations
         Assert.Equal(1, await tagged.CountAsync(r => r.B.ToString() == "True" && int.Parse(r.NumText) == 42));
         Assert.Equal(2, await tagged.CountAsync(r => r.At.Date == new DateTime(2024, 3, 5, 0, 0, 0, DateTimeKind.Utc) && r.Day < new DateOnly(2024, 3, 1)));
         Assert.Equal(1, await tagged.CountAsync(r => Math.Max(r.X, 1.0) == 2.5));
+        Assert.Equal(1, await tagged.CountAsync(r => Math.Min(Math.Min(r.N, 2), 7) == 2 && new[] { r.N, 2, 7 }.Max() == 7));
         Assert.Equal(2, await tagged.CountAsync(r => r.G != Guid.NewGuid() && EF.Functions.Random() < 2.0));
     }
 

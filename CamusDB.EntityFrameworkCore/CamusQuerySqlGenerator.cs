@@ -1,6 +1,7 @@
 using CamusDB.Client;
 using System.Linq.Expressions;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
 using Microsoft.EntityFrameworkCore.Metadata;
 using Microsoft.EntityFrameworkCore.Query;
 using Microsoft.EntityFrameworkCore.Query.SqlExpressions;
@@ -78,21 +79,173 @@ public class CamusQuerySqlGenerator : QuerySqlGenerator
         return base.VisitTableValuedFunction(tableValuedFunctionExpression);
     }
 
-    // CamusDB has no lateral join. EF writes one for a SelectMany or a join whose inner sequence refers to
-    // the outer row in a way that is not an equality key, and the server answers only with a syntax error.
+    // EF writes CROSS APPLY / OUTER APPLY for a SelectMany, a join or a projected collection whose inner
+    // sequence reads the outer row outside an equality key. The server has no APPLY keyword, but it has the
+    // PostgreSQL LATERAL forms (server commit aa8fe6cf): CROSS JOIN LATERAL (…) and LEFT JOIN LATERAL (…)
+    // ON TRUE. The server runs a LATERAL join as a nested loop and keeps the written join order.
     protected override Expression VisitCrossApply(CrossApplyExpression crossApplyExpression)
-        => throw ApplyNotSupported();
+    {
+        Sql.Append("CROSS JOIN ");
+        GenerateLateralTable(crossApplyExpression.Table);
+        return crossApplyExpression;
+    }
 
     protected override Expression VisitOuterApply(OuterApplyExpression outerApplyExpression)
-        => throw ApplyNotSupported();
+    {
+        Sql.Append("LEFT JOIN ");
+        GenerateLateralTable(outerApplyExpression.Table);
+        Sql.Append(" ON TRUE");
+        return outerApplyExpression;
+    }
 
-    // CamusDB has no window functions. EF writes ROW_NUMBER() for Take/Skip on a sequence that is joined
-    // per outer row: a filtered Include, a SelectMany, a per-group First.
+    // LATERAL goes before a derived table, a function call or a VALUES list. The server grammar has no
+    // LATERAL before a table name, and a table cannot read the row to its left anyway.
+    private void GenerateLateralTable(TableExpressionBase table)
+    {
+        if (table is not TableExpression)
+            Sql.Append("LATERAL ");
+
+        Visit(table);
+    }
+
+    // EF writes ROW_NUMBER() for Take/Skip on a sequence that is joined per outer row: a filtered Include,
+    // a SelectMany, a per-group First. The server has window functions (server commit 29f79e8a). When the
+    // sequence has no order and no key, EF orders by a constant, which the base writes as (SELECT 1). Such an
+    // ordering does not order anything, so the provider leaves it out, and OVER () is valid on the server.
     protected override Expression VisitRowNumber(RowNumberExpression rowNumberExpression)
-        => throw new InvalidOperationException(
-            "CamusDB cannot translate this query: it needs ROW_NUMBER() OVER (...), and CamusDB has no window functions. " +
-            "EF Core writes it for Take/Skip/First on a per-row sequence (a filtered Include, a SelectMany, a per-group First). " +
-            "Load that sequence in a separate query and apply Take/Skip on the client.");
+    {
+        Sql.Append("ROW_NUMBER() OVER (");
+
+        IReadOnlyList<SqlExpression> partitions = rowNumberExpression.Partitions;
+        if (partitions.Count > 0)
+        {
+            Sql.Append("PARTITION BY ");
+            for (int i = 0; i < partitions.Count; i++)
+            {
+                if (i > 0)
+                    Sql.Append(", ");
+
+                Visit(partitions[i]);
+            }
+        }
+
+        bool first = true;
+        foreach (OrderingExpression ordering in rowNumberExpression.Orderings)
+        {
+            if (IsConstantOrdering(ordering))
+                continue;
+
+            if (first)
+                Sql.Append(partitions.Count > 0 ? " ORDER BY " : "ORDER BY ");
+            else
+                Sql.Append(", ");
+
+            first = false;
+            Visit(ordering);
+        }
+
+        Sql.Append(")");
+        return rowNumberExpression;
+    }
+
+    private static bool IsConstantOrdering(OrderingExpression ordering)
+        => ordering.Expression is SqlConstantExpression or SqlParameterExpression or SqlFragmentExpression { Sql: "(SELECT 1)" };
+
+    // A VALUES list as a relation, for an inline collection (new[] { a, b }) and for a parameter collection
+    // that the query uses for more than Contains. The relational base writes the SQLite form,
+    // (SELECT a AS Value UNION ALL VALUES (b)), and the server has no VALUES after UNION ALL. The server
+    // reads the PostgreSQL form, (VALUES (a), (b)) AS v (Value) (server commit 266fb85b). The alias and
+    // the column list are required, because a VALUES list without a column list names its columns
+    // column1, column2, ….
+    protected override Expression VisitValues(ValuesExpression valuesExpression)
+    {
+        Sql.Append("(");
+        GenerateValues(valuesExpression);
+        Sql.Append(")")
+            .Append(AliasSeparator)
+            .Append(Dependencies.SqlGenerationHelper.DelimitIdentifier(valuesExpression.Alias!))
+            .Append(" (");
+
+        IReadOnlyList<string> columnNames = valuesExpression.ColumnNames;
+        for (int i = 0; i < columnNames.Count; i++)
+        {
+            if (i > 0)
+                Sql.Append(", ");
+
+            Sql.Append(Dependencies.SqlGenerationHelper.DelimitIdentifier(columnNames[i]));
+        }
+
+        Sql.Append(")");
+        return valuesExpression;
+    }
+
+    protected override void GenerateValues(ValuesExpression valuesExpression)
+    {
+        // EF expands a ValuesParameter into rows before SQL generation (SqlNullabilityProcessor).
+        if (valuesExpression.RowValues is not { } rowValues || valuesExpression.ValuesParameter != null)
+            throw new InvalidOperationException(
+                "CamusDB cannot write a VALUES list whose rows are not expanded. EF Core expands the rows of a parameter collection before it writes the SQL.");
+
+        if (rowValues.Count == 0)
+            throw new InvalidOperationException(RelationalStrings.EmptyCollectionNotSupportedAsInlineQueryRoot);
+
+        Sql.Append("VALUES ");
+        for (int i = 0; i < rowValues.Count; i++)
+        {
+            if (i > 0)
+                Sql.Append(", ");
+
+            Sql.Append("(");
+            IReadOnlyList<SqlExpression> values = rowValues[i].Values;
+            for (int j = 0; j < values.Count; j++)
+            {
+                if (j > 0)
+                    Sql.Append(", ");
+
+                Visit(NeedsValuesCast(values[j])
+                    ? new SqlUnaryExpression(ExpressionType.Convert, values[j], values[j].Type, values[j].TypeMapping)
+                    : values[j]);
+            }
+            Sql.Append(")");
+        }
+    }
+
+    // The server gives each column of a VALUES list the common type of its rows, by the UNION rule. It
+    // types a bare parameter from its value, but an operator on a parameter (`j`.`Id` - @b, @b * 1.5) gets
+    // the type string there, so the list fails with "Column 1 of UNION ALL has type String …". A cast to the
+    // item's own store type gives the server the type. EF Core 10 casts some first-row items by itself;
+    // such an item is a Convert already.
+    private static bool NeedsValuesCast(SqlExpression value)
+        => value is not (SqlParameterExpression or ColumnExpression or SqlConstantExpression)
+           && value is not SqlUnaryExpression { OperatorType: ExpressionType.Convert }
+           && value.TypeMapping != null
+           && ParameterFinder.Contains(value);
+
+    private sealed class ParameterFinder : ExpressionVisitor
+    {
+        private bool _found;
+
+        public static bool Contains(Expression expression)
+        {
+            ParameterFinder finder = new();
+            finder.Visit(expression);
+            return finder._found;
+        }
+
+        public override Expression? Visit(Expression? node)
+        {
+            if (_found || node == null)
+                return node;
+
+            if (node is SqlParameterExpression)
+            {
+                _found = true;
+                return node;
+            }
+
+            return base.Visit(node);
+        }
+    }
 
     // CamusDB joins strings with ||, as PostgreSQL and SQLite do, and refuses + for two strings. EF writes
     // a string concatenation (a + b, string.Concat) as an Add whose type is string. The NULL rule of || (a
@@ -133,12 +286,6 @@ public class CamusQuerySqlGenerator : QuerySqlGenerator
 
         return sqlFunctionExpression;
     }
-
-    private static InvalidOperationException ApplyNotSupported()
-        => new(
-            "CamusDB cannot translate this query: it needs a lateral join (CROSS APPLY / OUTER APPLY), which CamusDB does not support. " +
-            "EF Core writes one when the inner sequence of a SelectMany or a join refers to the outer row outside an equality key. " +
-            "Make the correlation an equality join key, or issue separate queries.");
 
     /// <summary>
     /// ExecuteUpdate. The provider writes one of two forms.

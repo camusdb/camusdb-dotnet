@@ -62,20 +62,19 @@ public class CamusSqlTranslatingExpressionVisitor : RelationalSqlTranslatingExpr
     }
 
     /// <summary>
-    /// <see cref="Math.Max(double, double)"/>, also nested, which EF Core flattens into one list. The server
-    /// has no <c>greatest</c>, so the provider writes <c>CASE WHEN a &gt;= b AND a &gt;= c THEN a WHEN b &gt;= c
-    /// THEN b ELSE c END</c>. Each argument is evaluated more than one time, so a volatile argument such as
-    /// <c>EF.Functions.Random()</c> can give different values. A NULL argument makes its comparisons NULL,
-    /// so the result moves to the next argument.
+    /// <see cref="Math.Max(double, double)"/>, also nested, which EF Core flattens into one list:
+    /// <c>greatest(a, b, c)</c> (server commit 59255b81). The server follows PostgreSQL: it leaves a NULL
+    /// argument out, and the result is NULL only when every argument is NULL. Each argument runs one time.
+    /// The result has the common type of the arguments, by the rule of CASE and COALESCE.
     /// </summary>
     public override SqlExpression? GenerateGreatest(IReadOnlyList<SqlExpression> expressions, Type resultType)
-        => GenerateExtreme(expressions, resultType, greatest: true);
+        => GenerateExtremum("greatest", expressions, resultType);
 
-    /// <summary><see cref="Math.Min(double, double)"/>: the <c>&lt;=</c> form of <see cref="GenerateGreatest"/>.</summary>
+    /// <summary><see cref="Math.Min(double, double)"/>: <c>least(a, b, c)</c>, with the rules of <see cref="GenerateGreatest"/>.</summary>
     public override SqlExpression? GenerateLeast(IReadOnlyList<SqlExpression> expressions, Type resultType)
-        => GenerateExtreme(expressions, resultType, greatest: false);
+        => GenerateExtremum("least", expressions, resultType);
 
-    private SqlExpression? GenerateExtreme(IReadOnlyList<SqlExpression> expressions, Type resultType, bool greatest)
+    private SqlExpression? GenerateExtremum(string name, IReadOnlyList<SqlExpression> expressions, Type resultType)
     {
         if (expressions.Count == 0)
             return null;
@@ -87,22 +86,9 @@ public class CamusSqlTranslatingExpressionVisitor : RelationalSqlTranslatingExpr
         if (values.Length == 1)
             return values[0];
 
-        List<CaseWhenClause> clauses = [];
-        for (int i = 0; i < values.Length - 1; i++)
-        {
-            SqlExpression? test = null;
-            for (int j = i + 1; j < values.Length; j++)
-            {
-                SqlExpression compare = greatest
-                    ? sql.GreaterThanOrEqual(values[i], values[j])
-                    : sql.LessThanOrEqual(values[i], values[j]);
-                test = test == null ? compare : sql.AndAlso(test, compare);
-            }
-
-            clauses.Add(new CaseWhenClause(test!, values[i]));
-        }
-
-        return sql.Case(clauses, values[^1]);
+        // No argument propagates NULL: a NULL argument is left out, so EF must not fold the call to NULL.
+        return sql.Function(
+            name, values, nullable: true, argumentsPropagateNullability: new bool[values.Length], resultType, mapping);
     }
 
     /// <summary>

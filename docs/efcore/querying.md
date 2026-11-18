@@ -16,7 +16,7 @@ List<Robot> active = await ctx.Robots
     .ToListAsync();
 ```
 
-Translated to SQL: `Where`, `OrderBy`/`ThenBy`, `Skip`/`Take`, `Distinct`, `Count`, `Sum`, `Average`, `Min`, `Max`, `Any`, `GroupBy` with an aggregate, [joins](#joins) and correlated subqueries (`Where(x => x.Items.Any(...))`).
+Translated to SQL: `Where`, `OrderBy`/`ThenBy`, `Skip`/`Take`, `Distinct`, `Count`, `Sum`, `Average`, `Min`, `Max`, `Any`, `GroupBy` with an aggregate, [joins](#joins), [inline and parameter collections](#inline-and-parameter-collections) and correlated subqueries (`Where(x => x.Items.Any(...))`).
 
 These `string` members run on the server:
 
@@ -171,7 +171,7 @@ var near = await ctx.Places
 ```
 
 - `abs`, `ceil`, `floor`, `trunc` and `round` translate for `double` and `decimal`. `Math.Abs` and `Math.Sign` also translate for `short`, `int` and `long`. The other functions translate for `double`.
-- `Math.Max(a, b)` and `Math.Min(a, b)` are a `CASE` expression, because the server has no `greatest` or `least`: `CASE WHEN a >= b THEN a ELSE b END`. Each argument can run more than one time.
+- `Math.Max(a, b)` and `Math.Min(a, b)` are `greatest(a, b)` and `least(a, b)`. Nested calls become one call: `Math.Max(Math.Max(a, b), c)` is `greatest(a, b, c)`. The server leaves a `NULL` argument out, and the result is `NULL` only when every argument is `NULL`. These need a server from 2026-11-17 or later. Earlier versions of the provider wrote a `CASE` expression.
 - `EF.Functions.Random()` is `random()`. Earlier versions of the provider wrote `RAND()`, which the server does not have.
 - `Math.Round` without `MidpointRounding.AwayFromZero` does not translate. .NET rounds a midpoint to the even number, and the server rounds it away from zero.
 - `Math.Sign(decimal)` does not translate, because the server returns a `numeric` for it.
@@ -326,6 +326,9 @@ An outer join (`LEFT`/`RIGHT`) also returns unmatched rows. Outer and cross join
 | `Include(...)` of a collection or an optional reference, an optional navigation (`o.Customer!.Name`), `join … into g from x in g.DefaultIfEmpty()`, `LeftJoin(...)` | `LEFT JOIN` |
 | `RightJoin(...)` | `RIGHT JOIN` |
 | `from a in A from b in B` (no correlation) | `CROSS JOIN` |
+| `from a in A from b in B.Where(b => b.X > a.Y).Take(n)` (a correlation that is not an equality key) | `CROSS JOIN LATERAL (…)` |
+| the same with `.DefaultIfEmpty()`, or a projected collection with `Take`/`Skip` | `LEFT JOIN LATERAL (…) ON TRUE` |
+| `Take`/`Skip`/`First` for each row: `Include(c => c.Orders.OrderBy(...).Take(n))`, `SelectMany` over `c.Orders.Take(n)`, a per-group `First()` | `ROW_NUMBER() OVER (PARTITION BY … ORDER BY …)` in a derived table |
 
 ```csharp
 // Customers with their orders; a customer with no order gets an empty collection.
@@ -340,12 +343,36 @@ var rows = await ctx.Customers
 
 An unmatched row gets `NULL` for the other side: a `null` entity, a `null` projection member, or no `Include` element. For `RightJoin`, a `Where` on the left operand runs before the join, so unmatched right rows stay; the left operand can be a join.
 
-With no lateral joins or window functions, these throw `InvalidOperationException`:
+```csharp
+// The two largest orders of each customer, also for a customer with no order.
+var top = await ctx.Customers
+    .Select(c => new { c.Name, Top = c.Orders.Where(o => o.Total > c.Limit).OrderByDescending(o => o.Total).Take(2).ToList() })
+    .ToListAsync();   // LEFT JOIN LATERAL (SELECT … ORDER BY … LIMIT 2) AS `o0` ON TRUE
+```
 
-- A `SelectMany` or join correlated outside an equality key, e.g. `from o in ctx.Orders.Where(o => o.Total > c.Limit + 1)`. Use an equality key or separate queries.
-- `Take`/`Skip`/`First` per row: `Include(c => c.Orders.OrderBy(...).Take(n))`, `SelectMany` over `c.Orders.Take(n)`, a per-group `First()`. Load it separately and `Take` on the client.
+- The server runs a `LATERAL` join as a nested loop. The body runs once for each left row, and left rows with the same values share one run. The server keeps the written join order. `LATERAL` needs a server from 2026-11-15 or later.
+- `ROW_NUMBER()` needs a server from 2026-10-30 or later. When the inner sequence has no order and no key (a keyless entity), the provider writes `OVER (PARTITION BY …)` with no `ORDER BY`, and the row that `First()` or `Take` keeps is not defined.
+- Earlier versions of the provider threw `InvalidOperationException` for these shapes.
 
 `FULL JOIN` is not supported.
+
+### Inline and parameter collections
+
+An array in the query that is used for more than `Contains` becomes a `VALUES` list: an inline array (`new[] { c.Id, c.ParentId }`) or a parameter array (`ids`). `ids.Contains(x)` stays `x IN (@ids1, @ids2, …)`.
+
+```csharp
+long[] ids = [1, 2, 3];
+var rows = await ctx.Customers.Where(c => ids.Any(i => i > c.Id)).ToListAsync();
+// WHERE EXISTS (SELECT 1 FROM (VALUES (@ids1), (@ids2), (@ids3)) AS `i` (`Value`) WHERE `i`.`Value` > `c`.`Id`)
+
+var largest = await ctx.Customers.Select(c => new[] { c.Id, c.RegionId, 4L }.Where(v => v < 9).Max()).ToListAsync();
+// SELECT (SELECT MAX(`v`.`Value`) FROM (VALUES (`c`.`Id`), (`c`.`RegionId`), (4)) AS `v` (`Value`) WHERE `v`.`Value` < 9) …
+```
+
+- `new[] { a, b }.Max()` and `.Min()` with no filter are `greatest(a, b)` and `least(a, b)`.
+- An empty parameter array reads no rows; the provider does not send a `VALUES` list for it.
+- An item that applies an operator to a parameter, such as `c.Id - offset`, is written as ``CAST(`c`.`Id` - @offset AS int64)``. The server gives such an item the type `string` in a `VALUES` column, so the cast gives it its real type.
+- A `VALUES` list needs a server from 2026-11-16 or later. Earlier versions of the provider wrote `SELECT … UNION ALL VALUES …`, which the server does not parse.
 
 ### Set operations
 
