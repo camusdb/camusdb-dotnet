@@ -111,11 +111,14 @@ internal static class SequentialPipeline
 
         try
         {
-            await transport.FinalizeTransactionAsync(
+            CamusHlcTimestamp? commitTimestamp = await transport.FinalizeTransactionAsync(
                 commit: true, request.Endpoint, request.Database, txnIdPT!.Value, txnIdCounter!.Value, streamSlot,
                 request.TimeoutSeconds, cancellationToken).ConfigureAwait(false);
             exchanges++;
-            return new PipelineTransportResult { Started = started, Statements = outcomes, Committed = true, Exchanges = exchanges };
+            return new PipelineTransportResult
+            {
+                Started = started, Statements = outcomes, Committed = true, CommitTimestamp = commitTimestamp, Exchanges = exchanges,
+            };
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

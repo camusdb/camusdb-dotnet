@@ -16,6 +16,7 @@ namespace CamusDB.Client;
 [JsonSerializable(typeof(CamusDropDatabaseResponse))]
 [JsonSerializable(typeof(CamusExecuteDDLRequest))]
 [JsonSerializable(typeof(CamusExecuteDDLResponse))]
+[JsonSerializable(typeof(CamusCommitTransactionResponse))]
 [JsonSerializable(typeof(CamusExecuteSqlNonQueryRequest))]
 [JsonSerializable(typeof(CamusExecuteSqlNonQueryResponse))]
 [JsonSerializable(typeof(CamusExecuteSqlQueryRequest))]

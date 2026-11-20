@@ -59,8 +59,9 @@ public class TestGrpcBatcher
         await using GrpcBatcher batcher = new(new GrpcBatchOptions { ChannelPoolSize = 1 }, id => new FakeTransport(id));
 
         int slot = batcher.ReserveSlot();
-        BatchCausalToken token = await batcher.EnqueueCommitAsync(new SqlRequest(), slot, default);
-        Assert.Equal(9, token.L);
+        BatchCommitResult result = await batcher.EnqueueCommitAsync(new SqlRequest(), slot, default);
+        Assert.Equal(9, result.Token.L);
+        Assert.Equal(new CamusHlcTimestamp { N = 2, L = 8, C = 3 }, result.CommitTimestamp);
 
         await batcher.EnqueueRollbackAsync(new SqlRequest(), slot, default);   // completes without throwing
     }
@@ -222,7 +223,7 @@ public class TestGrpcBatcher
                     break;
 
                 case BatchStatementKind.Commit:
-                    yield return new BatchExecuteResponse { RequestId = id, CommitReply = new CommitReply { CausalTokenN = 1, CausalTokenL = 9, CausalTokenC = 1 } };
+                    yield return new BatchExecuteResponse { RequestId = id, CommitReply = new CommitReply { CausalTokenN = 1, CausalTokenL = 9, CausalTokenC = 1, CommitTimestampN = 2, CommitTimestampL = 8, CommitTimestampC = 3 } };
                     break;
 
                 case BatchStatementKind.Rollback:

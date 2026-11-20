@@ -39,7 +39,7 @@ internal sealed class AuthenticatingTransport(ICamusTransport inner, CamusTokenP
         string endpoint, string database, CamusTransactionOptions options, int timeoutSeconds, CancellationToken cancellationToken)
         => RunAsync(ct => inner.StartTransactionAsync(endpoint, database, options, timeoutSeconds, ct), cancellationToken);
 
-    public Task FinalizeTransactionAsync(
+    public Task<CamusHlcTimestamp?> FinalizeTransactionAsync(
         bool commit, string endpoint, string database, long txnIdPT, uint txnIdCounter, int? streamSlot, int timeoutSeconds, CancellationToken cancellationToken)
         => RunAsync(ct => inner.FinalizeTransactionAsync(commit, endpoint, database, txnIdPT, txnIdCounter, streamSlot, timeoutSeconds, ct), cancellationToken);
 

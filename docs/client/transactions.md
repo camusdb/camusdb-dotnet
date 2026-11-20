@@ -1,6 +1,6 @@
 # Transactions
 
-Explicit transactions in `CamusDB.Client`: pipelining, isolation, locking, and retries.
+Explicit transactions in `CamusDB.Client`: pipelining, isolation, locking, retries, and the commit timestamp.
 
 ## Transactions
 
@@ -173,3 +173,37 @@ while (true)
     }
 }
 ```
+
+## Commit timestamp
+
+After a successful commit, `CamusTransaction.CommitTimestamp` holds the commit timestamp of the transaction. This is the hybrid logical clock (HLC) timestamp that the server gives to every write of the transaction. An HLC timestamp is a wall-clock time `L`, a counter `C` and a node id `N`.
+
+```csharp
+await using CamusTransaction tx = await connection.BeginTransactionAsync();
+// ... writes ...
+await tx.CommitAsync();
+
+CamusHlcTimestamp? committedAt = tx.CommitTimestamp;   // for example HLC(2:1795124033385:7)
+```
+
+A pipeline commit (`pipeline.CommitAsync()`) sets it too. With EF Core, read it from `(CamusTransaction)context.Database.CurrentTransaction!.GetDbTransaction()` after the commit.
+
+The value is `null` in these cases:
+
+- Before the commit, and after a rollback or a failed commit.
+- The transaction wrote nothing, for example a read-only transaction.
+- The server is older than CamusDB 0.18.4.
+
+Autocommit statements do not report it. A commit that the driver retries after `CADB0509` reports the value of the commit that landed.
+
+`CamusHlcTimestamp` compares by `L`, then `C`, then `N`, as the server does. Use `<`, `>` or `CompareTo`. These rules say which commits are in that order:
+
+- **Two transactions that write the same row:** always in commit-timestamp order, on every node.
+- **A transaction that reads a value and then commits:** above the commit of that value for an optimistic transaction (`CamusLocking.Optimistic`), and for a read of a row that the transaction already wrote. Other reads of a pessimistic transaction (the default) give no such promise.
+- **Other cases:** no order is promised. Two transactions that share no row get their timestamps from clocks on different nodes.
+
+For the full rules, see [Commit timestamp](https://github.com/camusdb/camusdb/blob/main/docs/transactions-locking-and-isolation.md#95-commit-timestamp) in the server documentation.
+
+To put the requests of one client session in order across processes, make each request write the same row, for example a row that holds the last request number of the session. The first rule then orders the commits.
+
+The commit timestamp is not the causal token. The causal token is a later reading of the server clock that the driver sends on later requests, so that they see the commit. It does not give the order of commits.

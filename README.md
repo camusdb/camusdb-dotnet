@@ -49,7 +49,7 @@ The links are absolute because NuGet shows this file as the package page.
 | [Data types](https://github.com/camusdb/camusdb-dotnet/blob/main/docs/client/data-types.md) | Column types, NUMERIC, JSONB, large values |
 | [Writing data](https://github.com/camusdb/camusdb-dotnet/blob/main/docs/client/writing-data.md) | INSERT, RETURNING, ON CONFLICT, UPSERT |
 | [Reading data](https://github.com/camusdb/camusdb-dotnet/blob/main/docs/client/reading-data.md) | SELECT, streaming results, query result cache |
-| [Transactions](https://github.com/camusdb/camusdb-dotnet/blob/main/docs/client/transactions.md) | Transactions, isolation, locking, retries |
+| [Transactions](https://github.com/camusdb/camusdb-dotnet/blob/main/docs/client/transactions.md) | Transactions, isolation, locking, retries, commit timestamp |
 | [Prepared statements](https://github.com/camusdb/camusdb-dotnet/blob/main/docs/client/prepared-statements.md) | Automatic and explicit statement preparation |
 | [C# extensions](https://github.com/camusdb/camusdb-dotnet/blob/main/docs/client/csharp-extensions.md) | Stored procedures, triggers, extension functions and inline functions written in C# |
 | [Backups](https://github.com/camusdb/camusdb-dotnet/blob/main/docs/client/backups.md) | Online backups and point-in-time recovery |

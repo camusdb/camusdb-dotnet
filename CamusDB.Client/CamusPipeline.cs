@@ -209,7 +209,7 @@ public sealed class CamusPipeline
             }
 
             if (commit && result.Committed)
-                transaction.MarkCommitted();
+                transaction.MarkCommitted(result.CommitTimestamp);
 
             if (result.FirstFailure is { } first)
                 ExceptionDispatchInfo.Capture(first).Throw();

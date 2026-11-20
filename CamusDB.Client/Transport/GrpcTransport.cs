@@ -205,7 +205,7 @@ internal sealed class GrpcTransport(CamusEndpointPool endpoints, CamusTokenProvi
         }
     }
 
-    public async Task FinalizeTransactionAsync(
+    public async Task<CamusHlcTimestamp?> FinalizeTransactionAsync(
         bool commit, string endpoint, string database, long txnIdPT, uint txnIdCounter, int? streamSlot, int timeoutSeconds, CancellationToken cancellationToken)
     {
         await EnsureTokenAsync(cancellationToken).ConfigureAwait(false);
@@ -220,13 +220,13 @@ internal sealed class GrpcTransport(CamusEndpointPool endpoints, CamusTokenProvi
         {
             if (commit)
             {
-                BatchCausalToken reply = await batcher.EnqueueCommitAsync(wire, slot, token).ConfigureAwait(false);
-                ObserveToken(reply);
+                BatchCommitResult reply = await batcher.EnqueueCommitAsync(wire, slot, token).ConfigureAwait(false);
+                ObserveToken(reply.Token);
+                return reply.CommitTimestamp;
             }
-            else
-            {
-                await batcher.EnqueueRollbackAsync(wire, slot, token).ConfigureAwait(false);
-            }
+
+            await batcher.EnqueueRollbackAsync(wire, slot, token).ConfigureAwait(false);
+            return null;
         }
         catch (RpcException ex)
         {
@@ -588,14 +588,16 @@ internal sealed class GrpcTransport(CamusEndpointPool endpoints, CamusTokenProvi
         }
 
         bool committed = false;
+        CamusHlcTimestamp? commitTimestamp = null;
         Exception? commitFailure = null;
         if (request.Commit)
         {
             Task<object?> commit = tasks[next];
-            if (commit.IsCompletedSuccessfully && commit.Result is BatchCausalToken token)
+            if (commit.IsCompletedSuccessfully && commit.Result is BatchCommitResult reply)
             {
-                ObserveToken(token);
+                ObserveToken(reply.Token);
                 committed = true;
+                commitTimestamp = reply.CommitTimestamp;
             }
             else
             {
@@ -609,6 +611,7 @@ internal sealed class GrpcTransport(CamusEndpointPool endpoints, CamusTokenProvi
             StartFailure = startFailure,
             Statements = outcomes,
             Committed = committed,
+            CommitTimestamp = commitTimestamp,
             CommitFailure = commitFailure,
             Exchanges = 1,
         };

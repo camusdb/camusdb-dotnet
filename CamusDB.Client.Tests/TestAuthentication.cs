@@ -726,7 +726,7 @@ public class TestAuthentication
         public Task<StartTransactionResult> StartTransactionAsync(string endpoint, string database, CamusTransactionOptions options, int timeoutSeconds, CancellationToken cancellationToken)
             => throw new NotSupportedException();
 
-        public Task FinalizeTransactionAsync(bool commit, string endpoint, string database, long txnIdPT, uint txnIdCounter, int? streamSlot, int timeoutSeconds, CancellationToken cancellationToken)
+        public Task<CamusHlcTimestamp?> FinalizeTransactionAsync(bool commit, string endpoint, string database, long txnIdPT, uint txnIdCounter, int? streamSlot, int timeoutSeconds, CancellationToken cancellationToken)
             => throw new NotSupportedException();
 
         public Task<QueryTransportResult> ExecuteQueryAsync(TransportSqlRequest request, CancellationToken cancellationToken)

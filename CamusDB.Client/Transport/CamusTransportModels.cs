@@ -271,6 +271,10 @@ internal sealed class PipelineTransportResult
     /// <summary>True when the pipeline asked for a commit and the transaction committed.</summary>
     public bool Committed { get; init; }
 
+    /// <summary>The commit timestamp of the transaction when <see cref="Committed"/> is true. Null when
+    /// the transaction wrote nothing, and when the server is older than the field.</summary>
+    public CamusHlcTimestamp? CommitTimestamp { get; init; }
+
     /// <summary>Why the commit did not happen: the first failed step, or the commit's own failure.
     /// Null when no commit was asked for, or it succeeded.</summary>
     public Exception? CommitFailure { get; init; }

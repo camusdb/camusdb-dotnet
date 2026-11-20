@@ -127,8 +127,8 @@ internal sealed class GrpcBatcher : IAsyncDisposable
     public Task<TxnHandle> EnqueueStartAsync(SqlRequest request, int slotIndex, CancellationToken ct)
         => EnqueueAsync<TxnHandle>(BatchStatementKind.Start, request, slotIndex, ct);
 
-    public Task<BatchCausalToken> EnqueueCommitAsync(SqlRequest request, int slotIndex, CancellationToken ct)
-        => EnqueueAsync<BatchCausalToken>(BatchStatementKind.Commit, request, slotIndex, ct);
+    public Task<BatchCommitResult> EnqueueCommitAsync(SqlRequest request, int slotIndex, CancellationToken ct)
+        => EnqueueAsync<BatchCommitResult>(BatchStatementKind.Commit, request, slotIndex, ct);
 
     public async Task EnqueueRollbackAsync(SqlRequest request, int slotIndex, CancellationToken ct)
         => await EnqueueAsync<object?>(BatchStatementKind.Rollback, request, slotIndex, ct).ConfigureAwait(false);
@@ -138,7 +138,7 @@ internal sealed class GrpcBatcher : IAsyncDisposable
     /// an optional START at the head, which every later op names by <c>txn_start_ref</c> instead of a
     /// handle that does not exist yet; statements; and an optional COMMIT_IF_OK at the end. Returns one
     /// task per op, completed by that op's own answer — a <see cref="TxnHandle"/>, a
-    /// <see cref="BatchQueryResult"/>, a <see cref="BatchNonQueryResult"/>, a <see cref="BatchCausalToken"/>
+    /// <see cref="BatchQueryResult"/>, a <see cref="BatchNonQueryResult"/>, a <see cref="BatchCommitResult"/>
     /// — or faulted with its own error, as a lone op's is.
     ///
     /// <para>The ops are placed on the slot's inbox together, so no other op of the same transaction can
@@ -971,8 +971,7 @@ internal sealed class GrpcBatcher : IAsyncDisposable
                 Complete(op, resp.StartReply);
                 break;
             case BatchExecuteResponse.PayloadOneofCase.CommitReply:
-                Complete(op, new BatchCausalToken(
-                    resp.CommitReply.CausalTokenN, resp.CommitReply.CausalTokenL, resp.CommitReply.CausalTokenC));
+                Complete(op, BatchCommitResult.FromReply(resp.CommitReply));
                 break;
             case BatchExecuteResponse.PayloadOneofCase.RollbackReply:
                 Complete(op, null);

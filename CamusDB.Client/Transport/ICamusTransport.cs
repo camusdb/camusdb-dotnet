@@ -32,8 +32,11 @@ internal interface ICamusTransport
     /// <summary>Commits (<paramref name="commit"/> = true) or rolls back the transaction identified by the
     /// handle. A single attempt — the caller owns the CADB0509 finalize-retry loop. <paramref name="streamSlot"/>
     /// is the slot returned by <see cref="StartTransactionAsync"/> (gRPC pins the finalize to the same
-    /// stream as the transaction's statements); REST ignores it.</summary>
-    Task FinalizeTransactionAsync(
+    /// stream as the transaction's statements); REST ignores it.
+    ///
+    /// <para>Returns the commit timestamp of the transaction on a commit. Returns null on a rollback,
+    /// for a transaction that wrote nothing, and when the server is older than the field.</para></summary>
+    Task<CamusHlcTimestamp?> FinalizeTransactionAsync(
         bool commit, string endpoint, string database, long txnIdPT, uint txnIdCounter, int? streamSlot, int timeoutSeconds, CancellationToken cancellationToken);
 
     /// <summary>Runs a <c>SELECT</c> and returns its decoded result set (schema + rows) plus cache metadata.</summary>

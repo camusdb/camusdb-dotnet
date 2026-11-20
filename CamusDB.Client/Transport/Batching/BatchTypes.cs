@@ -38,6 +38,22 @@ internal readonly struct BatchCausalToken(int n, long l, long c)
     public bool IsEmpty => N == 0 && L == 0 && C == 0;
 }
 
+/// <summary>
+/// Result of a batched COMMIT or COMMIT_IF_OK: the causal token, and the commit timestamp of the
+/// transaction. The commit timestamp is null when the transaction wrote nothing, and when the server
+/// is older than the field.
+/// </summary>
+internal sealed class BatchCommitResult(BatchCausalToken token, CamusHlcTimestamp? commitTimestamp)
+{
+    public BatchCausalToken Token { get; } = token;
+
+    public CamusHlcTimestamp? CommitTimestamp { get; } = commitTimestamp;
+
+    public static BatchCommitResult FromReply(CommitReply reply) => new(
+        new BatchCausalToken(reply.CausalTokenN, reply.CausalTokenL, reply.CausalTokenC),
+        CamusHlcTimestamp.FromWire(reply.CommitTimestampN, reply.CommitTimestampL, reply.CommitTimestampC));
+}
+
 /// <summary>Materialized result of a batched QUERY: the output-column schema, the positional rows, and the
 /// trailing causal token. Rows align to <see cref="Schema"/> by position.</summary>
 internal sealed class BatchQueryResult(

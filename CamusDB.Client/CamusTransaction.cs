@@ -91,6 +91,25 @@ public class CamusTransaction : DbTransaction
     public string TransactionId => string.Concat(txnIdPT, ":", txnIdCounter);
 
     /// <summary>
+    /// The commit timestamp of the transaction: the hybrid logical clock (HLC) timestamp that the server
+    /// gives to every write of the transaction. It is set when <see cref="CommitAsync"/>,
+    /// <see cref="Commit"/> or <see cref="CamusPipeline.CommitAsync"/> succeeds.
+    ///
+    /// <para>It is null in these cases:</para>
+    /// <list type="bullet">
+    /// <item>Before the commit, and after a rollback or a failed commit.</item>
+    /// <item>After the commit of a transaction that wrote nothing, for example a read-only transaction.</item>
+    /// <item>When the server is older than this field (before CamusDB server 0.18.4).</item>
+    /// </list>
+    ///
+    /// <para>Two transactions that write the same row are in commit-timestamp order. For other conflicts
+    /// the order is not always promised; see the "Commit timestamp" section of the client transactions
+    /// guide. A commit that the driver retries after <c>CADB0509</c> reports the value of the commit that
+    /// landed.</para>
+    /// </summary>
+    public CamusHlcTimestamp? CommitTimestamp { get; private set; }
+
+    /// <summary>
     /// Opaque transport routing hint set when the transaction starts. For the gRPC batching transport it
     /// is the reserved <c>BatchExecute</c> stream slot this transaction's statements and finalize pin to
     /// (so the server orders them on one stream); null under REST, which does not pin.
@@ -219,9 +238,11 @@ public class CamusTransaction : DbTransaction
     /// <summary>Seats the identity a pipeline's <c>BEGIN</c> minted; the pipeline settles its claim after this.</summary>
     internal void SeatStart(in StartTransactionResult result, string target) => Seat(result, target);
 
-    /// <summary>Records that a pipeline's conditional commit committed this transaction.</summary>
-    internal void MarkCommitted()
+    /// <summary>Records that a pipeline's conditional commit committed this transaction, and the commit
+    /// timestamp that the commit reported.</summary>
+    internal void MarkCommitted(CamusHlcTimestamp? commitTimestamp)
     {
+        CommitTimestamp = commitTimestamp;
         committed = true;
         finished = true;
     }
@@ -314,9 +335,13 @@ public class CamusTransaction : DbTransaction
             {
                 try
                 {
-                    await builder.GetTransport()
+                    // Only the attempt that answers sets the value: a CADB0509 attempt throws before
+                    // this line, and the retry on the same handle reports the commit that landed.
+                    CamusHlcTimestamp? commitTimestamp = await builder.GetTransport()
                         .FinalizeTransactionAsync(commit, target, builder.Config["Database"], txnIdPT, txnIdCounter, StreamSlot, builder.CommandTimeout, cancellationToken)
                         .ConfigureAwait(false);
+                    if (commit)
+                        CommitTimestamp = commitTimestamp;
                     finished = true;
                     operation?.Complete();
                     return;

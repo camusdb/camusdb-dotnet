@@ -61,7 +61,9 @@ public class TestGrpcBatcherPipeline
 
         Assert.Equal(2, Assert.IsType<BatchQueryResult>(await tasks[1]).Rows.Count);
         Assert.Equal(1, Assert.IsType<BatchNonQueryResult>(await tasks[2]).AffectedRows);
-        Assert.Equal(5, Assert.IsType<BatchCausalToken>(await tasks[3]).L);
+        BatchCommitResult commit = Assert.IsType<BatchCommitResult>(await tasks[3]);
+        Assert.Equal(5, commit.Token.L);
+        Assert.Equal(new CamusHlcTimestamp { N = 1, L = 4, C = 2 }, commit.CommitTimestamp);
         Assert.Equal([handle.TxnIdPt], h.Transport(0).Committed);
     }
 
@@ -427,7 +429,7 @@ public class TestGrpcBatcherPipeline
                     }
                     transactions.Remove(txn.TxnIdPt);
                     committed.Enqueue(txn.TxnIdPt);
-                    yield return new BatchExecuteResponse { RequestId = id, CommitReply = new CommitReply { CausalTokenL = 5 } };
+                    yield return new BatchExecuteResponse { RequestId = id, CommitReply = new CommitReply { CausalTokenL = 5, CommitTimestampN = 1, CommitTimestampL = 4, CommitTimestampC = 2 } };
                     break;
 
                 case BatchStatementKind.Rollback:

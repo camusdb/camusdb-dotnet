@@ -72,7 +72,7 @@ internal sealed class RestTransport(CamusEndpointPool endpoints, CamusTokenProvi
         }
     }
 
-    public async Task FinalizeTransactionAsync(
+    public async Task<CamusHlcTimestamp?> FinalizeTransactionAsync(
         bool commit, string endpoint, string database, long txnIdPT, uint txnIdCounter, int? streamSlot, int timeoutSeconds, CancellationToken cancellationToken)
     {
         _ = streamSlot;   // REST does not pin transactions to a stream.
@@ -95,10 +95,13 @@ internal sealed class RestTransport(CamusEndpointPool endpoints, CamusTokenProvi
                 .PostAsync(CamusJsonContent.Create(request, CamusJsonSerializerContext.Default.CamusTransactionRequest), cancellationToken: cancellationToken)
                 .ReceiveBytes();
 
-            CamusExecuteDDLResponse? response = JsonSerializer.Deserialize(responseBytes, CamusJsonSerializerContext.Default.CamusExecuteDDLResponse);
+            CamusCommitTransactionResponse? response = JsonSerializer.Deserialize(responseBytes, CamusJsonSerializerContext.Default.CamusCommitTransactionResponse);
 
             if (response?.Status != "ok")
                 throw new CamusException("CADB0000", failureMessage);
+
+            // The server sends null for "no commit timestamp"; an all-zero object means the same.
+            return commit && response.CommitTimestamp is { IsZero: false } commitTimestamp ? commitTimestamp : null;
         }
         catch (FlurlHttpException ex)
         {

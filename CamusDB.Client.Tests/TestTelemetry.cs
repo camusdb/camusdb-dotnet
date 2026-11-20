@@ -413,6 +413,9 @@ public sealed class TestTelemetry : IDisposable
         /// <summary>How many finalize calls fail with <c>CADB0509</c> before one succeeds.</summary>
         public int FinalizeFailures { get; set; }
 
+        /// <summary>The commit timestamp that a successful commit reports.</summary>
+        public CamusHlcTimestamp? CommitTimestamp { get; set; }
+
         public Exception? PrepareFailure { get; set; }
 
         public int PrepareCalls => Volatile.Read(ref prepareCalls);
@@ -430,13 +433,13 @@ public sealed class TestTelemetry : IDisposable
         public Task<StartTransactionResult> StartTransactionAsync(string endpoint, string database, CamusTransactionOptions options, int timeoutSeconds, CancellationToken cancellationToken)
             => Task.FromResult(new StartTransactionResult(1, 1));
 
-        public Task FinalizeTransactionAsync(bool commit, string endpoint, string database, long txnIdPT, uint txnIdCounter, int? streamSlot, int timeoutSeconds, CancellationToken cancellationToken)
+        public Task<CamusHlcTimestamp?> FinalizeTransactionAsync(bool commit, string endpoint, string database, long txnIdPT, uint txnIdCounter, int? streamSlot, int timeoutSeconds, CancellationToken cancellationToken)
         {
             if (FinalizeFailures <= 0)
-                return Task.CompletedTask;
+                return Task.FromResult(commit ? CommitTimestamp : null);
 
             FinalizeFailures--;
-            return Task.FromException(new CamusException("CADB0509", "finalize outcome unresolved"));
+            return Task.FromException<CamusHlcTimestamp?>(new CamusException("CADB0509", "finalize outcome unresolved"));
         }
 
         public Task<QueryTransportResult> ExecuteQueryAsync(TransportSqlRequest request, CancellationToken cancellationToken)
